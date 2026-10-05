@@ -408,6 +408,7 @@ func TestListenerRecoverAllAfterRestart(t *testing.T) {
 
 	restarted, err := NewListener(api, d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", state, zap.NewNop())
 	require.NoError(t, err)
+	restarted.Now = first.Now // same clock, so the ledger's retention pruning keeps the earlier deliveries
 	restarted.RecoverAll(context.Background())
 	require.Len(t, d.got, 2)
 	for _, got := range d.got {
