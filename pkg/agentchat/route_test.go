@@ -22,16 +22,24 @@ func resolveUser(name string) string {
 	return ""
 }
 
-func TestMentionsTokens(t *testing.T) {
-	got := Mentions("<@UCR> and <@UBRIAN> please", resolveUser)
+func TestLeadingMentionsTokens(t *testing.T) {
+	got := LeadingMentions("<@UCR> and <@UBRIAN|brian>: please", resolveUser)
 	assert.Equal(t, []string{"UCR", "UBRIAN"}, got)
 }
 
-func TestMentionsPlainNames(t *testing.T) {
-	got := Mentions("@codex-r, can you check? cc @claude. thanks @brian", resolveUser)
-	assert.ElementsMatch(t, []string{"UCR", "UCL", "UBR"}, got)
-	assert.Empty(t, Mentions("mail me at x@codex-r.com", resolveUser))
-	assert.Empty(t, Mentions("@nobody-known here", resolveUser))
+func TestLeadingMentionsPlainNames(t *testing.T) {
+	got := LeadingMentions("  @codex-r, @claude & @brian: can you check?", resolveUser)
+	assert.Equal(t, []string{"UCR", "UCL", "UBR"}, got)
+	assert.Equal(t, []string{"UCL"}, LeadingMentions("@claude. thanks @brian", resolveUser))
+	assert.Empty(t, LeadingMentions("mail me at x@codex-r.com", resolveUser))
+	assert.Empty(t, LeadingMentions("@nobody-known here", resolveUser))
+}
+
+func TestLeadingMentionsIgnoresLaterMentions(t *testing.T) {
+	assert.Empty(t, LeadingMentions("everyone pull main; @codex-r then rerun the tests", resolveUser))
+	assert.Empty(t, LeadingMentions("heads up <@UCR> and @claude", resolveUser))
+	assert.Empty(t, LeadingMentions("and @claude go", resolveUser), "no separator before the first mention")
+	assert.Empty(t, LeadingMentions("@nobody-known @claude go", resolveUser), "an unknown name ends the run")
 }
 
 func TestShouldDeliver(t *testing.T) {

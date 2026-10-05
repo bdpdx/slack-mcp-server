@@ -194,7 +194,7 @@ func (l *Listener) channelName(ctx context.Context, channel string) string {
 // prepare applies the routing rule and builds m's notice.
 func (l *Listener) prepare(ctx context.Context, m Message) (Notice, bool) {
 	l.loadMembers(ctx, m.Channel)
-	if !ShouldDeliver(m, l.Self, Mentions(m.Text, l.resolve)) {
+	if !ShouldDeliver(m, l.Self, LeadingMentions(m.Text, l.resolve)) {
 		return Notice{}, false
 	}
 	sender := l.name(ctx, m.User)

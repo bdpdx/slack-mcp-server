@@ -143,12 +143,13 @@ func TestListenerBroadcastDelivered(t *testing.T) {
 	l := newTestListener(t, api, d)
 	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
 
-	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.000001", User: "UCB", Text: "hi <@UCR> and all? no: just hi"})
-	require.Len(t, d.got, 0, "mentions codex-r only")
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.000001", User: "UCB", Text: "<@UCR> just hi"})
+	require.Len(t, d.got, 0, "opens with codex-r only")
 
-	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.000002", User: "UBR", Text: "status please"})
-	require.Len(t, d.got, 1)
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.000002", User: "UBR", Text: "status please; <@UCR> rerun the tests"})
+	require.Len(t, d.got, 1, "a later mention does not narrow delivery")
 	assert.Contains(t, d.got[0].text, "#proj (C1) from brian (the console user")
+	assert.Contains(t, d.got[0].text, "@codex-r rerun the tests")
 	assert.Equal(t, clientMessageID("s1", "C1", "2001.000002"), d.got[0].clientID)
 	assert.Contains(t, api.reactions, "eyes|C1|2001.000002")
 }

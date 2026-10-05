@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // Message is one Slack channel message as the listener sees it.
@@ -38,33 +39,44 @@ func (m Message) Deliverable() bool { return deliverableSubtypes[m.SubType] }
 
 var (
 	idMention   = regexp.MustCompile(`<@([UW][A-Z0-9]+)(?:\|[^>]*)?>`)
-	nameMention = regexp.MustCompile(`(?:^|[^\w<@.])@([A-Za-z0-9][A-Za-z0-9._-]*)`)
+	leadID      = regexp.MustCompile(`^<@([UW][A-Z0-9]+)(?:\|[^>]*)?>`)
+	leadName    = regexp.MustCompile(`^@([A-Za-z0-9][A-Za-z0-9._-]*)`)
+	mentionSeps = regexp.MustCompile(`^(?:[\s,:;&]|\band\b)*`)
 )
 
-// Mentions returns the user IDs that text addresses, agents and people
-// alike: Slack mention tokens (<@U…>) and plain "@name" text that resolve
-// maps to a user ID ("" when the name is unknown).
-func Mentions(text string, resolve func(name string) string) []string {
+// LeadingMentions returns the user IDs, agents and people alike, of the run of
+// mentions that opens text: Slack mention tokens (<@U…>) and plain "@name"
+// text that resolve maps to a user ID ("" when the name is unknown), separated
+// by whitespace, punctuation or "and". The run ends at the first other text,
+// so mentions later in the message are not returned.
+func LeadingMentions(text string, resolve func(name string) string) []string {
 	seen := map[string]bool{}
 	var out []string
-	add := func(id string) {
-		if id != "" && !seen[id] {
+	rest := strings.TrimLeftFunc(text, unicode.IsSpace)
+	for {
+		var id string
+		m := leadID.FindStringSubmatch(rest)
+		if m != nil {
+			id = m[1]
+		} else if m = leadName.FindStringSubmatch(rest); m != nil {
+			id = resolve(strings.TrimRight(m[1], "._-"))
+		}
+		if id == "" {
+			return out
+		}
+		if !seen[id] {
 			seen[id] = true
 			out = append(out, id)
 		}
+		rest = rest[len(m[0]):]
+		rest = rest[len(mentionSeps.FindString(rest)):]
 	}
-	for _, m := range idMention.FindAllStringSubmatch(text, -1) {
-		add(m[1])
-	}
-	for _, m := range nameMention.FindAllStringSubmatch(text, -1) {
-		add(resolve(strings.TrimRight(m[1], "._-")))
-	}
-	return out
 }
 
-// ShouldDeliver applies the routing rule. A message with no mentions goes to
-// every agent except its sender; a message with mentions goes only to the
-// agents it mentions, so one that mentions only people goes to no agent.
+// ShouldDeliver applies the routing rule to a message's leading mentions. A
+// message that does not open with a mention goes to every agent except its
+// sender, even if it mentions someone later; one that does goes only to the
+// agents it opens with, so one that opens with only people goes to no agent.
 func ShouldDeliver(m Message, self Identity, mentions []string) bool {
 	if m.From(self) {
 		return false
