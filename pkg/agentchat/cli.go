@@ -130,6 +130,10 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
                     post as the user (agents reply with conversations_add_message)
   ack CHANNEL TS    mark a message processed (adds a check-mark reaction)
   relay-hook        UserPromptSubmit hook for %agents prompts (reads stdin)
+  ask-hook          Claude PreToolUse hook for AskUserQuestion: ask in Slack
+                    instead of the terminal while watching a project
+  approval-hook     PermissionRequest hook: tell the user in Slack that the
+                    terminal is waiting for approval
   listen            run the listener in the foreground (started automatically)
 `
 
@@ -165,6 +169,10 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 0
 		}
 	}
+	var toolEvent toolHookEvent
+	if isToolHook(rest[0]) && json.NewDecoder(stdin).Decode(&toolEvent) != nil {
+		return 0
+	}
 	path, err := ResolveEnvFile(*envFile, os.Getenv)
 	if err == nil {
 		err = LoadEnvFile(path)
@@ -172,6 +180,10 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err != nil {
 		if rest[0] == "relay-hook" {
 			return emitBlock(stdout, err)
+		}
+		if isToolHook(rest[0]) {
+			fmt.Fprintf(stderr, "slack-agent-chat: %v\n", err)
+			return 0
 		}
 		fmt.Fprintf(stderr, "slack-mcp-server chat: %v\n", err)
 		return 1
@@ -197,6 +209,13 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		ctx, cancel := context.WithTimeout(ctx, relayTimeout)
 		defer cancel()
 		return c.relayHook(ctx, event)
+	case "ask-hook", "approval-hook":
+		ctx, cancel := context.WithTimeout(ctx, relayTimeout)
+		defer cancel()
+		if rest[0] == "ask-hook" {
+			return c.askHook(ctx, toolEvent)
+		}
+		return c.approvalHook(ctx, toolEvent)
 	default:
 		err = fmt.Errorf("unknown command %q", rest[0])
 	}

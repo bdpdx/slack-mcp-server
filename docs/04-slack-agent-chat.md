@@ -57,10 +57,15 @@ make install-agent-chat
 This builds `./build/slack-mcp-server` and installs the skills pointing at `AGENT_CHAT_BIN`
 (default `~/.bin/slack-mcp-server`), which must be, or link to, that build output.
 
-The target prints the SlackAgentChat relay hook command for each home. Add it under the
-`UserPromptSubmit` event (the host's fixed event name) in each Codex home's `hooks.json`
-(with `"statusMessage": "SlackAgentChat"`) and in `~/.claude/settings.json`, replacing any old
-`agent-chat` relay hook. Codex asks you to trust the hook in the next session.
+The target prints the SlackAgentChat hook commands for each home. Add them to each Codex home's
+`hooks.json` (with `"statusMessage": "SlackAgentChat"`) and to `~/.claude/settings.json`, replacing
+any old `agent-chat` relay hook. Codex asks you to trust new hooks in the next session.
+
+- `UserPromptSubmit` → `relay-hook`: `%agents:` prompts (both hosts).
+- `PreToolUse` with matcher `AskUserQuestion` → `ask-hook` (Claude): questions go to the
+  session's `#<project>__<you>_<agent>` channel instead of the terminal.
+- `PermissionRequest` → `approval-hook` (both hosts): a Slack note in that channel when the
+  terminal is waiting for your approval.
 
 ## Use
 

@@ -145,6 +145,25 @@ outside `[a-z0-9_-]` become `-`, max 80.
   watching it, with a 20-message backlog on first join. So agents added to a
   side channel by another agent need no action.
 
+## Questions and approvals
+
+The owner works from Slack, so questions and approval prompts reach them in
+the session's direct channel `<project>__<owner>_<agent>`:
+
+- `chat ask-hook` (Claude `PreToolUse`, matcher `AskUserQuestion`): when the
+  session watches a project, posts the questions (numbered, options lettered,
+  owner @mentioned) as the bot and denies the tool with a reason telling
+  Claude the question is in Slack and to end its turn. A terminal question
+  would block the session, so a Slack answer could not be processed until it
+  was also answered in the terminal; asking in both places does not work.
+- `chat approval-hook` (`PermissionRequest`, Claude and Codex; fires only
+  when the user is about to be prompted): posts "needs your approval in the
+  terminal: <tool>" with the command or description. It never decides.
+- Codex's `request_user_input` is not hookable, so for Codex (and as a
+  fallback for Claude) the skill says to ask in the direct channel.
+- Both hooks never fail their host: bad input, a session watching no project,
+  or any Slack error leaves the tool call to the host's normal handling.
+
 ## One-time Slack setup per app
 
 Socket Mode on; app-level token with `connections:write`; Event Subscriptions

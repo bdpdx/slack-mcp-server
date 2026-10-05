@@ -45,6 +45,12 @@ When a side-channel exchange settles something the others need, post the outcome
 
 Long messages are truncated in the notice; read the rest with `conversations_replies` / `conversations_history`.
 
+## Questions for the user
+
+While you watch a project, ask the user questions in your direct channel (`<project>__<user>_<you>`), never with a terminal question tool: a terminal question blocks this session, so an answer the user gives in Slack could not reach you. Post the question, @mention the user, end your turn, and continue when the answer arrives as a notice.
+
+When the terminal is waiting for the user to approve something, a hook tells them in that channel; you need not.
+
 ## `%agents:`
 
 When the user types `%agents: …` (or `%agents@<channel>: …`), the hook posts it to Slack as the user (to the project channel unless a channel is named). Carry it out yourself; do not post it again.
