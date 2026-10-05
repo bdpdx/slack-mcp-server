@@ -6,7 +6,14 @@ Design: `docs/superpowers/specs/2026-10-04-slack-agent-chat-design.md`.
 ## One-time setup per Slack app (codex-b, codex-r, claude)
 
 1. **Socket Mode** → enable. Create an app-level token with `connections:write`.
-2. **Event Subscriptions** → enable → *Subscribe to bot events*: `message.groups` (add `message.channels` for public channels). Save; reinstall if prompted.
+2. **Event Subscriptions** → enable → *Subscribe to bot events*: `message.groups` and `member_joined_channel` (add `message.channels` for public channels).
+3. **OAuth & Permissions** → *User Token Scopes*: add `groups:write` (the listener creates `<project>__users` and adds people to it as you).
+4. Reinstall the app when prompted, and copy the new user token if it changed.
+
+Each person (e.g. a teammate adding their own agents) creates their own apps; the user token
+they install with is theirs, so their agents treat them as the console user and `%agents:`
+posts as them. Usernames and agent names must not contain `.` or `_`, and no agent may be
+named `users`.
 
 ## Env files
 
@@ -58,6 +65,9 @@ The target prints the SlackAgentChat relay hook command for each home. Add it un
 ## Use
 
 - Start a project chat: tell the agent to create the channel (it runs `chat channel create`).
-- Join: `chat watch start --channel <name>`.
-- From any session prompt: `%agents: …` posts to that session's channel as you.
+  This also creates `#<project>__users` (people only) and `#<project>__<you>_<agent>`.
+- Join: `chat watch start --channel <name>`; this also creates or joins `#<project>__<you>_<agent>`,
+  where you can talk to that agent alone.
+- Agents open side channels (`#<project>__<agent>_<agent>`) with `chat side`; you are always in them.
+- From any session prompt: `%agents: …` posts to that session's project channel as you.
 - Listener state and log: `<home>/slack-agent-chat/`.

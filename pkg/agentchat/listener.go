@@ -21,6 +21,9 @@ const (
 	reactionAcked     = "white_check_mark"
 	repeatWindow      = 10 * time.Minute
 	relayExpiry       = 2 * time.Minute
+	// autoBacklog is what a session gets from a channel it starts watching
+	// because its bot was added, so it sees what was posted before.
+	autoBacklog = 20
 )
 
 // SlackAPI is the part of *slack.Client the listener uses.
@@ -31,6 +34,13 @@ type SlackAPI interface {
 	GetConversationHistoryContext(ctx context.Context, params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error)
 	GetConversationRepliesContext(ctx context.Context, params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error)
 	AddReactionContext(ctx context.Context, name string, item slack.ItemRef) error
+}
+
+// UserAPI is the part of the owner's *slack.Client (user token) the listener
+// uses to keep the project's people-only channel up to date.
+type UserAPI interface {
+	GetConversationsForUserContext(ctx context.Context, params *slack.GetConversationsForUserParameters) ([]slack.Channel, string, error)
+	InviteUsersToConversationContext(ctx context.Context, channelID string, users ...string) (*slack.Channel, error)
 }
 
 // Listener routes one home's Slack messages into its subscribed sessions.
@@ -45,6 +55,8 @@ type Listener struct {
 	// Async hands each session's deliveries to its own worker so a slow
 	// session never holds up the caller. The daemon enables it.
 	Async bool
+	// Users acts as the owner; nil leaves <project>__users alone.
+	Users UserAPI
 
 	mu       sync.Mutex
 	state    *State
@@ -110,17 +122,10 @@ func (l *Listener) isAgent(ctx context.Context, id string) bool {
 }
 
 func (l *Listener) name(ctx context.Context, id string) string {
-	u := l.user(ctx, id)
-	switch {
-	case u == nil:
-		return ""
-	case u.Profile.DisplayName != "":
-		return u.Profile.DisplayName
-	case u.RealName != "":
-		// What Slack shows for users (and bots) without a display name.
-		return u.RealName
+	if u := l.user(ctx, id); u != nil {
+		return shownName(u)
 	}
-	return u.Name
+	return ""
 }
 
 func (l *Listener) channelName(ctx context.Context, channel string) string {
@@ -183,6 +188,73 @@ func (l *Listener) HandleMessage(ctx context.Context, m Message) {
 		}
 		l.dispatch(ctx, sub, []pending{{m, n}})
 	}
+}
+
+// HandleMemberJoined reacts to someone joining a channel this bot is in. When
+// the bot itself is added to a channel derived from a project its sessions
+// watch (a side channel another agent opened), those sessions start watching
+// it. When a person joins a watched project channel, the owner adds them to
+// <project>__users.
+func (l *Listener) HandleMemberJoined(ctx context.Context, channel, user string) {
+	if user == l.Self.UserID {
+		l.autoWatch(ctx, channel)
+		return
+	}
+	if !l.isAgent(ctx, user) {
+		l.addToUsersChannel(ctx, channel, user)
+	}
+}
+
+func (l *Listener) autoWatch(ctx context.Context, channel string) {
+	project, derived := ProjectOf(l.channelName(ctx, channel))
+	if !derived {
+		return
+	}
+	l.mu.Lock()
+	var subs []Subscription
+	for _, sub := range l.state.Subscriptions {
+		if !sub.Watches(channel) {
+			subs = append(subs, *sub)
+		}
+	}
+	l.mu.Unlock()
+	for _, sub := range subs {
+		if !slices.ContainsFunc(sub.Channels, func(ch string) bool { return l.channelName(ctx, ch) == project }) {
+			continue
+		}
+		sub.Channels = []string{channel}
+		merged, first, err := l.register(&sub)
+		if err != nil {
+			l.Log.Warn("auto-watch failed", zap.String("session", sub.SessionID), zap.String("channel", channel), zap.Error(err))
+			continue
+		}
+		l.Log.Info("auto-watching", zap.String("session", sub.SessionID), zap.String("channel", channel))
+		l.recover(ctx, merged, sub.Channels, first, autoBacklog)
+	}
+}
+
+func (l *Listener) addToUsersChannel(ctx context.Context, channel, user string) {
+	if l.Users == nil {
+		return
+	}
+	l.mu.Lock()
+	watched := len(l.state.Watchers(channel)) > 0
+	l.mu.Unlock()
+	name := l.channelName(ctx, channel)
+	if _, derived := ProjectOf(name); !watched || derived {
+		return
+	}
+	target := UsersChannelName(name)
+	id, err := findChannel(ctx, l.Users, target)
+	if err != nil {
+		l.Log.Info("not adding to people channel", zap.String("channel", target), zap.String("user", user), zap.Error(err))
+		return
+	}
+	if err := inviteEach(ctx, l.Users, id, "", []string{user}); err != nil {
+		l.Log.Warn("adding to people channel failed", zap.String("channel", target), zap.String("user", user), zap.Error(err))
+		return
+	}
+	l.Log.Info("added to people channel", zap.String("channel", target), zap.String("user", user))
 }
 
 // dispatch delivers now, or with Async queues the delivery on the session's

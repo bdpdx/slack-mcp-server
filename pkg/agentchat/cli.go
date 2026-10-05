@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -110,15 +111,21 @@ const chatUsage = `usage: slack-mcp-server chat [--env-file FILE] COMMAND
 
 Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
   watch start --channel CHANNEL [--channel CHANNEL] [--backlog N]
-                    push this session the channel's messages
+                    push this session the channel's messages; for a project
+                    channel, also set up and watch #PROJECT__USER_AGENT
   watch stop [--channel CHANNEL]
                     stop pushing one channel, or all of them
   watch status      list the sessions this home's listener serves
-  channel create NAME [--invite AGENT,AGENT]
-                    create a private channel, invite the user and the named
-                    agents, and watch it
-  channel invite CHANNEL AGENT[,AGENT]
-                    add agents to a channel
+  channel create NAME [--invite AGENT,AGENT] [--invite-user USER,USER]
+                    create a private project channel, invite the user and the
+                    named agents and people, create #NAME__users for the
+                    people, and watch it as with watch start
+  channel invite CHANNEL [AGENT,AGENT] [--invite-user USER,USER]
+                    add agents or people to a channel
+  side AGENT[,AGENT] [--channel PROJECT]
+                    open (or join) the side channel #PROJECT__A_B with these
+                    agents and watch it; PROJECT defaults to the project this
+                    session watches
   post --channel CHANNEL --text TEXT [--thread TS]
                     post as the user (agents reply with conversations_add_message)
   ack CHANNEL TS    mark a message processed (adds a check-mark reaction)
@@ -180,6 +187,8 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = c.watch(ctx, rest[1:])
 	case "channel":
 		err = c.channel(ctx, rest[1:])
+	case "side":
+		err = c.side(ctx, rest[1:])
 	case "post":
 		err = c.post(ctx, rest[1:])
 	case "ack":
@@ -263,24 +272,11 @@ func (c *cli) resolveChannel(ctx context.Context, arg string) (string, string, e
 		return ch.ID, ch.Name, nil
 	}
 	name := strings.TrimPrefix(arg, "#")
-	cursor := ""
-	for {
-		chans, next, err := c.bot.GetConversationsForUserContext(ctx, &slack.GetConversationsForUserParameters{
-			Types: []string{"private_channel", "public_channel"}, ExcludeArchived: true, Limit: 200, Cursor: cursor,
-		})
-		if err != nil {
-			return "", "", err
-		}
-		for _, ch := range chans {
-			if ch.Name == name {
-				return ch.ID, ch.Name, nil
-			}
-		}
-		if next == "" {
-			return "", "", fmt.Errorf("this agent's bot is not in a channel named %q", name)
-		}
-		cursor = next
+	id, err := findChannel(ctx, c.bot, name)
+	if err != nil {
+		return "", "", fmt.Errorf("this agent's bot is %w", err)
 	}
+	return id, name, nil
 }
 
 func (c *cli) subscribe(ctx context.Context, channelIDs []string, backlog int) error {
@@ -321,13 +317,24 @@ func (c *cli) watch(ctx context.Context, args []string) error {
 		if len(channels) == 0 {
 			return errors.New("watch start needs --channel")
 		}
+		me, err := c.identity(ctx)
+		if err != nil {
+			return err
+		}
 		var ids []string
 		for _, ch := range channels {
-			id, _, err := c.resolveChannel(ctx, ch)
+			id, name, err := c.resolveChannel(ctx, ch)
 			if err != nil {
 				return err
 			}
 			ids = append(ids, id)
+			if _, derived := ProjectOf(name); !derived {
+				direct, err := c.ensureDirect(ctx, me, name)
+				if err != nil {
+					return err
+				}
+				ids = append(ids, direct)
+			}
 		}
 		return c.subscribe(ctx, ids, *backlog)
 	case "stop":
@@ -359,10 +366,11 @@ func (c *cli) watch(ctx context.Context, args []string) error {
 	return fmt.Errorf("unknown watch command %q", args[0])
 }
 
-// lookupAgents maps agent names to bot user IDs.
-func (c *cli) lookupAgents(ctx context.Context, names []string) ([]string, error) {
+// lookupUsers maps names to users: agents (bots) when bots is true, else
+// people, matched by username, display name or real name.
+func (c *cli) lookupUsers(ctx context.Context, list string, bots bool) ([]slack.User, error) {
 	var wanted []string
-	for _, name := range names {
+	for _, name := range strings.Split(list, ",") {
 		if name = strings.TrimPrefix(strings.TrimSpace(name), "@"); name != "" {
 			wanted = append(wanted, name)
 		}
@@ -374,21 +382,63 @@ func (c *cli) lookupAgents(ctx context.Context, names []string) ([]string, error
 	if err != nil {
 		return nil, err
 	}
-	var ids []string
-	for _, name := range wanted {
-		found := ""
-		for _, u := range users {
-			if u.IsBot && !u.Deleted && (strings.EqualFold(u.Name, name) || strings.EqualFold(u.Profile.DisplayName, name) || strings.EqualFold(u.RealName, name)) {
-				found = u.ID
-				break
-			}
-		}
-		if found == "" {
-			return nil, fmt.Errorf("no agent named %q", name)
-		}
-		ids = append(ids, found)
+	kind := "person"
+	if bots {
+		kind = "agent"
 	}
-	return ids, nil
+	var found []slack.User
+	for _, name := range wanted {
+		i := slices.IndexFunc(users, func(u slack.User) bool {
+			return u.IsBot == bots && !u.Deleted &&
+				(strings.EqualFold(u.Name, name) || strings.EqualFold(u.Profile.DisplayName, name) || strings.EqualFold(u.RealName, name))
+		})
+		if i < 0 {
+			return nil, fmt.Errorf("no %s named %q", kind, name)
+		}
+		found = append(found, users[i])
+	}
+	return found, nil
+}
+
+func userIDs(users []slack.User) []string {
+	ids := make([]string, len(users))
+	for i, u := range users {
+		ids[i] = u.ID
+	}
+	return ids
+}
+
+// identity is this home's owner (user token) and agent (bot token).
+type identity struct {
+	ownerID, ownerName string // the owner's username, used in channel names
+	agentID, agentName string // the name Slack shows for the bot
+}
+
+func (c *cli) identity(ctx context.Context) (identity, error) {
+	owner, err := c.user.AuthTestContext(ctx)
+	if err != nil {
+		return identity{}, fmt.Errorf("user auth.test: %w", err)
+	}
+	bot, err := c.bot.AuthTestContext(ctx)
+	if err != nil {
+		return identity{}, fmt.Errorf("bot auth.test: %w", err)
+	}
+	u, err := c.bot.GetUserInfoContext(ctx, bot.UserID)
+	if err != nil {
+		return identity{}, fmt.Errorf("users.info %s: %w", bot.UserID, err)
+	}
+	return identity{ownerID: owner.UserID, ownerName: owner.User, agentID: bot.UserID, agentName: shownName(u)}, nil
+}
+
+// ensureDirect makes sure #PROJECT__OWNER_AGENT exists with the owner in it
+// and returns its ID.
+func (c *cli) ensureDirect(ctx context.Context, me identity, project string) (string, error) {
+	name, err := DirectChannelName(project, me.ownerName, me.agentName)
+	if err != nil {
+		return "", err
+	}
+	id, _, err := ensureChannel(ctx, c.bot, name, me.agentID, []string{me.ownerID})
+	return id, err
 }
 
 func (c *cli) channel(ctx context.Context, args []string) error {
@@ -398,6 +448,7 @@ func (c *cli) channel(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("channel", flag.ContinueOnError)
 	fs.SetOutput(c.stderr)
 	invite := fs.String("invite", "", "comma-separated agent names to invite")
+	inviteUser := fs.String("invite-user", "", "comma-separated people to invite")
 	pos, err := parseArgs(fs, args[1:])
 	if err != nil {
 		return err
@@ -405,51 +456,131 @@ func (c *cli) channel(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "create":
 		if len(pos) != 1 {
-			return errors.New("usage: channel create NAME [--invite a,b]")
+			return errors.New("usage: channel create NAME [--invite a,b] [--invite-user u,v]")
 		}
 		name, err := NormalizeChannelName(pos[0])
 		if err != nil {
 			return err
 		}
-		agentIDs, err := c.lookupAgents(ctx, strings.Split(*invite, ","))
+		if _, derived := ProjectOf(name); derived {
+			return fmt.Errorf("project names cannot contain %q; open side channels with `side`", derivedSep)
+		}
+		agents, err := c.lookupUsers(ctx, *invite, true)
 		if err != nil {
 			return err
 		}
-		owner, err := c.user.AuthTestContext(ctx)
+		people, err := c.lookupUsers(ctx, *inviteUser, false)
 		if err != nil {
-			return fmt.Errorf("user auth.test: %w", err)
+			return err
 		}
-		ch, err := c.bot.CreateConversationContext(ctx, slack.CreateConversationParams{ChannelName: name, IsPrivate: true})
+		me, err := c.identity(ctx)
 		if err != nil {
-			return fmt.Errorf("creating #%s: %w", name, err)
+			return err
 		}
-		if _, err := c.bot.InviteUsersToConversationContext(ctx, ch.ID, append([]string{owner.UserID}, agentIDs...)...); err != nil {
-			return fmt.Errorf("inviting to #%s: %w", name, err)
+		members := append(append([]string{me.ownerID}, userIDs(agents)...), userIDs(people)...)
+		id, _, err := ensureChannel(ctx, c.bot, name, me.agentID, members)
+		if err != nil {
+			return err
 		}
-		c.printJSON(map[string]any{"channel_id": ch.ID, "name": ch.Name})
-		return c.subscribe(ctx, []string{ch.ID}, 0)
+		// Created as the owner, so no bot is ever in it.
+		usersID, _, err := ensureChannel(ctx, c.user, UsersChannelName(name), me.ownerID, userIDs(people))
+		if err != nil {
+			return err
+		}
+		direct, err := c.ensureDirect(ctx, me, name)
+		if err != nil {
+			return err
+		}
+		c.printJSON(map[string]any{"channel_id": id, "name": name, "users_channel_id": usersID})
+		return c.subscribe(ctx, []string{id, direct}, 0)
 	case "invite":
-		if len(pos) != 2 {
-			return errors.New("usage: channel invite CHANNEL AGENT[,AGENT]")
+		if len(pos) < 1 || len(pos) > 2 {
+			return errors.New("usage: channel invite CHANNEL [AGENT,AGENT] [--invite-user u,v]")
 		}
 		id, name, err := c.resolveChannel(ctx, pos[0])
 		if err != nil {
 			return err
 		}
-		agentIDs, err := c.lookupAgents(ctx, strings.Split(pos[1], ","))
+		agentList := ""
+		if len(pos) == 2 {
+			agentList = pos[1]
+		}
+		agents, err := c.lookupUsers(ctx, agentList, true)
 		if err != nil {
 			return err
 		}
-		if len(agentIDs) == 0 {
-			return errors.New("name at least one agent to invite")
+		people, err := c.lookupUsers(ctx, *inviteUser, false)
+		if err != nil {
+			return err
 		}
-		if _, err := c.bot.InviteUsersToConversationContext(ctx, id, agentIDs...); err != nil {
+		ids := append(userIDs(agents), userIDs(people)...)
+		if len(ids) == 0 {
+			return errors.New("name at least one agent or person to invite")
+		}
+		if err := inviteEach(ctx, c.bot, id, "", ids); err != nil {
 			return fmt.Errorf("inviting to #%s: %w", name, err)
 		}
-		c.printJSON(map[string]any{"ok": true, "channel_id": id, "invited": agentIDs})
+		c.printJSON(map[string]any{"ok": true, "channel_id": id, "invited": ids})
 		return nil
 	}
 	return fmt.Errorf("unknown channel command %q", args[0])
+}
+
+// side opens the side channel between this agent and others, or joins it if
+// one of them already opened it, and watches it.
+func (c *cli) side(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("side", flag.ContinueOnError)
+	fs.SetOutput(c.stderr)
+	channel := fs.String("channel", "", "the project channel (default: the one this session watches)")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
+		return errors.New("usage: side AGENT[,AGENT] [--channel PROJECT]")
+	}
+	agents, err := c.lookupUsers(ctx, pos[0], true)
+	if err != nil {
+		return err
+	}
+	var project string
+	if *channel != "" {
+		_, name, err := c.resolveChannel(ctx, *channel)
+		if err != nil {
+			return err
+		}
+		project, _ = ProjectOf(name)
+	} else {
+		sub, err := detectSession(os.Getenv)
+		if err != nil {
+			return err
+		}
+		if _, project, err = c.watchedProject(ctx, sub.SessionID); err != nil {
+			return fmt.Errorf("%w; name it with --channel", err)
+		}
+	}
+	me, err := c.identity(ctx)
+	if err != nil {
+		return err
+	}
+	names := []string{me.agentName}
+	for _, a := range agents {
+		names = append(names, shownName(&a))
+	}
+	name, err := SideChannelName(project, names)
+	if err != nil {
+		return err
+	}
+	id, created, err := ensureChannel(ctx, c.bot, name, me.agentID, append([]string{me.ownerID}, userIDs(agents)...))
+	if err != nil {
+		return err
+	}
+	c.printJSON(map[string]any{"channel_id": id, "name": name, "created": created})
+	backlog := 0
+	if !created {
+		backlog = autoBacklog // joining: catch up on what is already there
+	}
+	return c.subscribe(ctx, []string{id}, backlog)
 }
 
 // postAsOwner posts text as the owner and returns the message ts.
@@ -545,26 +676,46 @@ func (c *cli) relayHook(ctx context.Context, event relayEvent) int {
 	return 0
 }
 
-// relayTarget picks the channel for a relay: the explicit target, or the one
-// channel this session watches.
+// relayTarget picks the channel for a relay: the explicit target, or the
+// project channel this session watches.
 func (c *cli) relayTarget(ctx context.Context, session, target string) (string, string, error) {
 	if target != "" {
 		return c.resolveChannel(ctx, target)
 	}
+	id, name, err := c.watchedProject(ctx, session)
+	if err != nil {
+		return "", "", fmt.Errorf("%w; use %%agents@<channel>:", err)
+	}
+	return id, name, nil
+}
+
+// watchedProject returns the one project channel (not a derived __ channel)
+// that session watches.
+func (c *cli) watchedProject(ctx context.Context, session string) (string, string, error) {
 	resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "status"})
 	if err != nil {
-		return "", "", errors.New("no slack-agent-chat listener is running; start a watch or use %agents@<channel>:")
+		return "", "", errors.New("no slack-agent-chat listener is running")
 	}
 	for _, s := range resp.Sessions {
 		if s.SessionID != session {
 			continue
 		}
-		if len(s.Channels) == 1 {
-			return c.resolveChannel(ctx, s.Channels[0])
+		var ids, names []string
+		for _, ch := range s.Channels {
+			id, name, err := c.resolveChannel(ctx, ch)
+			if err != nil {
+				return "", "", err
+			}
+			if _, derived := ProjectOf(name); !derived {
+				ids, names = append(ids, id), append(names, name)
+			}
 		}
-		return "", "", fmt.Errorf("this session watches %d channels; use %%agents@<channel>: to pick one", len(s.Channels))
+		if len(ids) == 1 {
+			return ids[0], names[0], nil
+		}
+		return "", "", fmt.Errorf("this session watches %d project channels", len(ids))
 	}
-	return "", "", errors.New("this session is not watching a channel; start a watch or use %agents@<channel>:")
+	return "", "", errors.New("this session is not watching a channel")
 }
 
 // listenerEnv returns the environment for a detached listener: only neutral

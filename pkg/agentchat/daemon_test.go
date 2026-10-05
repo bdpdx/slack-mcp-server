@@ -22,3 +22,13 @@ func TestParseEventsAPIMessage(t *testing.T) {
 	_, ok = ParseEventsAPIMessage([]byte(`not json`))
 	assert.False(t, ok)
 }
+
+func TestParseEventsAPIMemberJoined(t *testing.T) {
+	channel, user, ok := ParseEventsAPIMemberJoined([]byte(`{"event":{"type":"member_joined_channel","channel":"C2","user":"UCL","channel_type":"G"}}`))
+	assert.True(t, ok)
+	assert.Equal(t, "C2", channel)
+	assert.Equal(t, "UCL", user)
+
+	_, _, ok = ParseEventsAPIMemberJoined([]byte(`{"event":{"type":"message","channel":"C1","user":"UBR"}}`))
+	assert.False(t, ok)
+}

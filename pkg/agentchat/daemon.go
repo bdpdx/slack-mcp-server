@@ -47,6 +47,22 @@ func ParseEventsAPIMessage(payload []byte) (Message, bool) {
 	return Message{Channel: e.Channel, TS: e.TS, ThreadTS: e.ThreadTS, User: e.User, BotID: e.BotID, Text: e.Text, SubType: e.SubType, Files: files}, true
 }
 
+// ParseEventsAPIMemberJoined extracts a member_joined_channel event from a
+// Socket Mode events_api payload; ok is false for any other event.
+func ParseEventsAPIMemberJoined(payload []byte) (channel, user string, ok bool) {
+	var env struct {
+		Event struct {
+			Type    string `json:"type"`
+			Channel string `json:"channel"`
+			User    string `json:"user"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal(payload, &env); err != nil || env.Event.Type != "member_joined_channel" {
+		return "", "", false
+	}
+	return env.Event.Channel, env.Event.User, true
+}
+
 func requireEnv(home Home, key string) (string, error) {
 	v := os.Getenv(key)
 	if v == "" {
@@ -90,7 +106,8 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 		ln.Close()
 		return fmt.Errorf("bot auth.test: %w", err)
 	}
-	owner, err := slack.New(userToken).AuthTestContext(ctx)
+	userAPI := slack.New(userToken)
+	owner, err := userAPI.AuthTestContext(ctx)
 	if err != nil {
 		ln.Close()
 		return fmt.Errorf("user auth.test: %w", err)
@@ -103,6 +120,7 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 		return err
 	}
 	l.Async = true // deliveries must never stall the Socket Mode event loop
+	l.Users = userAPI
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -127,6 +145,9 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 				sm.Ack(*evt.Request)
 				if m, ok := ParseEventsAPIMessage(evt.Request.Payload); ok {
 					l.HandleMessage(ctx, m)
+				} else if channel, user, ok := ParseEventsAPIMemberJoined(evt.Request.Payload); ok {
+					// Off the event loop: it may recover a backlog or call Slack.
+					go l.HandleMemberJoined(ctx, channel, user)
 				}
 			}
 		}

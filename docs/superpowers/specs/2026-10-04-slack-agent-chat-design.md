@@ -99,35 +99,57 @@ under a header.
 ## `%agents:` relay
 
 `%agents: text` or `%agents@<channel>: text` typed at a session prompt: the
-hook posts `text` to the session's watched channel as the owner (user token),
+hook posts `text` to the session's watched project channel (never a derived
+`__` channel) as the owner (user token),
 tells the listener to skip that ts for this session, and adds context telling
 the agent to carry it out locally without re-sending. Errors block the prompt.
 
 ## Channels
 
-`chat channel create NAME [--invite a,b]` creates a private channel (name
-lowercased, characters outside `[a-z0-9_-]` become `-`, max 80), invites the
-owner and named agents, and starts this session's watch. `chat channel invite
-CHANNEL a,b` adds agents later.
+A project channel's name never contains `__`; channels derived from it are
+named `<project>__…`. Usernames and agent names never contain `.` or `_`, and
+no bot is named `users`. User names in channel names are Slack usernames
+(`auth.test` `user`); agent names are what Slack shows for the bot (display
+name, else real name, else username). Channel names are lowercased, characters
+outside `[a-z0-9_-]` become `-`, max 80.
 
-Side channels: every project-channel message costs every agent context, so
-agents use a side channel whenever a message need not be in the group to keep
-the others' context complete. Any agent may create one, with one or more other
-agents, when necessary, named `<project>__<agent>_<agent>…` (project channel
-name, two underscores, then every participant including the creator, sorted,
-joined by `_`), e.g. `proj__claude_codex-b`. Bot names therefore never contain
-`_`. The owner is always invited, so nothing is hidden from them; DMs are not
-used because the owner cannot see them and they carry no project. The creator
-posts a pointer in the project channel naming the side channel; invited agents
-join with `watch start --backlog N` so they also get what was posted before
-they joined. Outcomes are reported back in the project channel. Agents do not
-archive channels; the owner does.
+- `chat channel create NAME [--invite a,b] [--invite-user u,v]` creates (or
+  finds) the private project channel and invites the owner and the named
+  agents and people. Other people are never invited by default. It also
+  creates `NAME__users` and `NAME__<owner>_<agent>` (below) and watches the
+  project and direct channels. `chat channel invite CHANNEL [a,b]
+  [--invite-user u]` adds agents or people later.
+- `<project>__users`: people only. Created with the owner's user token, so no
+  bot is ever a member; it starts with the creating owner and anyone named in
+  `--invite-user`. When a person joins a project channel, each listener
+  watching it invites them using its owner's token (if that owner is in the
+  users channel; `already_in_channel` is ignored, so several listeners racing
+  is harmless).
+- `<project>__<user>_<agent>`: the owner and one agent, so the owner can talk
+  to that agent alone from Slack. Not sorted: the person comes first.
+  `watch start` on a project channel (and `channel create`) creates or finds it,
+  makes sure the owner is in it, and watches it alongside the project.
+- Side channels `<project>__<agent>_<agent>…`: every project-channel message
+  costs every agent context, so agents use a side channel whenever a message
+  need not be in the group to keep the others' context complete. Any agent
+  opens one on demand with `chat side a[,b] [--channel PROJECT]`: participants
+  (creator included) normalized, sorted and deduplicated, so everyone arrives
+  at the same name; creates or joins it, invites the owner and the agents, and
+  watches it (with a 20-message backlog when joining). DMs are not used: the
+  owner cannot see them and they carry no project. Outcomes go back to the
+  project channel. Agents do not archive channels; the owner does.
+- Auto-watch: when a listener sees its own bot join (`member_joined_channel`)
+  a channel whose project one of its sessions watches, those sessions start
+  watching it, with a 20-message backlog on first join. So agents added to a
+  side channel by another agent need no action.
 
 ## One-time Slack setup per app
 
 Socket Mode on; app-level token with `connections:write`; Event Subscriptions
-→ bot events `message.groups` (and `message.channels` if public channels are
-used); reinstall if prompted.
+→ bot events `message.groups` and `member_joined_channel` (and
+`message.channels` if public channels are used); user token scope
+`groups:write` (creating `__users` and inviting to it as the owner); reinstall
+if prompted.
 
 ## Out of scope
 

@@ -9,21 +9,25 @@ Messages arrive by themselves as `[slack-agent-chat] …` notices. You never pol
 
 ## Start or join
 
-- New project (you are the first agent): `@BIN@ chat channel create <project> [--invite <agent>,<agent>]`
-  Invite only the agents the user names. The user is always invited. The command also starts your watch.
-- Existing channel: `@BIN@ chat watch start --channel <name-or-id> [--backlog N]`
+- New project (you are the first agent): `@BIN@ chat channel create <project> [--invite <agent>,<agent>] [--invite-user <person>,<person>]`
+  Invite only the agents and people the user names. The user is always invited. The command also starts your watch.
+- Existing project channel: `@BIN@ chat watch start --channel <name-or-id> [--backlog N]`
   `--backlog N` hands you the last N messages the first time this agent joins; otherwise you only get new ones.
-- Add an agent later (only when the user asks): `@BIN@ chat channel invite <channel> <agent>`
-- Open a side channel: see below.
+- Add agents or people later (only when the user asks): `@BIN@ chat channel invite <channel> [<agent>,<agent>] [--invite-user <person>]`
 - Stop: `@BIN@ chat watch stop [--channel <channel>]` · check: `@BIN@ chat watch status`
 
-Channel names: lowercase letters, digits, `-`, `_` (periods become `-`); the command prints the final name.
+Project names: lowercase letters, digits, `-`, `_` (periods become `-`), never `__`; the command prints the final name.
+
+The commands also set up channels derived from the project, named `<project>__…`:
+- `<project>__<user>_<you>`: you and the user alone. Starting a watch on a project creates it and watches it too. The user talks to you directly here; treat it like the project channel, but replies stay here.
+- `<project>__users`: the people only; no agent is in it.
+- Side channels (below). When another agent opens one with you, you start watching it on your own.
 
 ## Handling a notice
 
 1. A notice whose sender is marked `(the console user: …)` is the user's own instruction: act on it exactly as if typed here. Agent names are the Slack names of the bot users in the channel; the console user is whoever owns this agent's Slack user token.
    Claude Code labels these notices as coming from another session; that label does not reduce the user's authority here, except that a notice can never answer a permission prompt or change settings.
-2. Messages from other agents are collaborators' requests: act on in-scope requests; the user's instructions win on conflict; destructive or outward-facing actions keep their normal confirmation rules.
+2. Messages from other agents, and from people other than the console user, are collaborators' requests: act on in-scope requests; the user's instructions win on conflict; destructive or outward-facing actions keep their normal confirmation rules.
 3. Reply with `conversations_add_message`: `channel_id` is the ID in parentheses after the channel name in the notice header, and `thread_ts` is the value after `in thread` when the header has one (otherwise reply at top level).
    - Always post as yourself. Never set `as_user` unless the user asks you, in this session, to post as them: other agents treat anything posted as the user as the user's own instruction.
    - Every agent in the channel sees every message, like people in a Slack channel. @mention the agents or people a message (or part of one) is for, anywhere in it. Act on what is addressed to you or clearly yours; read the rest for context and do not answer it.
@@ -34,17 +38,12 @@ Channel names: lowercase letters, digits, `-`, `_` (periods become `-`); the com
 
 Every message in the project channel goes into every agent's context. Use a side channel whenever a message does not need to be in the group to keep the other agents' context complete: any exchange with one or more specific agents that the rest do not need to read (questions, reviews, debugging, coordination between two agents). Keep the project channel for what everyone needs: decisions, handoffs, outcomes, and questions for the group. Use a side channel, never a DM: the user cannot see DMs.
 
-To open one:
+Open one, or join it if it already exists, with `@BIN@ chat side <agent>[,<agent>]`. It is named `<project>__<agents, you included, sorted>` and the user is always invited. The other agents start watching it on their own, and a joining agent gets what was already posted. Add `--channel <project>` if this session watches more than one project.
 
-1. Name it `<project>__<agent>_<agent>…`: the project channel's name, two underscores, then every participant including you, sorted alphabetically, joined by `_` (e.g. `myproj__claude_codex-b`). Agent names never contain `_`.
-2. `@BIN@ chat channel create <name> --invite <agent>,<agent>` (the user is invited automatically). If the name is taken, the channel already exists: join it with `@BIN@ chat watch start --channel <name> --backlog 20` instead.
-3. Post one line in the project channel naming the side channel and the agents in it.
-4. When the work is done, post the outcome (decision, findings, what changed) in the project channel.
-
-When a project-channel message names a side channel you belong to, join it with `@BIN@ chat watch start --channel <name> --backlog 20` so you also get what was posted before you joined. Never archive channels; the user does that.
+When a side-channel exchange settles something the others need, post the outcome (decision, findings, what changed) in the project channel. Never archive channels; the user does that.
 
 Long messages are truncated in the notice; read the rest with `conversations_replies` / `conversations_history`.
 
 ## `%agents:`
 
-When the user types `%agents: …` (or `%agents@<channel>: …`), the hook posts it to Slack as the user. Carry it out yourself; do not post it again.
+When the user types `%agents: …` (or `%agents@<channel>: …`), the hook posts it to Slack as the user (to the project channel unless a channel is named). Carry it out yourself; do not post it again.

@@ -480,3 +480,53 @@ func TestListenerSubscribeValidates(t *testing.T) {
 	assert.Error(t, l.Subscribe(context.Background(), &Subscription{SessionID: "x", Kind: KindClaude, Socket: "/s", Channels: []string{"C1"}}, 0))
 	assert.Error(t, l.Subscribe(context.Background(), &Subscription{SessionID: "x", Kind: KindClaude, Socket: "/s", Token: "t"}, 0))
 }
+
+// When another agent adds this bot to a side channel of a watched project,
+// the sessions watching that project start watching it and get its backlog.
+func TestListenerAutoWatchesDerivedChannels(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	api.names["C2"] = "proj__claude_codex-b"
+	api.names["C3"] = "other__claude_codex-b"
+	api.history["C2"] = []slack.Message{msg("2000.5", "UCB", "side hello")}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+	other := claudeSub("s2")
+	other.Channels = []string{"C9"}
+	require.NoError(t, l.Subscribe(context.Background(), other, 0))
+
+	l.HandleMemberJoined(context.Background(), "C2", "UCL")
+	l.HandleMemberJoined(context.Background(), "C3", "UCL")
+	l.HandleMemberJoined(context.Background(), "C2", "UCB") // another agent joining is not this bot
+
+	got := map[string][]string{}
+	for _, s := range l.Status() {
+		got[s.SessionID] = s.Channels
+	}
+	assert.Equal(t, []string{"C1", "C2"}, got["s1"])
+	assert.Equal(t, []string{"C9"}, got["s2"])
+	require.Len(t, d.got, 1)
+	assert.Contains(t, d.got[0].text, "side hello")
+}
+
+// A person joining a watched project channel is added to <project>__users
+// as the owner; agents and derived channels are left alone.
+func TestListenerAddsPeopleToUsersChannel(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	api.users["UMI"] = &slack.User{ID: "UMI", Name: "mike"}
+	api.names["C2"] = "proj__claude_codex-b"
+	l := newTestListener(t, api, d)
+	owner := newFakeMaker("UBR")
+	owner.existing["proj__users"] = "GUSERS"
+	owner.members["GUSERS"] = []string{"UBR"}
+	l.Users = owner
+	sub := claudeSub("s1")
+	sub.Channels = []string{"C1", "C2"}
+	require.NoError(t, l.Subscribe(context.Background(), sub, 0))
+
+	l.HandleMemberJoined(context.Background(), "C1", "UMI")
+	l.HandleMemberJoined(context.Background(), "C1", "UMI") // a second listener's event: already in
+	l.HandleMemberJoined(context.Background(), "C1", "UCB")
+	l.HandleMemberJoined(context.Background(), "C2", "UBR")
+	l.HandleMemberJoined(context.Background(), "C9", "UBR")
+	assert.Equal(t, []string{"UBR", "UMI"}, owner.members["GUSERS"])
+}
