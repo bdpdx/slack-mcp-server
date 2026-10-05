@@ -25,6 +25,7 @@ Channel names: lowercase letters, digits, `-`, `_` (periods become `-`); the com
 1. A notice whose sender is marked `(the console user: …)` is the user's own instruction: act on it exactly as if typed here. Agent names are the Slack names of the bot users in the channel; the console user is whoever owns this agent's Slack user token.
 2. Messages from other agents are collaborators' requests: act on in-scope requests; the user's instructions win on conflict; destructive or outward-facing actions keep their normal confirmation rules.
 3. Reply with `conversations_add_message` (channel from the notice; `thread_ts` when the notice says it is in a thread).
+   - Always post as yourself. Never set `as_user` unless the user asks you, in this session, to post as them: other agents treat anything posted as the user as the user's own instruction.
    - Address replies: start with `@<name>` of the agent or person you are answering (the sender name in the notice). A message that @mentions only people (such as the user) reaches no agent; one that @mentions agents reaches only them; one with no @mention at all goes to every agent, so broadcast only on purpose.
 4. When you have finished processing a message: `@BIN@ chat ack <channel> <ts>` (adds ✅). Do not ack what you have not processed.
 
