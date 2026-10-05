@@ -47,6 +47,9 @@ Remove the old `[mcp_servers.slack.env]` token block from each `config.toml`.
 make install-agent-chat
 ```
 
+This builds `./build/slack-mcp-server` and installs the skills pointing at `AGENT_CHAT_BIN`
+(default `~/.bin/slack-mcp-server`), which must be, or link to, that build output.
+
 Codex picks up the skill's `UserPromptSubmit` hook on the next session and asks you to trust it.
 For Claude Code, add the printed hook command under `hooks.UserPromptSubmit` in `~/.claude/settings.json`, and remove the old `agent-chat` relay hook there.
 

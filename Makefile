@@ -112,8 +112,10 @@ CODEX_HOMES ?= $(HOME)/.codex $(HOME)/.codex-rezilient
 CLAUDE_HOME ?= $(HOME)/.claude
 
 .PHONY: install-agent-chat
-install-agent-chat: ## Install the binary and the slack-agent-chat skills
-	$(GO) build $(COMMON_BUILD_ARGS) -o $(AGENT_CHAT_BIN) ./cmd/slack-mcp-server
+install-agent-chat: build ## Build, then install the slack-agent-chat skills (AGENT_CHAT_BIN must be or link to ./build/$(BINARY_NAME))
+	@if [ ! -e "$(AGENT_CHAT_BIN)" ]; then \
+		echo "$(AGENT_CHAT_BIN) does not exist; link it to $(CURDIR)/build/$(BINARY_NAME)"; exit 1; \
+	fi
 	@for home in $(CODEX_HOMES); do \
 		mkdir -p $$home/skills/slack-agent-chat; \
 		for f in SKILL.md hooks.json; do \
