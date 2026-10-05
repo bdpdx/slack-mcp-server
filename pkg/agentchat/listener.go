@@ -111,10 +111,11 @@ func (l *Listener) name(ctx context.Context, id string) string {
 		return ""
 	case u.Profile.DisplayName != "":
 		return u.Profile.DisplayName
-	case u.Name != "":
-		return u.Name
+	case u.RealName != "":
+		// What Slack shows for users (and bots) without a display name.
+		return u.RealName
 	}
-	return u.RealName
+	return u.Name
 }
 
 // loadMembers caches the channel's members so plain @names resolve.

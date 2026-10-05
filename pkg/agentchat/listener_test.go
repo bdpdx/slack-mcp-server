@@ -142,6 +142,17 @@ func TestListenerPlainNameMention(t *testing.T) {
 	assert.Len(t, d.got, 1)
 }
 
+// Bots usually have no display name; Slack shows their real name, so notices must too.
+func TestListenerSenderNamePrefersRealNameOverUsername(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	api.users["UCB"] = &slack.User{ID: "UCB", Name: "codexb", RealName: "codex-b", IsBot: true}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.1", User: "UCB", Text: "hi"})
+	require.Len(t, d.got, 1)
+	assert.Contains(t, d.got[0].text, "from codex-b,")
+}
+
 func TestListenerIgnoresOwnAndEditsAndUnwatched(t *testing.T) {
 	api, d := newFakeSlack(), &fakeDeliverer{}
 	l := newTestListener(t, api, d)
