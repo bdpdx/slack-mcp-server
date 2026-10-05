@@ -16,6 +16,10 @@ import (
 // says nothing about whether the session is still there.
 var ErrCodexUnavailable = errors.New("codex app-server is unavailable")
 
+// codexRetryDelay is the pause before re-checking a thread after a delivery
+// attempt was refused or found no in-progress turn.
+var codexRetryDelay = 300 * time.Millisecond
+
 type rpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
@@ -121,6 +125,13 @@ func DeliverCodex(ctx context.Context, socket, threadID, clientMsgID, text strin
 	input := []map[string]string{{"type": "text", "text": text}}
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(codexRetryDelay):
+			}
+		}
 		status, err := c.threadStatus(ctx, threadID)
 		if err != nil {
 			return "", err

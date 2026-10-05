@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
@@ -160,6 +161,34 @@ func TestDeliverCodexRetriesAfterSteerRejected(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "turn/start", method)
 	assert.Equal(t, []string{"initialize", "initialized", "thread/read", "thread/turns/list", "turn/steer", "thread/read", "turn/start"}, f.methods())
+}
+
+// SAC-3: an active thread briefly has no in-progress turn while a turn ends;
+// retrying immediately can use up every attempt before it settles.
+func TestDeliverCodexWaitsBetweenRetries(t *testing.T) {
+	old := codexRetryDelay
+	codexRetryDelay = 40 * time.Millisecond
+	defer func() { codexRetryDelay = old }()
+	reads := 0
+	f := &fakeCodex{respond: func(m string, _ map[string]any) (any, string) {
+		switch m {
+		case "thread/read":
+			reads++
+			if reads == 1 {
+				return status("active"), ""
+			}
+			return status("idle"), ""
+		case "thread/turns/list":
+			return map[string]any{"data": []any{}}, ""
+		}
+		return map[string]any{}, ""
+	}}
+	sock := f.start(t)
+	start := time.Now()
+	method, err := DeliverCodex(context.Background(), sock, "th", "cid", "hi")
+	require.NoError(t, err)
+	assert.Equal(t, "turn/start", method)
+	assert.GreaterOrEqual(t, time.Since(start), 40*time.Millisecond)
 }
 
 // SAC-10: the daemon unloads a thread once no terminal is attached and it is
