@@ -308,6 +308,26 @@ func TestListenerBacklogOnFirstJoin(t *testing.T) {
 	assert.NotContains(t, d.got[0].text, "mine-own")
 }
 
+// SAC-8: --backlog N means N messages this agent would have received, not
+// the last N raw messages.
+func TestListenerBacklogCountsRoutedMessages(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	api.history["C1"] = []slack.Message{ // newest first
+		msg("1999.5", "UBR", "@codex-r a"),
+		msg("1999.4", "UBR", "@codex-r b"),
+		msg("1999.3", "UBR", "mine-one"),
+		msg("1999.2", "UBR", "@codex-r c"),
+		msg("1999.1", "UBR", "mine-two"),
+	}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 2))
+	require.Len(t, d.got, 1)
+	assert.Contains(t, d.got[0].text, "2 pending messages")
+	assert.Contains(t, d.got[0].text, "mine-one")
+	assert.Contains(t, d.got[0].text, "mine-two")
+	assert.NotContains(t, d.got[0].text, "@codex-r")
+}
+
 func TestListenerRecoveryOnRejoin(t *testing.T) {
 	api, d := newFakeSlack(), &fakeDeliverer{}
 	l := newTestListener(t, api, d)

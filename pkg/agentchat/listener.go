@@ -391,19 +391,20 @@ func (l *Listener) register(sub *Subscription) (*Subscription, map[string]bool, 
 func (l *Listener) recover(ctx context.Context, sub *Subscription, channels []string, first map[string]bool, backlog int) {
 	var items []pending
 	for _, ch := range channels {
-		var msgs []Message
-		var err error
 		if first[ch] {
-			if backlog <= 0 {
-				continue
+			if backlog > 0 {
+				found, err := l.routedBacklog(ctx, ch, backlog)
+				if err != nil {
+					l.Log.Warn("reading history failed", zap.String("channel", ch), zap.Error(err))
+				}
+				items = append(items, found...)
 			}
-			msgs, err = l.lastMessages(ctx, ch, backlog)
-		} else {
-			l.mu.Lock()
-			join := l.state.JoinTS[ch]
-			l.mu.Unlock()
-			msgs, err = l.pendingSince(ctx, ch, join)
+			continue
 		}
+		l.mu.Lock()
+		join := l.state.JoinTS[ch]
+		l.mu.Unlock()
+		msgs, err := l.pendingSince(ctx, ch, join)
 		if err != nil {
 			l.Log.Warn("reading history failed", zap.String("channel", ch), zap.Error(err))
 			continue
@@ -436,16 +437,36 @@ func (l *Listener) Subscribe(ctx context.Context, sub *Subscription, backlog int
 	return nil
 }
 
-func (l *Listener) lastMessages(ctx context.Context, channel string, n int) ([]Message, error) {
-	resp, err := l.API.GetConversationHistoryContext(ctx, &slack.GetConversationHistoryParameters{ChannelID: channel, Limit: n})
-	if err != nil {
-		return nil, err
+// routedBacklog returns up to n of the channel's most recent messages that
+// this agent would have received, oldest first, paging back through at most
+// 1000 messages of history.
+func (l *Listener) routedBacklog(ctx context.Context, channel string, n int) ([]pending, error) {
+	var found []pending
+	cursor := ""
+	for page := 0; page < 5 && len(found) < n; page++ {
+		resp, err := l.API.GetConversationHistoryContext(ctx, &slack.GetConversationHistoryParameters{ChannelID: channel, Cursor: cursor, Limit: 200})
+		if err != nil {
+			return nil, err
+		}
+		for _, sm := range resp.Messages { // newest first
+			m := toMessage(channel, sm)
+			if !m.Deliverable() || m.From(l.Self) {
+				continue
+			}
+			if notice, ok := l.prepare(ctx, m); ok {
+				found = append(found, pending{m, notice})
+				if len(found) == n {
+					break
+				}
+			}
+		}
+		if !resp.HasMore || resp.ResponseMetaData.NextCursor == "" {
+			break
+		}
+		cursor = resp.ResponseMetaData.NextCursor
 	}
-	out := make([]Message, 0, len(resp.Messages))
-	for i := len(resp.Messages) - 1; i >= 0; i-- {
-		out = append(out, toMessage(channel, resp.Messages[i]))
-	}
-	return out, nil
+	slices.Reverse(found)
+	return found, nil
 }
 
 // pendingSince returns messages after join (top level and thread replies)
