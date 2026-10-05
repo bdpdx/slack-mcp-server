@@ -22,6 +22,10 @@ var defaultSseHost = "127.0.0.1"
 var defaultSsePort = 13080
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "chat" {
+		os.Exit(agentchat.RunCLI(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
+
 	var transport string
 	var enabledToolsFlag string
 	var noCache bool
