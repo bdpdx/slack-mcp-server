@@ -102,6 +102,7 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 		ln.Close()
 		return err
 	}
+	l.Async = true // deliveries must never stall the Socket Mode event loop
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

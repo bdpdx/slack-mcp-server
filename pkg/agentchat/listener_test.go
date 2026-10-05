@@ -288,6 +288,67 @@ func TestListenerConcurrentDeliveriesOfOneMessagePushOnce(t *testing.T) {
 	assert.Equal(t, 1, b.calls)
 }
 
+// gatedDeliverer records deliveries; sessions in hold wait until released.
+type gatedDeliverer struct {
+	mu   sync.Mutex
+	got  []delivery
+	hold map[string]chan struct{}
+}
+
+func (g *gatedDeliverer) Alive(context.Context, *Subscription) (bool, error) { return true, nil }
+
+func (g *gatedDeliverer) Deliver(_ context.Context, sub *Subscription, clientID, text string) (string, error) {
+	if gate := g.hold[sub.SessionID]; gate != nil {
+		<-gate
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.got = append(g.got, delivery{sub.SessionID, clientID, text})
+	return "fake", nil
+}
+
+func (g *gatedDeliverer) sessions() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var out []string
+	for _, d := range g.got {
+		out = append(out, d.session)
+	}
+	return out
+}
+
+// SAC-9: a hung session must not hold up the Slack event loop or other sessions.
+func TestListenerAsyncHungSessionDoesNotBlockOthers(t *testing.T) {
+	release := make(chan struct{})
+	g := &gatedDeliverer{hold: map[string]chan struct{}{"s1": release}}
+	l, err := NewListener(newFakeSlack(), g, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
+	require.NoError(t, err)
+	l.Async = true
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s2"), 0))
+
+	start := time.Now()
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.1", User: "UBR", Text: "one"})
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.2", User: "UBR", Text: "two"})
+	assert.Less(t, time.Since(start), 500*time.Millisecond, "the event loop must not wait for deliveries")
+	assert.Eventually(t, func() bool { return len(g.sessions()) == 2 }, 2*time.Second, 10*time.Millisecond)
+	assert.Equal(t, []string{"s2", "s2"}, g.sessions(), "s2 is served while s1 hangs")
+
+	close(release)
+	assert.Eventually(t, func() bool { return len(g.sessions()) == 4 }, 2*time.Second, 10*time.Millisecond)
+	g.mu.Lock()
+	var s1 []string
+	for _, d := range g.got {
+		if d.session == "s1" {
+			s1 = append(s1, d.text)
+		}
+	}
+	g.mu.Unlock()
+	require.Len(t, s1, 2)
+	assert.Contains(t, s1[0], "one", "each session's messages keep their order")
+	assert.Contains(t, s1[1], "two")
+}
+
 func TestListenerDropsGoneClaudeSession(t *testing.T) {
 	api := newFakeSlack()
 	d := &fakeDeliverer{errs: map[string]error{"s1": fmt.Errorf("%w: gone", ErrSessionGone)}}

@@ -31,7 +31,11 @@ Each home has its own Slack app (bot token, user token, app-level token).
 1. **Listener** (`slack-mcp-server chat listen`): one per home. Holds that
    app's only Socket Mode connection, keeps subscriptions, routes and delivers.
    Started on demand by `chat watch start`; exits 60 s after its last
-   subscription ends. State in `<home>/slack-agent-chat/` (0700): `state.json`,
+   subscription ends. On start it drops sessions that ended while it was down
+   and catches the rest up (SAC-6). Each session has its own delivery queue
+   and worker, so a slow or hung session never stalls the Socket Mode event
+   loop or other sessions (SAC-9). Started with a neutral environment in its
+   state directory (SAC-5). State in `<home>/slack-agent-chat/` (0700): `state.json`,
    `listener.sock`, `listener.log`.
 2. **CLI helpers** (`slack-mcp-server chat …`): `watch start|stop|status`,
    `channel create|invite`, `post`, `ack`, `relay-hook`.

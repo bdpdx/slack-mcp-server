@@ -44,6 +44,9 @@ type Listener struct {
 	StateFile string
 	Now       func() time.Time
 	Log       *zap.Logger
+	// Async hands each session's deliveries to its own worker so a slow
+	// session never holds up the caller. The daemon enables it.
+	Async bool
 
 	mu       sync.Mutex
 	state    *State
@@ -51,9 +54,14 @@ type Listener struct {
 	users    map[string]*slack.User
 	loadedAt map[string]time.Time
 	chNames  map[string]string
-	relays   map[string]time.Time   // expected %agents echoes: session|channel|text → expiry
-	sessLock map[string]*sync.Mutex // serializes deliveries per session
+	relays   map[string]time.Time      // expected %agents echoes: session|channel|text → expiry
+	sessLock map[string]*sync.Mutex    // serializes deliveries per session
+	queues   map[string]chan []pending // per-session delivery queues (Async)
 }
+
+// queueDepth bounds each session's pending deliveries. Overflow is dropped;
+// the messages lack this agent's ✅, so the next watch start catches them up.
+const queueDepth = 100
 
 type pending struct {
 	msg    Message
@@ -70,7 +78,7 @@ func NewListener(api SlackAPI, d Deliverer, self Identity, ownerID, stateFile st
 		API: api, Deliverer: d, Self: self, OwnerID: ownerID, StateFile: stateFile,
 		Now: time.Now, Log: log, state: st,
 		users: map[string]*slack.User{}, loadedAt: map[string]time.Time{}, chNames: map[string]string{},
-		relays: map[string]time.Time{}, sessLock: map[string]*sync.Mutex{},
+		relays: map[string]time.Time{}, sessLock: map[string]*sync.Mutex{}, queues: map[string]chan []pending{},
 	}
 	l.repeats = NewRepeatFilter(repeatWindow, func() time.Time { return l.Now() })
 	return l, nil
@@ -228,7 +236,43 @@ func (l *Listener) HandleMessage(ctx context.Context, m Message) {
 		if m.User != "" && m.User == l.OwnerID && l.consumeRelay(sub.SessionID, m) {
 			continue
 		}
-		l.deliverTo(ctx, sub, []pending{{m, n}})
+		l.dispatch(ctx, sub, []pending{{m, n}})
+	}
+}
+
+// dispatch delivers now, or with Async queues the delivery on the session's
+// own worker so a slow or hung session never holds up the caller.
+func (l *Listener) dispatch(ctx context.Context, sub *Subscription, items []pending) {
+	if !l.Async {
+		l.deliverTo(ctx, sub, items)
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	q := l.queues[sub.SessionID]
+	if q == nil {
+		q = make(chan []pending, queueDepth)
+		l.queues[sub.SessionID] = q
+		go l.work(ctx, sub.SessionID, q)
+	}
+	select {
+	case q <- items:
+	default:
+		l.Log.Warn("delivery queue full; message left for catch-up", zap.String("session", sub.SessionID))
+	}
+}
+
+// work delivers one session's queued items in order until the queue is
+// closed, using the session's current subscription and skipping items left
+// after the session was dropped.
+func (l *Listener) work(ctx context.Context, sessionID string, q chan []pending) {
+	for items := range q {
+		l.mu.Lock()
+		sub := l.state.Subscriptions[sessionID]
+		l.mu.Unlock()
+		if sub != nil {
+			l.deliverTo(ctx, sub, items)
+		}
 	}
 }
 
@@ -540,6 +584,10 @@ func (l *Listener) Unsubscribe(sessionID, channel string) {
 	}
 	if channel == "" || len(sub.Channels) == 0 {
 		delete(l.state.Subscriptions, sessionID)
+		if q := l.queues[sessionID]; q != nil {
+			close(q)
+			delete(l.queues, sessionID)
+		}
 	}
 	if err := l.state.Save(l.StateFile); err != nil {
 		l.Log.Error("saving state failed", zap.Error(err))
