@@ -44,14 +44,14 @@ var (
 	mentionSeps = regexp.MustCompile(`^(?:[\s,:;&]|\band\b)*`)
 )
 
-// LeadingMentions returns the user IDs, agents and people alike, of the run of
-// mentions that opens text: Slack mention tokens (<@U…>) and plain "@name"
-// text that resolve maps to a user ID ("" when the name is unknown), separated
-// by whitespace, punctuation or "and". The run ends at the first other text,
-// so mentions later in the message are not returned.
-func LeadingMentions(text string, resolve func(name string) string) []string {
+// LeadingMentions reads the run of mentions that opens text: Slack mention
+// tokens (<@U…>) and plain "@name" text, separated by whitespace, punctuation
+// or "and". It reports whether text opens with any mention, and returns the
+// user IDs, agents and people alike, of those that resolve ("" for a name it
+// does not know, which still counts as addressing the message). The run ends
+// at the first other text, so mentions later in the message are ignored.
+func LeadingMentions(text string, resolve func(name string) string) (ids []string, addressed bool) {
 	seen := map[string]bool{}
-	var out []string
 	rest := strings.TrimLeftFunc(text, unicode.IsSpace)
 	for {
 		var id string
@@ -60,13 +60,13 @@ func LeadingMentions(text string, resolve func(name string) string) []string {
 			id = m[1]
 		} else if m = leadName.FindStringSubmatch(rest); m != nil {
 			id = resolve(strings.TrimRight(m[1], "._-"))
+		} else {
+			return ids, addressed
 		}
-		if id == "" {
-			return out
-		}
-		if !seen[id] {
+		addressed = true
+		if id != "" && !seen[id] {
 			seen[id] = true
-			out = append(out, id)
+			ids = append(ids, id)
 		}
 		rest = rest[len(m[0]):]
 		rest = rest[len(mentionSeps.FindString(rest)):]
@@ -76,12 +76,13 @@ func LeadingMentions(text string, resolve func(name string) string) []string {
 // ShouldDeliver applies the routing rule to a message's leading mentions. A
 // message that does not open with a mention goes to every agent except its
 // sender, even if it mentions someone later; one that does goes only to the
-// agents it opens with, so one that opens with only people goes to no agent.
-func ShouldDeliver(m Message, self Identity, mentions []string) bool {
+// agents it opens with, so one that opens with only people or unknown names
+// goes to no agent.
+func ShouldDeliver(m Message, self Identity, addressed bool, mentions []string) bool {
 	if m.From(self) {
 		return false
 	}
-	return len(mentions) == 0 || slices.Contains(mentions, self.UserID)
+	return !addressed || slices.Contains(mentions, self.UserID)
 }
 
 // RepeatFilter detects an agent re-sending the same text to the same place.

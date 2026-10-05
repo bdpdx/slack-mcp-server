@@ -74,8 +74,8 @@ Each home has its own Slack app (bot token, user token, app-level token).
   mentions → every agent except the sender, even if the message mentions
   someone later; such a later mention marks a command for that agent alone.
   Leading mentions → only the agents among them, so a message that opens with
-  only people (e.g. a reply to the user) reaches no agent (SAC-11). Threads
-  follow the same rule.
+  only people (e.g. a reply to the user, SAC-11) or names that resolve to no
+  channel member reaches no agent. Threads follow the same rule.
 - Exact repeats from agent senders (same channel, thread, sender, trimmed text
   within 10 min) are dropped and logged. The human's messages are never dropped.
 - Messages from the owner (the user token's user) are labeled as console-user

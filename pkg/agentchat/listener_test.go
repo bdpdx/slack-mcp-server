@@ -145,6 +145,8 @@ func TestListenerBroadcastDelivered(t *testing.T) {
 
 	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.000001", User: "UCB", Text: "<@UCR> just hi"})
 	require.Len(t, d.got, 0, "opens with codex-r only")
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.000003", User: "UCB", Text: "@nobody-known just hi"})
+	require.Len(t, d.got, 0, "opens with an unknown name")
 
 	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.000002", User: "UBR", Text: "status please; <@UCR> rerun the tests"})
 	require.Len(t, d.got, 1, "a later mention does not narrow delivery")
