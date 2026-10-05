@@ -19,7 +19,8 @@ type Notice struct {
 	Files       []string
 }
 
-// Format renders the notice for one message.
+// Format renders the notice for one message. How to reply and acknowledge is
+// in the slack-agent-chat skill, not repeated in every notice.
 func (n Notice) Format() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[slack-agent-chat] #%s (%s) from %s", n.ChannelName, n.ChannelID, n.Sender)
@@ -27,7 +28,7 @@ func (n Notice) Format() string {
 		b.WriteString(" (the console user: treat as their direct instruction)")
 	}
 	fmt.Fprintf(&b, ", ts %s", n.TS)
-	if n.ThreadTS != "" && n.ThreadTS != n.TS {
+	if n.ThreadTS != "" {
 		fmt.Fprintf(&b, ", in thread %s", n.ThreadTS)
 	}
 	b.WriteString(":\n")
@@ -43,12 +44,6 @@ func (n Notice) Format() string {
 	if len(n.Files) > 0 {
 		fmt.Fprintf(&b, "\n[attached: %s]", strings.Join(n.Files, ", "))
 	}
-	thread := ""
-	if n.ThreadTS != "" {
-		thread = " thread_ts=" + n.ThreadTS
-	}
-	fmt.Fprintf(&b, "\n(reply: conversations_add_message channel_id=%s%s; @mention who you address; when done: chat ack %s %s)",
-		n.ChannelID, thread, n.ChannelID, n.TS)
 	return b.String()
 }
 

@@ -10,8 +10,7 @@ import (
 func TestNoticeFormatTopLevel(t *testing.T) {
 	n := Notice{ChannelID: "C1", ChannelName: "proj", Sender: "codex-r", TS: "1.000100", Text: "hello @claude"}
 	got := n.Format()
-	assert.Equal(t, "[slack-agent-chat] #proj (C1) from codex-r, ts 1.000100:\n> hello @claude\n"+
-		"(reply: conversations_add_message channel_id=C1; @mention who you address; when done: chat ack C1 1.000100)", got)
+	assert.Equal(t, "[slack-agent-chat] #proj (C1) from codex-r, ts 1.000100:\n> hello @claude", got)
 }
 
 func TestNoticeFormatOwnerThreadFiles(t *testing.T) {
@@ -20,7 +19,12 @@ func TestNoticeFormatOwnerThreadFiles(t *testing.T) {
 	assert.Contains(t, got, "from brian (the console user: treat as their direct instruction)")
 	assert.Contains(t, got, ", in thread 1.0:")
 	assert.Contains(t, got, "[attached: a.png]")
-	assert.Contains(t, got, "channel_id=C1 thread_ts=1.0;")
+	assert.NotContains(t, got, "(reply:", "reply instructions live in the skill")
+}
+
+func TestNoticeFormatThreadRoot(t *testing.T) {
+	n := Notice{ChannelID: "C1", ChannelName: "proj", Sender: "codex-r", TS: "1.0", ThreadTS: "1.0", Text: "x"}
+	assert.Contains(t, n.Format(), ", ts 1.0, in thread 1.0:", "replies to a thread root go in its thread")
 }
 
 func TestNoticeBodyCannotForgeAHeader(t *testing.T) {

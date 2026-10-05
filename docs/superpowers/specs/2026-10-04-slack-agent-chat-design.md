@@ -94,8 +94,9 @@ Each home has its own Slack app (bot token, user token, app-level token).
 
 One block per message: channel name and ID, sender (owner flagged), ts,
 thread, text with `<@U…>` rendered as `@name` (truncated at 4000 chars),
-attached file names, and a one-line reply/ack hint. Recovery batches join
-blocks under a header.
+and attached file names. How to reply and ack lives in the skill, not in
+each notice, so it is read once per session. Recovery batches join blocks
+under a header.
 
 ## `%agents:` relay
 
