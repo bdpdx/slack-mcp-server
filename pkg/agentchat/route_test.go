@@ -8,36 +8,42 @@ import (
 )
 
 var agents = map[string]string{"UCB": "codex-b", "UCR": "codex-r", "UCL": "claude"}
+var people = map[string]string{"UBR": "brian"}
 
-func isAgent(id string) bool { _, ok := agents[id]; return ok }
-func resolveAgent(name string) string {
-	for id, n := range agents {
-		if n == name {
-			return id
+// resolveUser maps a plain @name to any known user, agent or person.
+func resolveUser(name string) string {
+	for _, m := range []map[string]string{agents, people} {
+		for id, n := range m {
+			if n == name {
+				return id
+			}
 		}
 	}
 	return ""
 }
 
-func TestAgentMentionsTokens(t *testing.T) {
-	got := AgentMentions("<@UCR> and <@UBRIAN> please", isAgent, resolveAgent)
-	assert.Equal(t, []string{"UCR"}, got)
+func TestMentionsTokens(t *testing.T) {
+	got := Mentions("<@UCR> and <@UBRIAN> please", resolveUser)
+	assert.Equal(t, []string{"UCR", "UBRIAN"}, got)
 }
 
-func TestAgentMentionsPlainName(t *testing.T) {
-	got := AgentMentions("@codex-r, can you check? cc @claude.", isAgent, resolveAgent)
-	assert.ElementsMatch(t, []string{"UCR", "UCL"}, got)
-	assert.Empty(t, AgentMentions("mail me at x@codex-r.com", isAgent, resolveAgent))
-	assert.Empty(t, AgentMentions("@brian thoughts?", isAgent, resolveAgent))
+func TestMentionsPlainNames(t *testing.T) {
+	got := Mentions("@codex-r, can you check? cc @claude. thanks @brian", resolveUser)
+	assert.ElementsMatch(t, []string{"UCR", "UCL", "UBR"}, got)
+	assert.Empty(t, Mentions("mail me at x@codex-r.com", resolveUser))
+	assert.Empty(t, Mentions("@nobody-known here", resolveUser))
 }
 
 func TestShouldDeliver(t *testing.T) {
 	self := Identity{UserID: "UCL", BotID: "BCL"}
-	broadcast := Message{User: "UCB", Text: "hi all"}
-	assert.True(t, ShouldDeliver(broadcast, self, nil))
+	m := Message{User: "UCB", Text: "x"}
+	assert.True(t, ShouldDeliver(m, self, nil), "no mentions: broadcast to all agents")
 	assert.False(t, ShouldDeliver(Message{User: "UCL", BotID: "BCL"}, self, nil), "own message")
-	assert.True(t, ShouldDeliver(broadcast, self, []string{"UCL"}))
-	assert.False(t, ShouldDeliver(broadcast, self, []string{"UCR"}))
+	assert.True(t, ShouldDeliver(m, self, []string{"UCL"}), "addressed to me")
+	assert.False(t, ShouldDeliver(m, self, []string{"UCR"}), "addressed to another agent")
+	assert.False(t, ShouldDeliver(m, self, []string{"UBR"}), "addressed only to a person")
+	assert.True(t, ShouldDeliver(m, self, []string{"UBR", "UCL"}), "person and me")
+	assert.False(t, ShouldDeliver(m, self, []string{"UBR", "UCR"}), "person and another agent")
 }
 
 func TestDeliverable(t *testing.T) {

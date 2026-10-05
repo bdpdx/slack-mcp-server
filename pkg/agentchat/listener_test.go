@@ -153,6 +153,18 @@ func TestListenerSenderNamePrefersRealNameOverUsername(t *testing.T) {
 	assert.Contains(t, d.got[0].text, "from codex-b,")
 }
 
+// SAC-11: an agent's reply addressed only to a person must not wake other agents.
+func TestListenerReplyToPersonOnlyReachesNoAgents(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.1", User: "UCB", Text: "@brian done, tests pass"})
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.2", User: "UCB", Text: "<@UBR> done"})
+	assert.Empty(t, d.got)
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.3", User: "UCB", Text: "@brian @claude FYI"})
+	assert.Len(t, d.got, 1, "a person plus this agent still reaches this agent")
+}
+
 func TestListenerIgnoresOwnAndEditsAndUnwatched(t *testing.T) {
 	api, d := newFakeSlack(), &fakeDeliverer{}
 	l := newTestListener(t, api, d)

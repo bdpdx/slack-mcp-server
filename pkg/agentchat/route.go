@@ -2,6 +2,7 @@ package agentchat
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -40,14 +41,14 @@ var (
 	nameMention = regexp.MustCompile(`(?:^|[^\w<@.])@([A-Za-z0-9][A-Za-z0-9._-]*)`)
 )
 
-// AgentMentions returns the user IDs of agents that text addresses, from
-// Slack mention tokens (<@U…>) and plain "@name" text. resolve maps a plain
-// name to a user ID ("" when unknown); isAgent filters to bot users.
-func AgentMentions(text string, isAgent func(userID string) bool, resolve func(name string) string) []string {
+// Mentions returns the user IDs that text addresses, agents and people
+// alike: Slack mention tokens (<@U…>) and plain "@name" text that resolve
+// maps to a user ID ("" when the name is unknown).
+func Mentions(text string, resolve func(name string) string) []string {
 	seen := map[string]bool{}
 	var out []string
 	add := func(id string) {
-		if id != "" && !seen[id] && isAgent(id) {
+		if id != "" && !seen[id] {
 			seen[id] = true
 			out = append(out, id)
 		}
@@ -61,21 +62,14 @@ func AgentMentions(text string, isAgent func(userID string) bool, resolve func(n
 	return out
 }
 
-// ShouldDeliver applies the routing rule: with no agent mentions a message
-// goes to every agent except its sender; with agent mentions, only to them.
+// ShouldDeliver applies the routing rule. A message with no mentions goes to
+// every agent except its sender; a message with mentions goes only to the
+// agents it mentions, so one that mentions only people goes to no agent.
 func ShouldDeliver(m Message, self Identity, mentions []string) bool {
 	if m.From(self) {
 		return false
 	}
-	if len(mentions) == 0 {
-		return true
-	}
-	for _, id := range mentions {
-		if id == self.UserID {
-			return true
-		}
-	}
-	return false
+	return len(mentions) == 0 || slices.Contains(mentions, self.UserID)
 }
 
 // RepeatFilter detects an agent re-sending the same text to the same place.

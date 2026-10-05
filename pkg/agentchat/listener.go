@@ -147,15 +147,21 @@ func (l *Listener) loadMembers(ctx context.Context, channel string) {
 	l.mu.Unlock()
 }
 
+// resolve maps a plain @name to a known user, preferring an agent when an
+// agent and a person share the name.
 func (l *Listener) resolve(name string) string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	person := ""
 	for id, u := range l.users {
-		if u.IsBot && (strings.EqualFold(u.Name, name) || strings.EqualFold(u.Profile.DisplayName, name) || strings.EqualFold(u.RealName, name)) {
-			return id
+		if strings.EqualFold(u.Name, name) || strings.EqualFold(u.Profile.DisplayName, name) || strings.EqualFold(u.RealName, name) {
+			if u.IsBot {
+				return id
+			}
+			person = id
 		}
 	}
-	return ""
+	return person
 }
 
 func (l *Listener) channelName(ctx context.Context, channel string) string {
@@ -180,8 +186,7 @@ func (l *Listener) channelName(ctx context.Context, channel string) string {
 // prepare applies the routing rule and builds m's notice.
 func (l *Listener) prepare(ctx context.Context, m Message) (Notice, bool) {
 	l.loadMembers(ctx, m.Channel)
-	mentions := AgentMentions(m.Text, func(id string) bool { return l.isAgent(ctx, id) }, l.resolve)
-	if !ShouldDeliver(m, l.Self, mentions) {
+	if !ShouldDeliver(m, l.Self, Mentions(m.Text, l.resolve)) {
 		return Notice{}, false
 	}
 	sender := l.name(ctx, m.User)

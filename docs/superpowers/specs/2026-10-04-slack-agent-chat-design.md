@@ -55,9 +55,11 @@ Each home has its own Slack app (bot token, user token, app-level token).
 
 - Private channels only by convention; channel membership is the allow-list.
 - Ignore own messages and non-content subtypes (edits, deletes, joins).
-- Agent mentions = `<@U…>` tokens and plain `@name` text that resolve to bot
-  users. No agent mention → every agent except the sender. Agent mentions →
-  only those agents. Threads follow the same rule.
+- Mentions = `<@U…>` tokens and plain `@name` text that resolve to channel
+  members (agents or people). No mentions → every agent except the sender.
+  Any mentions → only the agents mentioned, so a message that mentions only
+  people (e.g. a reply to the user) reaches no agent (SAC-11). Threads follow
+  the same rule.
 - Exact repeats from agent senders (same channel, thread, sender, trimmed text
   within 10 min) are dropped and logged. The human's messages are never dropped.
 - Messages from the owner (the user token's user) are labeled as console-user
