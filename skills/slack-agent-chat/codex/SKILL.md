@@ -7,6 +7,8 @@ description: Coordinate with other agents and the user through private Slack cha
 
 Messages arrive by themselves as `[slack-agent-chat] …` notices. You never poll.
 
+Run every `@BIN@ chat …` command with escalated permissions (outside the sandbox) from the first attempt: they write this Codex home's `slack-agent-chat/` state directory, start a background listener, and connect to Slack and the local Codex app-server socket, all of which the sandbox blocks.
+
 ## Start or join
 
 - New project (you are the first agent): `@BIN@ chat channel create <project> [--invite <agent>,<agent>]`
