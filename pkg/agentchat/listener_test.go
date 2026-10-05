@@ -1,0 +1,249 @@
+package agentchat
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/slack-go/slack"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+)
+
+type fakeSlack struct {
+	mu        sync.Mutex
+	users     map[string]*slack.User
+	members   map[string][]string
+	names     map[string]string
+	history   map[string][]slack.Message
+	replies   map[string][]slack.Message // key channel|thread_ts
+	reactions []string                   // name|channel|ts
+}
+
+func newFakeSlack() *fakeSlack {
+	u := func(id, name string, bot bool) *slack.User {
+		return &slack.User{ID: id, Name: name, IsBot: bot, Profile: slack.UserProfile{DisplayName: name}}
+	}
+	return &fakeSlack{
+		users: map[string]*slack.User{
+			"UCL": u("UCL", "claude", true), "UCB": u("UCB", "codex-b", true),
+			"UCR": u("UCR", "codex-r", true), "UBR": u("UBR", "brian", false),
+		},
+		members: map[string][]string{"C1": {"UCL", "UCB", "UCR", "UBR"}},
+		names:   map[string]string{"C1": "proj"},
+		history: map[string][]slack.Message{},
+		replies: map[string][]slack.Message{},
+	}
+}
+
+func (f *fakeSlack) AuthTestContext(context.Context) (*slack.AuthTestResponse, error) {
+	return &slack.AuthTestResponse{UserID: "UCL", BotID: "BCL"}, nil
+}
+func (f *fakeSlack) GetUserInfoContext(_ context.Context, id string) (*slack.User, error) {
+	if u, ok := f.users[id]; ok {
+		return u, nil
+	}
+	return nil, errors.New("user_not_found")
+}
+func (f *fakeSlack) GetUsersInConversationContext(_ context.Context, p *slack.GetUsersInConversationParameters) ([]string, string, error) {
+	return f.members[p.ChannelID], "", nil
+}
+func (f *fakeSlack) GetConversationInfoContext(_ context.Context, in *slack.GetConversationInfoInput) (*slack.Channel, error) {
+	ch := &slack.Channel{}
+	ch.ID = in.ChannelID
+	ch.Name = f.names[in.ChannelID]
+	return ch, nil
+}
+func (f *fakeSlack) GetConversationHistoryContext(_ context.Context, p *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+	var out []slack.Message
+	for _, m := range f.history[p.ChannelID] { // stored newest first, like Slack
+		if p.Oldest == "" || TSLess(p.Oldest, m.Timestamp) {
+			out = append(out, m)
+		}
+	}
+	if p.Limit > 0 && len(out) > p.Limit {
+		out = out[:p.Limit]
+	}
+	return &slack.GetConversationHistoryResponse{Messages: out}, nil
+}
+func (f *fakeSlack) GetConversationRepliesContext(_ context.Context, p *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error) {
+	return f.replies[p.ChannelID+"|"+p.Timestamp], false, "", nil
+}
+func (f *fakeSlack) AddReactionContext(_ context.Context, name string, item slack.ItemRef) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reactions = append(f.reactions, name+"|"+item.Channel+"|"+item.Timestamp)
+	return nil
+}
+
+type delivery struct{ session, clientID, text string }
+
+type fakeDeliverer struct {
+	mu   sync.Mutex
+	got  []delivery
+	errs map[string]error // by session
+}
+
+func (d *fakeDeliverer) Deliver(_ context.Context, sub *Subscription, clientID, text string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[sub.SessionID]; err != nil {
+		return err
+	}
+	d.got = append(d.got, delivery{sub.SessionID, clientID, text})
+	return nil
+}
+
+func newTestListener(t *testing.T, api *fakeSlack, d *fakeDeliverer) *Listener {
+	l, err := NewListener(api, d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
+	require.NoError(t, err)
+	l.Now = func() time.Time { return time.Unix(2000, 0) }
+	return l
+}
+
+func claudeSub(id string) *Subscription {
+	return &Subscription{SessionID: id, Kind: KindClaude, Socket: "/s", Token: "t", Channels: []string{"C1"}}
+}
+
+func msg(ts, user, text string) slack.Message {
+	m := slack.Message{}
+	m.Timestamp, m.User, m.Text = ts, user, text
+	return m
+}
+
+func TestListenerBroadcastDelivered(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.000001", User: "UCB", Text: "hi <@UCR> and all? no: just hi"})
+	require.Len(t, d.got, 0, "mentions codex-r only")
+
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.000002", User: "UBR", Text: "status please"})
+	require.Len(t, d.got, 1)
+	assert.Contains(t, d.got[0].text, "#proj (C1) from brian (the console user")
+	assert.Equal(t, clientMessageID("s1", "C1", "2001.000002"), d.got[0].clientID)
+	assert.Contains(t, api.reactions, "eyes|C1|2001.000002")
+}
+
+func TestListenerPlainNameMention(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.1", User: "UCB", Text: "@claude please review"})
+	require.Len(t, d.got, 1)
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.2", User: "UCB", Text: "@codex-r please review"})
+	assert.Len(t, d.got, 1)
+}
+
+func TestListenerIgnoresOwnAndEditsAndUnwatched(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.1", User: "UCL", BotID: "BCL", Text: "mine"})
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.2", User: "UCB", SubType: "message_changed", Text: "edit"})
+	l.HandleMessage(context.Background(), Message{Channel: "C9", TS: "2001.3", User: "UCB", Text: "elsewhere"})
+	assert.Empty(t, d.got)
+}
+
+func TestListenerDropsAgentRepeatsNotOwner(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.1", User: "UCB", Text: "same"})
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.2", User: "UCB", Text: "same"})
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.3", User: "UBR", Text: "again"})
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.4", User: "UBR", Text: "again"})
+	assert.Len(t, d.got, 3)
+}
+
+func TestListenerDoesNotRedeliver(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+	m := Message{Channel: "C1", TS: "2001.1", User: "UBR", Text: "once"}
+	l.HandleMessage(context.Background(), m)
+	l.HandleMessage(context.Background(), m)
+	assert.Len(t, d.got, 1)
+}
+
+func TestListenerSkipSuppressesDelivery(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s2"), 0))
+	l.Skip("s1", "C1", "2001.1")
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.1", User: "UBR", Text: "relayed"})
+	require.Len(t, d.got, 1)
+	assert.Equal(t, "s2", d.got[0].session)
+}
+
+func TestListenerDropsGoneClaudeSession(t *testing.T) {
+	api := newFakeSlack()
+	d := &fakeDeliverer{errs: map[string]error{"s1": fmt.Errorf("%w: gone", ErrSessionGone)}}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.1", User: "UBR", Text: "hello"})
+	assert.False(t, l.HasSubscriptions())
+}
+
+func TestListenerBacklogOnFirstJoin(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	api.history["C1"] = []slack.Message{msg("1999.3", "UBR", "gamma"), msg("1999.2", "UCL", "mine-own"), msg("1999.1", "UCB", "alpha")}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 3))
+	require.Len(t, d.got, 1)
+	assert.Contains(t, d.got[0].text, "2 pending messages, oldest first")
+	assert.Less(t, strings.Index(d.got[0].text, "alpha"), strings.Index(d.got[0].text, "gamma"))
+	assert.NotContains(t, d.got[0].text, "mine-own")
+}
+
+func TestListenerRecoveryOnRejoin(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0)) // join point = 2000.000000
+
+	acked := msg("2001.1", "UBR", "acked")
+	acked.Reactions = []slack.ItemReaction{{Name: "white_check_mark", Users: []string{"UCL"}}}
+	parent := msg("2001.2", "UCB", "parent")
+	parent.ReplyCount, parent.LatestReply = 1, "2001.3"
+	api.history["C1"] = []slack.Message{parent, acked, msg("1999.0", "UBR", "before join")}
+	reply := msg("2001.3", "UBR", "thread reply")
+	reply.ThreadTimestamp = "2001.2"
+	api.replies["C1|2001.2"] = []slack.Message{parent, reply}
+
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s2"), 0))
+	require.Len(t, d.got, 1)
+	assert.Equal(t, "s2", d.got[0].session)
+	assert.Contains(t, d.got[0].text, "parent")
+	assert.Contains(t, d.got[0].text, "thread reply")
+	assert.NotContains(t, d.got[0].text, "acked")
+	assert.NotContains(t, d.got[0].text, "before join")
+}
+
+func TestListenerStatusAndUnsubscribe(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	sub := claudeSub("s1")
+	sub.Channels = []string{"C1", "C2"}
+	require.NoError(t, l.Subscribe(context.Background(), sub, 0))
+	l.Unsubscribe("s1", "C2")
+	st := l.Status()
+	require.Len(t, st, 1)
+	assert.Equal(t, []string{"C1"}, st[0].Channels)
+	l.Unsubscribe("s1", "")
+	assert.False(t, l.HasSubscriptions())
+}
+
+func TestListenerSubscribeValidates(t *testing.T) {
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	assert.Error(t, l.Subscribe(context.Background(), &Subscription{SessionID: "x", Kind: KindCodex, Channels: []string{"C1"}}, 0))
+	assert.Error(t, l.Subscribe(context.Background(), &Subscription{SessionID: "x", Kind: KindClaude, Socket: "/s", Channels: []string{"C1"}}, 0))
+	assert.Error(t, l.Subscribe(context.Background(), &Subscription{SessionID: "x", Kind: KindClaude, Socket: "/s", Token: "t"}, 0))
+}
