@@ -158,9 +158,21 @@ the session's direct channel `<project>__<owner>_<agent>`:
   arrives as a notice, mid-turn if need be. A terminal question
   would block the session, so a Slack answer could not be processed until it
   was also answered in the terminal; asking in both places does not work.
-- `chat approval-hook` (`PermissionRequest`, Claude and Codex; fires only
-  when the user is about to be prompted): posts "needs your approval in the
-  terminal: <tool>" with the command or description. It never decides.
+- `chat approval-hook [--wait 10m]` (`PermissionRequest`, Claude and Codex;
+  fires only when the user is about to be prompted) asks in the direct channel
+  and answers the prompt for the owner. The message shows the tool and its
+  command or description, with buttons Allow / Deny / Answer in terminal. The
+  owner can also reply in its thread: an allow word (yes, ok, lgtm…), a deny
+  word (no, deny, stop…) followed by a reason for the agent, or `terminal`;
+  any other reply denies with the reply as the reason. Only the owner counts.
+  Both hosts show their own prompt only after the hook returns, so after
+  `--wait` with no answer (or on Answer in terminal) the hook prints nothing
+  and the terminal asks; the hook's configured timeout must exceed `--wait`.
+  The message is then updated to show the outcome in place of the buttons.
+- Clicks are Socket Mode interactions, which reach the home's listener (a
+  second Socket Mode connection would split events with it). The listener
+  records the owner's first click per approval ID; the hook polls it with the
+  control op `approval` and polls the thread for replies.
 - Codex's `request_user_input` is not hookable, so for Codex (and as a
   fallback for Claude) the skill says to ask in the direct channel.
 - Both hooks never fail their host: bad input, a session watching no project,
@@ -189,7 +201,8 @@ Socket Mode on; app-level token with `connections:write`; Event Subscriptions
 → bot events `message.groups` and `member_joined_channel` (and
 `message.channels` if public channels are used); user token scope
 `groups:write` (creating `__users` and inviting to it as the owner); bot
-scopes `chat:write` and `im:write` (turn-end DMs); reinstall if prompted.
+scopes `chat:write` and `im:write` (turn-end DMs); Interactivity on (approval
+buttons; no request URL with Socket Mode); reinstall if prompted.
 
 ## Out of scope
 

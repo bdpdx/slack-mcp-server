@@ -139,7 +139,15 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 			case <-ctx.Done():
 				return
 			case evt := <-sm.Events:
-				if evt.Type != socketmode.EventTypeEventsAPI || evt.Request == nil {
+				if evt.Request == nil {
+					continue
+				}
+				if evt.Type == socketmode.EventTypeInteractive {
+					sm.Ack(*evt.Request)
+					l.HandleInteraction(evt.Request.Payload)
+					continue
+				}
+				if evt.Type != socketmode.EventTypeEventsAPI {
 					continue
 				}
 				sm.Ack(*evt.Request)

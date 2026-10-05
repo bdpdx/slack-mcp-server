@@ -122,7 +122,7 @@ install-agent-chat: build ## Build, then install the slack-agent-chat skills (AG
 		echo "installed skill into $$home/skills/slack-agent-chat"; \
 		echo "  Codex hooks ($$home/hooks.json):"; \
 		echo "    UserPromptSubmit:  $(AGENT_CHAT_BIN) chat --env-file $$home/slack-mcp-server.env relay-hook"; \
-		echo "    PermissionRequest: $(AGENT_CHAT_BIN) chat --env-file $$home/slack-mcp-server.env approval-hook"; \
+		echo "    PermissionRequest: $(AGENT_CHAT_BIN) chat --env-file $$home/slack-mcp-server.env approval-hook  (timeout 660)"; \
 		echo "    Stop:              $(AGENT_CHAT_BIN) chat --env-file $$home/slack-mcp-server.env stop-hook"; \
 	done
 	@mkdir -p $(CLAUDE_HOME)/skills/slack-agent-chat
@@ -131,7 +131,7 @@ install-agent-chat: build ## Build, then install the slack-agent-chat skills (AG
 	@echo "Claude hooks ($(CLAUDE_HOME)/settings.json):"
 	@echo "  UserPromptSubmit:                    $(AGENT_CHAT_BIN) chat --env-file $(CLAUDE_HOME)/slack-mcp-server.env relay-hook"
 	@echo "  PreToolUse (matcher AskUserQuestion): $(AGENT_CHAT_BIN) chat --env-file $(CLAUDE_HOME)/slack-mcp-server.env ask-hook"
-	@echo "  PermissionRequest:                   $(AGENT_CHAT_BIN) chat --env-file $(CLAUDE_HOME)/slack-mcp-server.env approval-hook"
+	@echo "  PermissionRequest:                   $(AGENT_CHAT_BIN) chat --env-file $(CLAUDE_HOME)/slack-mcp-server.env approval-hook  (timeout 660)"
 	@echo "  Stop:                                $(AGENT_CHAT_BIN) chat --env-file $(CLAUDE_HOME)/slack-mcp-server.env stop-hook"
 
 .PHONY: format

@@ -72,8 +72,7 @@ func FormatQuestions(ownerID, agent string, input json.RawMessage) (string, bool
 
 const maxApprovalDetail = 500
 
-// FormatApproval renders a pending permission prompt as a Slack message
-// telling the owner to answer it in the terminal.
+// FormatApproval renders a pending permission prompt as a Slack message.
 func FormatApproval(ownerID, agent, tool string, input json.RawMessage) string {
 	var in map[string]any
 	_ = json.Unmarshal(input, &in)
@@ -98,7 +97,7 @@ func FormatApproval(ownerID, agent, tool string, input json.RawMessage) string {
 	if r := []rune(detail); len(r) > maxApprovalDetail {
 		detail = string(r[:maxApprovalDetail]) + "…"
 	}
-	msg := fmt.Sprintf("<@%s> %s needs your approval *in the terminal*: %s", ownerID, slackEscaper.Replace(agent), slackEscaper.Replace(tool))
+	msg := fmt.Sprintf("<@%s> %s needs your approval: %s", ownerID, slackEscaper.Replace(agent), slackEscaper.Replace(tool))
 	if detail != "" {
 		// Inside a code block only the backticks that would close it matter.
 		msg += "\n```" + strings.ReplaceAll(slackEscaper.Replace(detail), "```", "`​``") + "```"
@@ -137,20 +136,6 @@ func (c *cli) askHook(ctx context.Context, ev hookEvent) int {
 		"permissionDecision":       "deny",
 		"permissionDecisionReason": askHookReason(name, ts),
 	}})
-	return 0
-}
-
-// approvalHook (PermissionRequest) tells the owner in the session's direct
-// channel that the terminal is waiting for approval. It never decides.
-func (c *cli) approvalHook(ctx context.Context, ev hookEvent) int {
-	id, name, me, err := c.directChannel(ctx, c.hookSession(ev))
-	if err != nil {
-		return 0
-	}
-	text := FormatApproval(me.ownerID, me.agentName, ev.ToolName, ev.ToolInput)
-	if _, _, err := c.bot.PostMessageContext(ctx, id, slack.MsgOptionText(text, false)); err != nil {
-		fmt.Fprintf(c.stderr, "slack-agent-chat: posting approval notice to #%s: %v\n", name, err)
-	}
 	return 0
 }
 

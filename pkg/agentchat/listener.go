@@ -2,6 +2,7 @@ package agentchat
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -66,6 +67,12 @@ type Listener struct {
 	relays   map[string]time.Time      // expected %agents echoes: session|channel|text → expiry
 	sessLock map[string]*sync.Mutex    // serializes deliveries per session
 	queues   map[string]chan []pending // per-session delivery queues (Async)
+	approved map[string]approvalClick  // Slack approval button clicks by approval ID
+}
+
+type approvalClick struct {
+	decision string
+	at       time.Time
 }
 
 // queueDepth bounds each session's pending deliveries. Overflow is dropped;
@@ -88,6 +95,7 @@ func NewListener(api SlackAPI, d Deliverer, self Identity, ownerID, stateFile st
 		Now: time.Now, Log: log, state: st,
 		users: map[string]*slack.User{}, chNames: map[string]string{},
 		relays: map[string]time.Time{}, sessLock: map[string]*sync.Mutex{}, queues: map[string]chan []pending{},
+		approved: map[string]approvalClick{},
 	}
 	l.repeats = NewRepeatFilter(repeatWindow, func() time.Time { return l.Now() })
 	return l, nil
@@ -675,11 +683,65 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 		l.Skip(req.SessionID, req.Channel, req.TS)
 	case "expect":
 		l.ExpectRelay(req.SessionID, req.Channel, req.Text)
+	case "approval":
+		return ControlResponse{OK: true, Decision: l.TakeApproval(req.Approval)}
 	case "status":
 	default:
 		return ControlResponse{Error: "unknown op " + req.Op}
 	}
 	return ControlResponse{OK: true, Sessions: l.Status()}
+}
+
+// HandleInteraction records a click on an approval button posted by
+// approval-hook. Only the owner's clicks count; the waiting hook collects
+// the decision with TakeApproval.
+func (l *Listener) HandleInteraction(payload []byte) {
+	var in struct {
+		Type string `json:"type"`
+		User struct {
+			ID string `json:"id"`
+		} `json:"user"`
+		Actions []struct {
+			ActionID string `json:"action_id"`
+			Value    string `json:"value"`
+		} `json:"actions"`
+	}
+	if json.Unmarshal(payload, &in) != nil || in.Type != "block_actions" {
+		return
+	}
+	for _, a := range in.Actions {
+		decision, ok := strings.CutPrefix(a.ActionID, approvalActionPrefix)
+		if !ok || a.Value == "" {
+			continue
+		}
+		if in.User.ID != l.OwnerID {
+			l.Log.Warn("ignoring approval click from someone other than the owner", zap.String("user", in.User.ID), zap.String("approval", a.Value))
+			continue
+		}
+		l.mu.Lock()
+		for id, c := range l.approved {
+			if l.Now().Sub(c.at) > time.Hour {
+				delete(l.approved, id)
+			}
+		}
+		if _, done := l.approved[a.Value]; !done {
+			l.approved[a.Value] = approvalClick{decision, l.Now()}
+		}
+		l.mu.Unlock()
+		l.Log.Info("approval clicked", zap.String("approval", a.Value), zap.String("decision", decision))
+	}
+}
+
+// TakeApproval returns and forgets the decision clicked for an approval, or "".
+func (l *Listener) TakeApproval(id string) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	c, ok := l.approved[id]
+	if !ok {
+		return ""
+	}
+	delete(l.approved, id)
+	return c.decision
 }
 
 // RecoverAll catches every restored session up on messages that arrived while

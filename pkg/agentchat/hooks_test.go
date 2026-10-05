@@ -28,7 +28,7 @@ func TestFormatQuestions(t *testing.T) {
 
 func TestFormatApproval(t *testing.T) {
 	text := FormatApproval("UBR", "claude", "Bash", json.RawMessage(`{"command":"git push origin x && echo <ok>","description":"Push"}`))
-	assert.Equal(t, "<@UBR> claude needs your approval *in the terminal*: Bash\n```git push origin x &amp;&amp; echo &lt;ok&gt;```", text)
+	assert.Equal(t, "<@UBR> claude needs your approval: Bash\n```git push origin x &amp;&amp; echo &lt;ok&gt;```", text)
 
 	text = FormatApproval("UBR", "codex-b", "shell", json.RawMessage(`{"command":["bash","-lc","make test"]}`))
 	assert.Contains(t, text, "```bash -lc make test```", "Codex passes argv arrays")
@@ -37,7 +37,7 @@ func TestFormatApproval(t *testing.T) {
 	assert.Contains(t, text, "```reach example.com```")
 
 	text = FormatApproval("UBR", "claude", "ExitPlanMode", nil)
-	assert.Equal(t, "<@UBR> claude needs your approval *in the terminal*: ExitPlanMode", text)
+	assert.Equal(t, "<@UBR> claude needs your approval: ExitPlanMode", text)
 
 	long := FormatApproval("UBR", "claude", "Bash", json.RawMessage(`{"command":"`+strings.Repeat("x", 600)+`"}`))
 	assert.Contains(t, long, strings.Repeat("x", 500)+"…```")

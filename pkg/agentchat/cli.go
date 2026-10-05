@@ -132,8 +132,10 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
   relay-hook        UserPromptSubmit hook for %agents prompts (reads stdin)
   ask-hook          Claude PreToolUse hook for AskUserQuestion: ask in Slack
                     instead of the terminal while watching a project
-  approval-hook     PermissionRequest hook: tell the user in Slack that the
-                    terminal is waiting for approval
+  approval-hook [--wait 10m]
+                    PermissionRequest hook: ask the user in Slack (buttons or
+                    a thread reply) and answer the prompt; after --wait with
+                    no answer, the terminal asks
   stop-hook         Stop hook: DM the user the final response of a turn they
                     started at the terminal (relay-hook marks those turns)
   listen            run the listener in the foreground (started automatically)
@@ -219,7 +221,13 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		case "ask-hook":
 			return c.askHook(ctx, hook)
 		case "approval-hook":
-			return c.approvalHook(ctx, hook)
+			fs := flag.NewFlagSet("approval-hook", flag.ContinueOnError)
+			fs.SetOutput(stderr)
+			wait := fs.Duration("wait", defaultApprovalWait, "how long to wait for an answer in Slack before the terminal asks")
+			if fs.Parse(rest[1:]) != nil {
+				return 0
+			}
+			return c.approvalHook(context.Background(), hook, *wait)
 		}
 		return c.stopHook(ctx, hook)
 	default:
