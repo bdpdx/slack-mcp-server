@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"os"
@@ -28,6 +29,9 @@ const (
 	ToolConversationsHistory        = "conversations_history"
 	ToolConversationsReplies        = "conversations_replies"
 	ToolConversationsAddMessage     = "conversations_add_message"
+	ToolConversationsDeleteMessage  = "conversations_delete_message"
+	ToolConversationsOpen           = "conversations_open"
+	ToolFilesUpload                 = "files_upload"
 	ToolReactionsAdd                = "reactions_add"
 	ToolReactionsRemove             = "reactions_remove"
 	ToolAttachmentGetData           = "attachment_get_data"
@@ -36,6 +40,11 @@ const (
 	ToolConversationsMark           = "conversations_mark"
 	ToolConversationsLeave          = "conversations_leave"
 	ToolConversationsJoin           = "conversations_join"
+	ToolConversationsRename         = "conversations_rename"
+	ToolConversationsCreate         = "conversations_create"
+	ToolConversationsSetTopic       = "conversations_set_topic"
+	ToolConversationsInvite         = "conversations_invite"
+	ToolConversationsInviteShared   = "conversations_invite_shared"
 	ToolChannelsList                = "channels_list"
 	ToolChannelsMe                  = "channels_me"
 	ToolUsergroupsList              = "usergroups_list"
@@ -53,6 +62,9 @@ var ValidToolNames = []string{
 	ToolConversationsHistory,
 	ToolConversationsReplies,
 	ToolConversationsAddMessage,
+	ToolConversationsDeleteMessage,
+	ToolConversationsOpen,
+	ToolFilesUpload,
 	ToolReactionsAdd,
 	ToolReactionsRemove,
 	ToolAttachmentGetData,
@@ -61,6 +73,11 @@ var ValidToolNames = []string{
 	ToolConversationsMark,
 	ToolConversationsLeave,
 	ToolConversationsJoin,
+	ToolConversationsRename,
+	ToolConversationsCreate,
+	ToolConversationsSetTopic,
+	ToolConversationsInvite,
+	ToolConversationsInviteShared,
 	ToolChannelsList,
 	ToolChannelsMe,
 	ToolUsergroupsList,
@@ -198,7 +215,43 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 			mcp.WithString("blocks",
 				mcp.Description("Raw Slack Block Kit JSON array for rich message formatting (rich_text lists, code blocks, etc.). When provided, this takes precedence over text/content_type for rendering. The text parameter becomes the notification fallback text."),
 			),
+			mcp.WithBoolean("as_user",
+				mcp.DefaultBool(false),
+				mcp.Description("Post as the user instead of the bot. Set to true only when the user asks for the message to come from them (e.g. 'from me', 'as me', 'on my behalf'). Default false posts as the bot."),
+			),
 		), conversationsHandler.ConversationsAddMessageHandler)
+	}
+
+	if shouldAddTool(ToolConversationsDeleteMessage, enabledTools, "SLACK_MCP_DELETE_MESSAGE_TOOL") {
+		s.AddTool(mcp.NewTool(ToolConversationsDeleteMessage,
+			mcp.WithDescription("Delete a message from a public channel, private channel, or direct message (DM, or IM) conversation by channel_id and timestamp."),
+			mcp.WithTitleAnnotation("Delete Message"),
+			mcp.WithDestructiveHintAnnotation(true),
+			mcp.WithString("channel_id",
+				mcp.Required(),
+				mcp.Description("ID of the channel in format Cxxxxxxxxxx or its name starting with #... or @... aka #general or @username_dm."),
+			),
+			mcp.WithString("timestamp",
+				mcp.Required(),
+				mcp.Description("The timestamp of the message to delete in format 1234567890.123456."),
+			),
+		), conversationsHandler.ConversationsDeleteMessageHandler)
+	}
+
+	if shouldAddTool(ToolConversationsOpen, enabledTools, "SLACK_MCP_OPEN_CONVERSATION_TOOL") {
+		s.AddTool(mcp.NewTool(ToolConversationsOpen,
+			mcp.WithDescription("Open or resume a direct message (1 user) or multi-person direct message / group DM (2+ users). Returns the resulting channel_id, which can then be used with conversations_add_message."),
+			mcp.WithTitleAnnotation("Open Conversation"),
+			mcp.WithIdempotentHintAnnotation(true),
+			mcp.WithString("users",
+				mcp.Required(),
+				mcp.Description("Comma-separated list of Slack user IDs, @handles, or emails to open a conversation with, e.g. 'U0123456,U0654321' or '@iffat.hasan,@mary.toledano'. One user opens/resumes a 1:1 DM; two or more open/resume a group DM (mpim)."),
+			),
+			mcp.WithBoolean("return_im",
+				mcp.DefaultBool(false),
+				mcp.Description("Whether to return the full IM channel definition in the response. Only meaningful for a single-user (1:1 DM) request."),
+			),
+		), conversationsHandler.ConversationsOpenHandler)
 	}
 
 	if shouldAddTool(ToolReactionsAdd, enabledTools, "SLACK_MCP_REACTION_TOOL") {
@@ -216,6 +269,10 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 			mcp.WithString("emoji",
 				mcp.Required(),
 				mcp.Description("The name of the emoji to add as a reaction (without colons). Example: 'thumbsup', 'heart', 'rocket'."),
+			),
+			mcp.WithBoolean("as_user",
+				mcp.DefaultBool(false),
+				mcp.Description("React as the user instead of the bot. Set to true only when the user asks for the reaction to come from them (e.g. 'from me', 'as me'). Default false reacts as the bot."),
 			),
 		), conversationsHandler.ReactionsAddHandler)
 	}
@@ -236,6 +293,10 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 				mcp.Required(),
 				mcp.Description("The name of the emoji to remove as a reaction (without colons). Example: 'thumbsup', 'heart', 'rocket'."),
 			),
+			mcp.WithBoolean("as_user",
+				mcp.DefaultBool(false),
+				mcp.Description("Remove the user's reaction instead of the bot's. Set to true when the reaction was added as the user. Default false removes the bot's reaction."),
+			),
 		), conversationsHandler.ReactionsRemoveHandler)
 	}
 
@@ -249,6 +310,41 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 				mcp.Description("The ID of the attachment to download, in format Fxxxxxxxxxx. Attachment IDs (with filenames) can be found in the AttachmentIDs field of message metadata when FileCount > 0."),
 			),
 		), conversationsHandler.FilesGetHandler)
+	}
+
+	if shouldAddTool(ToolFilesUpload, enabledTools, "SLACK_MCP_UPLOAD_FILE_TOOL") {
+		s.AddTool(mcp.NewTool(ToolFilesUpload,
+			mcp.WithDescription("Upload a file and share it to a Slack channel or DM. Provide either UTF-8 text in content or base64-encoded bytes in content_base64; files are limited to 5 MB. This write tool is disabled unless explicitly enabled."),
+			mcp.WithTitleAnnotation("Upload File"),
+			mcp.WithDestructiveHintAnnotation(true),
+			mcp.WithString("channel_id",
+				mcp.Required(),
+				mcp.Description("Channel or DM ID, or a resolvable channel name such as #general or @username_dm."),
+			),
+			mcp.WithString("filename",
+				mcp.Required(),
+				mcp.Description("Filename to display in Slack, including its extension."),
+			),
+			mcp.WithString("content",
+				mcp.Description("UTF-8 text file contents. Use either this or content_base64, not both."),
+			),
+			mcp.WithString("content_base64",
+				mcp.Description("Base64-encoded file bytes for binary or arbitrary text files. Use either this or content, not both."),
+			),
+			mcp.WithString("title",
+				mcp.Description("Optional display title. Defaults to filename."),
+			),
+			mcp.WithString("initial_comment",
+				mcp.Description("Optional message to post with the file."),
+			),
+			mcp.WithString("thread_ts",
+				mcp.Description("Optional parent message timestamp to share the file in an existing thread."),
+			),
+			mcp.WithBoolean("as_user",
+				mcp.DefaultBool(false),
+				mcp.Description("Upload as the user instead of the bot. Set to true only when the user asks for the file to come from them (e.g. 'from me', 'as me'). Default false uploads as the bot."),
+			),
+		), conversationsHandler.FilesUploadHandler)
 	}
 
 	conversationsSearchTool := mcp.NewTool(ToolConversationsSearchMessages,
@@ -295,7 +391,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 		),
 	)
 	// Only register search tool for non-bot tokens (bot tokens cannot use search.messages API)
-	if !provider.IsBotToken() && shouldAddTool(ToolConversationsSearchMessages, enabledTools, "") {
+	if !provider.UserIsBotToken() && shouldAddTool(ToolConversationsSearchMessages, enabledTools, "") {
 		s.AddTool(conversationsSearchTool, conversationsHandler.ConversationsSearchHandler)
 	}
 
@@ -317,7 +413,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 
 	// Register unreads tool - gets all unread messages across channels efficiently.
 	// Bot tokens (xoxb) don't support unread tracking, so exclude them (same pattern as search tool).
-	if !provider.IsBotToken() && shouldAddTool(ToolConversationsUnreads, enabledTools, "") {
+	if !provider.UserIsBotToken() && shouldAddTool(ToolConversationsUnreads, enabledTools, "") {
 		s.AddTool(mcp.NewTool(ToolConversationsUnreads,
 			mcp.WithDescription("Get unread messages across all channels. With browser session tokens (xoxc/xoxd), uses a single API call for complete results. With OAuth user tokens (xoxp), scans a subset of channels per type (limited by max_channels) — results may be partial on large workspaces. Results are prioritized: DMs > group DMs > partner channels > internal channels."),
 			mcp.WithTitleAnnotation("Get Unread Messages"),
@@ -388,6 +484,88 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 			),
 		), conversationsHandler.ConversationsJoinHandler)
 	}
+	if shouldAddTool(ToolConversationsRename, enabledTools, "SLACK_MCP_RENAME_CHANNEL_TOOL") {
+		s.AddTool(mcp.NewTool(ToolConversationsRename,
+			mcp.WithDescription("Rename a public or private channel. Requires the acting user to be the channel creator or a workspace admin/owner."),
+			mcp.WithTitleAnnotation("Rename Channel"),
+			mcp.WithDestructiveHintAnnotation(true),
+			mcp.WithString("channel_id",
+				mcp.Required(),
+				mcp.Description("ID of the channel in format Cxxxxxxxxxx or its name starting with #... (e.g., #general)."),
+			),
+			mcp.WithString("name",
+				mcp.Required(),
+				mcp.Description("New name for the channel, without the leading #. Lowercase, no spaces (use hyphens)."),
+			),
+		), conversationsHandler.ConversationsRenameHandler)
+	}
+
+	if shouldAddTool(ToolConversationsCreate, enabledTools, "SLACK_MCP_CREATE_CHANNEL_TOOL") {
+		s.AddTool(mcp.NewTool(ToolConversationsCreate,
+			mcp.WithDescription("Create a new public or private channel. Returns the resulting channel_id, which can then be used with conversations_invite_shared or conversations_add_message."),
+			mcp.WithTitleAnnotation("Create Channel"),
+			mcp.WithString("name",
+				mcp.Required(),
+				mcp.Description("Name for the new channel, without the leading #. Lowercase, no spaces (use hyphens)."),
+			),
+			mcp.WithBoolean("is_private",
+				mcp.DefaultBool(false),
+				mcp.Description("Whether the channel should be private. Default is false (public channel)."),
+			),
+		), conversationsHandler.ConversationsCreateHandler)
+	}
+
+	if shouldAddTool(ToolConversationsSetTopic, enabledTools, "SLACK_MCP_SET_TOPIC_TOOL") {
+		s.AddTool(mcp.NewTool(ToolConversationsSetTopic,
+			mcp.WithDescription("Set the topic and/or purpose (description) of a channel. At least one of topic or purpose must be provided."),
+			mcp.WithTitleAnnotation("Set Channel Topic"),
+			mcp.WithString("channel_id",
+				mcp.Required(),
+				mcp.Description("ID of the channel in format Cxxxxxxxxxx or its name starting with #... (e.g., #general)."),
+			),
+			mcp.WithString("topic",
+				mcp.Description("New topic for the channel. Omit to leave the topic unchanged."),
+			),
+			mcp.WithString("purpose",
+				mcp.Description("New purpose (description) for the channel. Omit to leave the purpose unchanged."),
+			),
+		), conversationsHandler.ConversationsSetTopicHandler)
+	}
+
+	if shouldAddTool(ToolConversationsInvite, enabledTools, "SLACK_MCP_INVITE_TOOL") {
+		s.AddTool(mcp.NewTool(ToolConversationsInvite,
+			mcp.WithDescription("Invite one or more existing workspace members to a public or private channel."),
+			mcp.WithTitleAnnotation("Invite Users"),
+			mcp.WithIdempotentHintAnnotation(true),
+			mcp.WithString("channel_id",
+				mcp.Required(),
+				mcp.Description("ID of the channel in format Cxxxxxxxxxx or its name starting with #... (e.g., #general)."),
+			),
+			mcp.WithString("users",
+				mcp.Required(),
+				mcp.Description("Comma-separated list of Slack user IDs, @handles, or emails to invite, e.g. 'U0123456,U0654321' or '@iffat.hasan'."),
+			),
+		), conversationsHandler.ConversationsInviteHandler)
+	}
+
+	if shouldAddTool(ToolConversationsInviteShared, enabledTools, "SLACK_MCP_INVITE_SHARED_TOOL") {
+		s.AddTool(mcp.NewTool(ToolConversationsInviteShared,
+			mcp.WithDescription("Invite external people to a channel via Slack Connect, turning it into a shared channel. This sends a real invite (by email, or directly if the person already has a Slack Connect relationship) that is visible to the recipient outside this workspace - it is not a preview or a draft. Requires the acting user/token to have permission to send Slack Connect invites for this workspace."),
+			mcp.WithTitleAnnotation("Invite External User (Slack Connect)"),
+			mcp.WithDestructiveHintAnnotation(true),
+			mcp.WithString("channel_id",
+				mcp.Required(),
+				mcp.Description("ID of the channel in format Cxxxxxxxxxx or its name starting with #... (e.g., #general)."),
+			),
+			mcp.WithString("emails",
+				mcp.Description("Comma-separated list of external email addresses to invite via Slack Connect, e.g. 'ben@platter.com'. Provide either emails or user_ids, not both."),
+			),
+			mcp.WithString("user_ids",
+				mcp.Description("Comma-separated list of Slack user IDs to invite via Slack Connect. Provide either emails or user_ids, not both."),
+			),
+		), conversationsHandler.ConversationsInviteSharedHandler)
+	}
+
 	channelsHandler := handler.NewChannelsHandler(provider, logger)
 	usergroupsHandler := handler.NewUsergroupsHandler(provider, logger)
 
@@ -536,7 +714,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 
 	// Register saved items tools — "Save for Later" panel management.
 	// Requires browser session tokens (xoxc/xoxd); not available for bot or OAuth tokens.
-	if !provider.IsBotToken() && !provider.IsOAuth() && shouldAddTool(ToolSavedList, enabledTools, "") {
+	if !provider.UserIsBotToken() && !provider.UserIsOAuth() && shouldAddTool(ToolSavedList, enabledTools, "") {
 		savedHandler := handler.NewSavedHandler(provider, logger, conversationsHandler)
 		s.AddTool(mcp.NewTool(ToolSavedList,
 			mcp.WithDescription("List saved items from Slack's 'Save for Later' panel. Returns items the user has saved, with optional message content. Replaces the deprecated stars.list API. Requires browser session tokens (xoxc/xoxd)."),
@@ -712,7 +890,7 @@ func buildLoggerMiddleware(logger *zap.Logger) server.ToolHandlerMiddleware {
 		return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			logger.Info("Request received",
 				zap.String("tool", req.Params.Name),
-				zap.Any("params", req.Params),
+				zap.Any("params", loggableToolParams(req)),
 			)
 
 			startTime := time.Now()
@@ -728,5 +906,27 @@ func buildLoggerMiddleware(logger *zap.Logger) server.ToolHandlerMiddleware {
 
 			return res, err
 		}
+	}
+}
+
+func loggableToolParams(req mcp.CallToolRequest) any {
+	if req.Params.Name != ToolFilesUpload {
+		return req.Params
+	}
+
+	args := req.GetArguments()
+	contentBytes := 0
+	if content, ok := args["content"].(string); ok {
+		contentBytes += len(content)
+	}
+	if encoded, ok := args["content_base64"].(string); ok {
+		contentBytes += base64.StdEncoding.DecodedLen(len(encoded))
+	}
+	return map[string]any{
+		"channel_id":               args["channel_id"],
+		"filename":                 args["filename"],
+		"content_bytes":            contentBytes,
+		"content_redacted":         true,
+		"initial_comment_redacted": args["initial_comment"] != nil,
 	}
 }

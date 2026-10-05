@@ -292,7 +292,8 @@ func (h *UsergroupsHandler) UsergroupsUsersUpdateHandler(ctx context.Context, re
 	return mcp.NewToolResultText(string(jsonBytes)), nil
 }
 
-// UsergroupsMeHandler allows the current user to list their groups, join or leave a user group
+// UsergroupsMeHandler allows the current user to list their groups, join or leave a user group.
+// It uses the user token so "me" is the user rather than the bot.
 func (h *UsergroupsHandler) UsergroupsMeHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	h.logger.Debug("UsergroupsMeHandler called", zap.Any("params", request.Params))
 
@@ -307,7 +308,7 @@ func (h *UsergroupsHandler) UsergroupsMeHandler(ctx context.Context, request mcp
 	}
 
 	// Get current user ID
-	authResp, err := h.apiProvider.Slack().AuthTest()
+	authResp, err := h.apiProvider.UserSlack().AuthTest()
 	if err != nil {
 		h.logger.Error("AuthTest failed", zap.Error(err))
 		return nil, err
@@ -332,7 +333,7 @@ func (h *UsergroupsHandler) UsergroupsMeHandler(ctx context.Context, request mcp
 	)
 
 	// Get current members of the group
-	members, err := h.apiProvider.Slack().GetUserGroupMembersContext(ctx, usergroupID)
+	members, err := h.apiProvider.UserSlack().GetUserGroupMembersContext(ctx, usergroupID)
 	if err != nil {
 		h.logger.Error("GetUserGroupMembersContext failed", zap.Error(err))
 		return nil, err
@@ -371,7 +372,7 @@ func (h *UsergroupsHandler) UsergroupsMeHandler(ctx context.Context, request mcp
 
 	// Update the group members
 	membersStr := strings.Join(newMembers, ",")
-	updated, err := h.apiProvider.Slack().UpdateUserGroupMembersContext(ctx, usergroupID, membersStr)
+	updated, err := h.apiProvider.UserSlack().UpdateUserGroupMembersContext(ctx, usergroupID, membersStr)
 	if err != nil {
 		h.logger.Error("UpdateUserGroupMembersContext failed", zap.Error(err))
 		return nil, err
@@ -412,7 +413,7 @@ func (h *UsergroupsHandler) handleListMyGroups(ctx context.Context, currentUserI
 		slack.GetUserGroupsOptionIncludeDisabled(false),
 	}
 
-	groups, err := h.apiProvider.Slack().GetUserGroupsContext(ctx, options...)
+	groups, err := h.apiProvider.UserSlack().GetUserGroupsContext(ctx, options...)
 	if err != nil {
 		h.logger.Error("GetUserGroupsContext failed", zap.Error(err))
 		return nil, err

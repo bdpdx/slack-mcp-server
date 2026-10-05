@@ -97,6 +97,9 @@ func TestValidToolNames(t *testing.T) {
 			ToolConversationsHistory:        true,
 			ToolConversationsReplies:        true,
 			ToolConversationsAddMessage:     true,
+			ToolConversationsDeleteMessage:  true,
+			ToolConversationsOpen:           true,
+			ToolFilesUpload:                 true,
 			ToolReactionsAdd:                true,
 			ToolReactionsRemove:             true,
 			ToolAttachmentGetData:           true,
@@ -105,6 +108,11 @@ func TestValidToolNames(t *testing.T) {
 			ToolConversationsMark:           true,
 			ToolConversationsLeave:          true,
 			ToolConversationsJoin:           true,
+			ToolConversationsRename:         true,
+			ToolConversationsCreate:         true,
+			ToolConversationsSetTopic:       true,
+			ToolConversationsInvite:         true,
+			ToolConversationsInviteShared:   true,
 			ToolChannelsList:                true,
 			ToolChannelsMe:                  true,
 			ToolUsergroupsList:              true,
@@ -129,6 +137,7 @@ func TestValidToolNames(t *testing.T) {
 		assert.Equal(t, "conversations_history", ToolConversationsHistory)
 		assert.Equal(t, "conversations_replies", ToolConversationsReplies)
 		assert.Equal(t, "conversations_add_message", ToolConversationsAddMessage)
+		assert.Equal(t, "files_upload", ToolFilesUpload)
 		assert.Equal(t, "reactions_add", ToolReactionsAdd)
 		assert.Equal(t, "reactions_remove", ToolReactionsRemove)
 		assert.Equal(t, "attachment_get_data", ToolAttachmentGetData)
@@ -137,6 +146,11 @@ func TestValidToolNames(t *testing.T) {
 		assert.Equal(t, "conversations_mark", ToolConversationsMark)
 		assert.Equal(t, "conversations_leave", ToolConversationsLeave)
 		assert.Equal(t, "conversations_join", ToolConversationsJoin)
+		assert.Equal(t, "conversations_rename", ToolConversationsRename)
+		assert.Equal(t, "conversations_create", ToolConversationsCreate)
+		assert.Equal(t, "conversations_set_topic", ToolConversationsSetTopic)
+		assert.Equal(t, "conversations_invite", ToolConversationsInvite)
+		assert.Equal(t, "conversations_invite_shared", ToolConversationsInviteShared)
 		assert.Equal(t, "channels_list", ToolChannelsList)
 		assert.Equal(t, "channels_me", ToolChannelsMe)
 		assert.Equal(t, "usergroups_list", ToolUsergroupsList)
@@ -310,6 +324,45 @@ func TestShouldAddTool_WriteTool_Attachment(t *testing.T) {
 		result := shouldAddTool(ToolAttachmentGetData, []string{ToolAttachmentGetData}, "SLACK_MCP_ATTACHMENT_TOOL")
 		assert.True(t, result, "attachment_get_data should be registered when explicitly in enabledTools")
 	})
+}
+
+func TestShouldAddTool_WriteTool_FileUpload(t *testing.T) {
+	t.Run("disabled by default", func(t *testing.T) {
+		cleanup := setEnv("SLACK_MCP_UPLOAD_FILE_TOOL", "")
+		defer cleanup()
+		assert.False(t, shouldAddTool(ToolFilesUpload, nil, "SLACK_MCP_UPLOAD_FILE_TOOL"))
+	})
+
+	t.Run("enabled by upload policy", func(t *testing.T) {
+		cleanup := setEnv("SLACK_MCP_UPLOAD_FILE_TOOL", "D123")
+		defer cleanup()
+		assert.True(t, shouldAddTool(ToolFilesUpload, nil, "SLACK_MCP_UPLOAD_FILE_TOOL"))
+	})
+
+	t.Run("explicit tools list registers it", func(t *testing.T) {
+		cleanup := setEnv("SLACK_MCP_UPLOAD_FILE_TOOL", "")
+		defer cleanup()
+		assert.True(t, shouldAddTool(ToolFilesUpload, []string{ToolFilesUpload}, "SLACK_MCP_UPLOAD_FILE_TOOL"))
+	})
+}
+
+func TestUnitLoggableToolParamsRedactsUploadContent(t *testing.T) {
+	request := mcp.CallToolRequest{}
+	request.Params.Name = ToolFilesUpload
+	request.Params.Arguments = map[string]any{
+		"channel_id":      "D123",
+		"filename":        "recap.html",
+		"content":         "private file body",
+		"initial_comment": "private comment",
+	}
+
+	logged := loggableToolParams(request).(map[string]any)
+	assert.Equal(t, "D123", logged["channel_id"])
+	assert.Equal(t, len("private file body"), logged["content_bytes"])
+	assert.Equal(t, true, logged["content_redacted"])
+	assert.Equal(t, true, logged["initial_comment_redacted"])
+	assert.NotContains(t, fmt.Sprint(logged), "private file body")
+	assert.NotContains(t, fmt.Sprint(logged), "private comment")
 }
 
 // setupMCPClientServer creates an MCP server with the given options and tool handler,

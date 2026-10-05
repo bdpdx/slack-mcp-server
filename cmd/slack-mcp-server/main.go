@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/korotovsky/slack-mcp-server/pkg/agentchat"
 	"github.com/korotovsky/slack-mcp-server/pkg/provider"
 	"github.com/korotovsky/slack-mcp-server/pkg/server"
 	"github.com/mattn/go-isatty"
@@ -21,15 +22,35 @@ var defaultSseHost = "127.0.0.1"
 var defaultSsePort = 13080
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "chat" {
+		os.Exit(agentchat.RunCLI(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
+
 	var transport string
 	var enabledToolsFlag string
 	var noCache bool
+	var envFile string
 	flag.StringVar(&transport, "t", "stdio", "Transport type (stdio, sse or http)")
 	flag.StringVar(&transport, "transport", "stdio", "Transport type (stdio, sse or http)")
 	flag.StringVar(&enabledToolsFlag, "e", "", "Comma-separated list of enabled tools (empty = all tools)")
 	flag.StringVar(&enabledToolsFlag, "enabled-tools", "", "Comma-separated list of enabled tools (empty = all tools)")
 	flag.BoolVar(&noCache, "no-cache", false, "Skip user/channel cache loading on startup for faster initialization. Lookups by #channel-name or @username will not work; use channel/user IDs instead.")
+	flag.StringVar(&envFile, "env-file", "", "Path to the slack-mcp-server.env file (default: detected from the Codex or Claude Code session)")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s (MCP server):\n", os.Args[0])
+		flag.PrintDefaults()
+		fmt.Fprintf(flag.CommandLine.Output(), "\nAgent chat helpers: %s chat --help\n", os.Args[0])
+	}
 	flag.Parse()
+
+	envPath, err := agentchat.ResolveEnvFile(envFile, os.Getenv)
+	if err == nil {
+		err = agentchat.LoadEnvFile(envPath)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "slack-mcp-server: %v\n", err)
+		os.Exit(1)
+	}
 
 	if enabledToolsFlag == "" {
 		enabledToolsFlag = os.Getenv("SLACK_MCP_ENABLED_TOOLS")
@@ -55,6 +76,14 @@ func main() {
 	err = validateToolConfig(addMessageToolEnv)
 	if err != nil {
 		logger.Fatal("error in SLACK_MCP_ADD_MESSAGE_TOOL",
+			zap.String("context", "console"),
+			zap.Error(err),
+		)
+	}
+
+	err = validateToolConfig(os.Getenv("SLACK_MCP_UPLOAD_FILE_TOOL"))
+	if err != nil {
+		logger.Fatal("error in SLACK_MCP_UPLOAD_FILE_TOOL",
 			zap.String("context", "console"),
 			zap.Error(err),
 		)

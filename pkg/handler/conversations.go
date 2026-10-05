@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,7 +24,6 @@ import (
 	"github.com/korotovsky/slack-mcp-server/pkg/text"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/slack-go/slack"
-	slackGoUtil "github.com/takara2314/slack-go-util"
 	"go.uber.org/zap"
 )
 
@@ -99,16 +99,38 @@ type addMessageParams struct {
 	text        string
 	contentType string
 	blocks      []slack.Block
+	asUser      bool
+}
+
+type deleteMessageParams struct {
+	channel   string
+	timestamp string
+}
+
+type openConversationParams struct {
+	users    []string
+	returnIM bool
 }
 
 type addReactionParams struct {
 	channel   string
 	timestamp string
 	emoji     string
+	asUser    bool
 }
 
 type filesGetParams struct {
 	fileID string
+}
+
+type filesUploadParams struct {
+	channel         string
+	filename        string
+	content         string
+	title           string
+	initialComment  string
+	threadTimestamp string
+	asUser          bool
 }
 
 type usersSearchParams struct {
@@ -130,6 +152,22 @@ type unreadsParams struct {
 type markParams struct {
 	channel string
 	ts      string
+}
+
+type createConversationParams struct {
+	name      string
+	isPrivate bool
+}
+
+type inviteSharedParams struct {
+	channel string
+	emails  []string
+	userIDs []string
+}
+
+type inviteParams struct {
+	channel string
+	users   []string
 }
 type ConversationsHandler struct {
 	apiProvider *provider.ApiProvider
@@ -224,31 +262,11 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 		options = append(options, slack.MsgOptionTS(params.threadTs))
 	}
 
-	if params.blocks != nil {
-		// Raw blocks provided: use them directly. If text is also provided, it
-		// serves as the notification/fallback text.
-		options = append(options, slack.MsgOptionBlocks(params.blocks...))
-		if params.text != "" {
-			options = append(options, slack.MsgOptionText(params.text, false))
-		}
-	} else {
-		switch params.contentType {
-		case "text/plain":
-			options = append(options, slack.MsgOptionDisableMarkdown())
-			options = append(options, slack.MsgOptionText(params.text, false))
-		case "text/markdown":
-			blocks, err := slackGoUtil.ConvertMarkdownTextToBlocks(params.text)
-			if err != nil {
-				ch.logger.Warn("Markdown parsing error", zap.Error(err))
-				options = append(options, slack.MsgOptionDisableMarkdown())
-				options = append(options, slack.MsgOptionText(params.text, false))
-			} else {
-				options = append(options, slack.MsgOptionBlocks(blocks...))
-			}
-		default:
-			return nil, errors.New("content_type must be either 'text/plain' or 'text/markdown'")
-		}
+	contentOpts, err := contentOptions(params.text, params.contentType, params.blocks, ch.logger)
+	if err != nil {
+		return nil, err
 	}
+	options = append(options, contentOpts...)
 
 	unfurlOpt := os.Getenv("SLACK_MCP_ADD_MESSAGE_UNFURLING")
 	if text.IsUnfurlingEnabled(params.text, unfurlOpt, ch.logger) {
@@ -263,7 +281,11 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 		zap.String("thread_ts", params.threadTs),
 		zap.String("content_type", params.contentType),
 	)
-	respChannel, respTimestamp, err := ch.apiProvider.Slack().PostMessageContext(ctx, params.channel, options...)
+	client, err := ch.apiProvider.SlackAs(params.asUser)
+	if err != nil {
+		return nil, err
+	}
+	respChannel, respTimestamp, err := client.PostMessageContext(ctx, params.channel, options...)
 	if err != nil {
 		ch.logger.Error("Slack PostMessageContext failed", zap.Error(err))
 		return nil, err
@@ -271,7 +293,7 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 
 	toolConfig := os.Getenv("SLACK_MCP_ADD_MESSAGE_MARK")
 	if toolConfig == "1" || toolConfig == "true" || toolConfig == "yes" {
-		err := ch.apiProvider.Slack().MarkConversationContext(ctx, params.channel, respTimestamp)
+		err := client.MarkConversationContext(ctx, params.channel, respTimestamp)
 		if err != nil {
 			ch.logger.Error("Slack MarkConversationContext failed", zap.Error(err))
 			return nil, err
@@ -282,6 +304,183 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 		return mcp.NewToolResultText(fmt.Sprintf("Successfully posted message to channel %s in thread %s (ts=%s)", respChannel, params.threadTs, respTimestamp)), nil
 	}
 	return mcp.NewToolResultText(fmt.Sprintf("Successfully posted message to channel %s (ts=%s)", respChannel, respTimestamp)), nil
+}
+
+// ConversationsDeleteMessageHandler deletes a message and returns a confirmation
+func (ch *ConversationsHandler) ConversationsDeleteMessageHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ch.logger.Debug("ConversationsDeleteMessageHandler called", zap.Any("params", request.Params))
+
+	if ready, err := ch.apiProvider.IsReady(); !ready {
+		ch.logger.Error("API provider not ready", zap.Error(err))
+		return nil, err
+	}
+
+	params, err := ch.parseParamsToolDeleteMessage(ctx, request)
+	if err != nil {
+		ch.logger.Error("Failed to parse delete-message params", zap.Error(err))
+		return nil, err
+	}
+
+	ch.logger.Debug("Deleting Slack message",
+		zap.String("channel", params.channel),
+		zap.String("timestamp", params.timestamp),
+	)
+	respChannel, respTimestamp, err := ch.apiProvider.UserSlack().DeleteMessageContext(ctx, params.channel, params.timestamp)
+	if err != nil {
+		ch.logger.Error("Slack DeleteMessageContext failed", zap.Error(err))
+		return nil, err
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Successfully deleted message from channel %s (ts=%s)", respChannel, respTimestamp)), nil
+}
+
+func (ch *ConversationsHandler) parseParamsToolDeleteMessage(ctx context.Context, request mcp.CallToolRequest) (*deleteMessageParams, error) {
+	toolConfig := os.Getenv("SLACK_MCP_DELETE_MESSAGE_TOOL")
+	enabledTools := os.Getenv("SLACK_MCP_ENABLED_TOOLS")
+
+	if toolConfig == "" {
+		if !strings.Contains(enabledTools, "conversations_delete_message") {
+			ch.logger.Error("Delete-message tool disabled by default")
+			return nil, errors.New(
+				"by default, the conversations_delete_message tool is disabled to guard Slack workspaces against accidental deletion. " +
+					"To enable it, set the SLACK_MCP_DELETE_MESSAGE_TOOL environment variable to true, 1, or comma separated list of channels, " +
+					"e.g. 'SLACK_MCP_DELETE_MESSAGE_TOOL=true' for all channels and DMs",
+			)
+		}
+		toolConfig = "true"
+	}
+
+	channel := request.GetString("channel_id", "")
+	if channel == "" {
+		ch.logger.Error("channel_id missing in delete-message params")
+		return nil, errors.New("channel_id must be a string")
+	}
+	channel, err := ch.resolveChannelID(ctx, channel)
+	if err != nil {
+		ch.logger.Error("Channel not found", zap.String("channel", channel), zap.Error(err))
+		return nil, err
+	}
+	if !isChannelAllowedForConfig(channel, toolConfig) {
+		ch.logger.Warn("Delete-message tool not allowed for channel", zap.String("channel", channel), zap.String("policy", toolConfig))
+		return nil, fmt.Errorf("conversations_delete_message tool is not allowed for channel %q, applied policy: %s", channel, toolConfig)
+	}
+
+	timestamp := request.GetString("timestamp", "")
+	if timestamp == "" {
+		ch.logger.Error("timestamp missing in delete-message params")
+		return nil, errors.New("timestamp must be a string")
+	}
+	if !strings.Contains(timestamp, ".") {
+		ch.logger.Error("Invalid timestamp format", zap.String("timestamp", timestamp))
+		return nil, errors.New("timestamp must be a valid timestamp in format 1234567890.123456")
+	}
+
+	return &deleteMessageParams{
+		channel:   channel,
+		timestamp: timestamp,
+	}, nil
+}
+
+// ConversationsOpenHandler opens (or resumes) a direct message or multi-person
+// direct message and returns the resulting channel ID.
+func (ch *ConversationsHandler) ConversationsOpenHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ch.logger.Debug("ConversationsOpenHandler called", zap.Any("params", request.Params))
+
+	if ready, err := ch.apiProvider.IsReady(); !ready {
+		ch.logger.Error("API provider not ready", zap.Error(err))
+		return nil, err
+	}
+
+	params, err := ch.parseParamsToolOpenConversation(ctx, request)
+	if err != nil {
+		ch.logger.Error("Failed to parse open-conversation params", zap.Error(err))
+		return nil, err
+	}
+
+	ch.logger.Debug("Opening Slack conversation", zap.Strings("users", params.users))
+	channel, noOp, alreadyOpen, err := ch.apiProvider.UserSlack().OpenConversationContext(ctx, &slack.OpenConversationParameters{
+		Users:    params.users,
+		ReturnIM: params.returnIM,
+	})
+	if err != nil {
+		ch.logger.Error("Slack OpenConversationContext failed", zap.Error(err))
+		return nil, err
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf(
+		"Opened conversation %s with users [%s] (already_open=%v, no_op=%v)",
+		channel.ID, strings.Join(params.users, ", "), alreadyOpen, noOp,
+	)), nil
+}
+
+func (ch *ConversationsHandler) parseParamsToolOpenConversation(ctx context.Context, request mcp.CallToolRequest) (*openConversationParams, error) {
+	toolConfig := os.Getenv("SLACK_MCP_OPEN_CONVERSATION_TOOL")
+	if toolConfig == "" {
+		ch.logger.Error("Open-conversation tool disabled by default")
+		return nil, errors.New(
+			"by default, the conversations_open tool is disabled to guard against accidentally creating new DMs or group DMs. " +
+				"To enable it, set the SLACK_MCP_OPEN_CONVERSATION_TOOL environment variable to true, " +
+				"e.g. 'SLACK_MCP_OPEN_CONVERSATION_TOOL=true'",
+		)
+	}
+
+	raw := request.GetString("users", "")
+	if raw == "" {
+		ch.logger.Error("users missing in open-conversation params")
+		return nil, errors.New("users must be a non-empty comma-separated list of Slack user IDs, @handles, or emails")
+	}
+
+	userIDs, err := ch.resolveUserTokens(ctx, raw)
+	if err != nil {
+		return nil, err
+	}
+
+	return &openConversationParams{
+		users:    userIDs,
+		returnIM: request.GetBool("return_im", false),
+	}, nil
+}
+
+// resolveUserTokens resolves a comma-separated list of Slack user IDs, @handles, or emails
+// to their canonical user IDs, via SearchUsers (which already short-circuits to an exact ID
+// lookup when a token looks like a Slack user ID, so we don't duplicate that pattern match here).
+func (ch *ConversationsHandler) resolveUserTokens(ctx context.Context, raw string) ([]string, error) {
+	tokens := strings.Split(raw, ",")
+	userIDs := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		token = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(token), "@"))
+		if token == "" {
+			continue
+		}
+
+		matches, err := ch.apiProvider.SearchUsers(ctx, token, 5)
+		if err != nil {
+			ch.logger.Error("Failed to resolve user", zap.String("query", token), zap.Error(err))
+			return nil, fmt.Errorf("failed to resolve user %q: %w", token, err)
+		}
+		exact := make([]slack.User, 0, 1)
+		for _, m := range matches {
+			if strings.EqualFold(m.Name, token) || strings.EqualFold(m.Profile.DisplayName, token) || strings.EqualFold(m.Profile.Email, token) {
+				exact = append(exact, m)
+			}
+		}
+		switch {
+		case len(exact) == 1:
+			userIDs = append(userIDs, exact[0].ID)
+		case len(matches) == 1:
+			userIDs = append(userIDs, matches[0].ID)
+		case len(matches) == 0:
+			return nil, fmt.Errorf("no Slack user found matching %q", token)
+		default:
+			return nil, fmt.Errorf("ambiguous user %q matched %d users, use a raw user ID (Uxxxxxxxxxx) instead", token, len(matches))
+		}
+	}
+
+	if len(userIDs) == 0 {
+		return nil, errors.New("no valid users resolved from the users parameter")
+	}
+
+	return userIDs, nil
 }
 
 // ReactionsAddHandler adds an emoji reaction to a message
@@ -311,7 +510,11 @@ func (ch *ConversationsHandler) ReactionsAddHandler(ctx context.Context, request
 		zap.String("emoji", params.emoji),
 	)
 
-	err = ch.apiProvider.Slack().AddReactionContext(ctx, params.emoji, itemRef)
+	client, err := ch.apiProvider.SlackAs(params.asUser)
+	if err != nil {
+		return nil, err
+	}
+	err = client.AddReactionContext(ctx, params.emoji, itemRef)
 	if err != nil {
 		ch.logger.Error("Slack AddReactionContext failed", zap.Error(err))
 		return nil, err
@@ -347,7 +550,11 @@ func (ch *ConversationsHandler) ReactionsRemoveHandler(ctx context.Context, requ
 		zap.String("emoji", params.emoji),
 	)
 
-	err = ch.apiProvider.Slack().RemoveReactionContext(ctx, params.emoji, itemRef)
+	client, err := ch.apiProvider.SlackAs(params.asUser)
+	if err != nil {
+		return nil, err
+	}
+	err = client.RemoveReactionContext(ctx, params.emoji, itemRef)
 	if err != nil {
 		ch.logger.Error("Slack RemoveReactionContext failed", zap.Error(err))
 		return nil, err
@@ -435,7 +642,15 @@ func (ch *ConversationsHandler) FilesGetHandler(ctx context.Context, request mcp
 		return nil, err
 	}
 
-	fileInfo, _, _, err := ch.apiProvider.Slack().GetFileInfoContext(ctx, params.fileID, 0, 0)
+	// The bot can only see files in conversations it belongs to; retry with
+	// the user token so attachments in the user's DMs and channels work too.
+	client := ch.apiProvider.Slack()
+	fileInfo, _, _, err := client.GetFileInfoContext(ctx, params.fileID, 0, 0)
+	if err != nil && ch.apiProvider.HasUserClient() {
+		ch.logger.Debug("Bot GetFileInfoContext failed, retrying with user token", zap.Error(err))
+		client = ch.apiProvider.UserSlack()
+		fileInfo, _, _, err = client.GetFileInfoContext(ctx, params.fileID, 0, 0)
+	}
 	if err != nil {
 		ch.logger.Error("Slack GetFileInfoContext failed", zap.Error(err))
 		return nil, err
@@ -454,7 +669,7 @@ func (ch *ConversationsHandler) FilesGetHandler(ctx context.Context, request mcp
 		return nil, errors.New("file has no downloadable URL")
 	}
 
-	err = ch.apiProvider.Slack().GetFileContext(ctx, downloadURL, &buf)
+	err = client.GetFileContext(ctx, downloadURL, &buf)
 	if err != nil {
 		ch.logger.Error("Slack GetFileContext failed", zap.Error(err))
 		return nil, err
@@ -493,6 +708,128 @@ func (ch *ConversationsHandler) FilesGetHandler(ctx context.Context, request mcp
 		escapeJSON(contentStr))
 
 	return mcp.NewToolResultText(result), nil
+}
+
+// FilesUploadHandler uploads a file to Slack and shares it to one conversation.
+func (ch *ConversationsHandler) FilesUploadHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ch.logger.Debug("FilesUploadHandler called", zap.String("channel_id", request.GetString("channel_id", "")), zap.String("filename", request.GetString("filename", "")))
+
+	if ready, err := ch.apiProvider.IsReady(); !ready {
+		return nil, err
+	}
+
+	params, err := ch.parseParamsToolFilesUpload(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := ch.apiProvider.SlackAs(params.asUser)
+	if err != nil {
+		return nil, err
+	}
+	file, err := client.UploadFileContext(ctx, slack.UploadFileParameters{
+		Content:         params.content,
+		FileSize:        len([]byte(params.content)),
+		Filename:        params.filename,
+		Title:           params.title,
+		InitialComment:  params.initialComment,
+		Channel:         params.channel,
+		ThreadTimestamp: params.threadTimestamp,
+	})
+	if err != nil {
+		ch.logger.Error("Slack file upload failed", zap.String("channel", params.channel), zap.String("filename", params.filename), zap.Error(err))
+		return nil, err
+	}
+
+	result, err := json.Marshal(map[string]string{
+		"file_id":  file.ID,
+		"filename": params.filename,
+		"title":    file.Title,
+		"channel":  params.channel,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling uploaded file metadata: %w", err)
+	}
+	return mcp.NewToolResultText(string(result)), nil
+}
+
+func (ch *ConversationsHandler) parseParamsToolFilesUpload(ctx context.Context, request mcp.CallToolRequest) (*filesUploadParams, error) {
+	toolConfig := os.Getenv("SLACK_MCP_UPLOAD_FILE_TOOL")
+	enabledTools := os.Getenv("SLACK_MCP_ENABLED_TOOLS")
+	if toolConfig == "" {
+		if !slices.ContainsFunc(strings.Split(enabledTools, ","), func(tool string) bool {
+			return strings.TrimSpace(tool) == "files_upload"
+		}) {
+			return nil, errors.New("file uploads are disabled by default; set SLACK_MCP_UPLOAD_FILE_TOOL to true or to a comma-separated channel allowlist")
+		}
+		toolConfig = "true"
+	}
+	channel := strings.TrimSpace(request.GetString("channel_id", ""))
+	if channel == "" {
+		return nil, errors.New("channel_id is required")
+	}
+	channel, err := ch.resolveChannelID(ctx, channel)
+	if err != nil {
+		return nil, err
+	}
+	if !isChannelAllowedForConfig(channel, toolConfig) {
+		return nil, fmt.Errorf("files_upload is not allowed for channel %q by SLACK_MCP_UPLOAD_FILE_TOOL", channel)
+	}
+
+	filename := strings.TrimSpace(request.GetString("filename", ""))
+	if filename == "" {
+		return nil, errors.New("filename is required")
+	}
+	if strings.ContainsAny(filename, `/\\`) || filename == "." || filename == ".." {
+		return nil, errors.New("filename must be a plain filename without path separators")
+	}
+
+	args := request.GetArguments()
+	textContent, hasText := args["content"]
+	base64Content, hasBase64 := args["content_base64"]
+	if hasText == hasBase64 {
+		return nil, errors.New("provide exactly one of content or content_base64")
+	}
+	var content string
+	if hasText {
+		content, _ = textContent.(string)
+	} else {
+		encoded, ok := base64Content.(string)
+		if !ok || encoded == "" {
+			return nil, errors.New("content_base64 must be a non-empty base64 string")
+		}
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return nil, fmt.Errorf("content_base64 is invalid: %w", err)
+		}
+		content = string(decoded)
+	}
+	if content == "" {
+		return nil, errors.New("file content must not be empty")
+	}
+	if len([]byte(content)) > maxFileSizeBytes {
+		return nil, fmt.Errorf("file size exceeds the maximum allowed size of %d bytes", maxFileSizeBytes)
+	}
+
+	threadTimestamp := request.GetString("thread_ts", "")
+	if threadTimestamp != "" && !strings.Contains(threadTimestamp, ".") {
+		return nil, errors.New("thread_ts must be a valid timestamp in format 1234567890.123456")
+	}
+
+	title := strings.TrimSpace(request.GetString("title", ""))
+	if title == "" {
+		title = filename
+	}
+
+	return &filesUploadParams{
+		channel:         channel,
+		filename:        filename,
+		content:         content,
+		title:           title,
+		initialComment:  request.GetString("initial_comment", ""),
+		threadTimestamp: threadTimestamp,
+		asUser:          request.GetBool("as_user", false),
+	}, nil
 }
 
 func isImageMimetype(mimetype string) bool {
@@ -621,7 +958,7 @@ func (ch *ConversationsHandler) ConversationsSearchHandler(ctx context.Context, 
 
 	rl := limiter.Tier2.Limiter()
 	messagesRes, err := limiter.CallWithRetry(ctx, rl, 2, slackRetryAfter, func() (*slack.SearchMessages, error) {
-		msgs, _, err := ch.apiProvider.Slack().SearchContext(ctx, params.query, searchParams)
+		msgs, _, err := ch.apiProvider.UserSlack().SearchContext(ctx, params.query, searchParams)
 		return msgs, err
 	})
 	if err != nil {
@@ -662,7 +999,7 @@ func (ch *ConversationsHandler) ConversationsUnreadsHandler(ctx context.Context,
 
 	// Fetch muted channels unless the caller wants them included
 	if !params.includeMuted {
-		mutedChannels, err := ch.apiProvider.Slack().GetMutedChannels(ctx)
+		mutedChannels, err := ch.apiProvider.UserSlack().GetMutedChannels(ctx)
 		if err != nil {
 			ch.logger.Warn("Failed to fetch muted channels, proceeding without mute filter", zap.Error(err))
 			params.mutedUnavailable = true
@@ -676,8 +1013,8 @@ func (ch *ConversationsHandler) ConversationsUnreadsHandler(ctx context.Context,
 	// - xoxc/xoxd (browser session): use fast client.counts API
 	// - xoxp (OAuth user): fall back to conversations.info/history approach
 	// - xoxb (bot): not supported — unreads is a user-level concept
-	if ch.apiProvider.IsOAuth() {
-		if ch.apiProvider.IsBotToken() {
+	if ch.apiProvider.UserIsOAuth() {
+		if ch.apiProvider.UserIsBotToken() {
 			return nil, fmt.Errorf(
 				"conversations_unreads requires a user token (xoxp) or browser session tokens (xoxc/xoxd); " +
 					"bot tokens (xoxb) do not support unread tracking",
@@ -687,7 +1024,7 @@ func (ch *ConversationsHandler) ConversationsUnreadsHandler(ctx context.Context,
 		return ch.getUnreadsViaConversationsInfo(ctx, params)
 	}
 
-	counts, err := ch.apiProvider.Slack().ClientCounts(ctx)
+	counts, err := ch.apiProvider.UserSlack().ClientCounts(ctx)
 	if err != nil {
 		ch.logger.Error("ClientCounts failed", zap.Error(err))
 		return nil, fmt.Errorf("failed to get client counts: %v", err)
@@ -867,7 +1204,7 @@ func (ch *ConversationsHandler) processClientCountsResponse(ctx context.Context,
 			backfilled++
 			continue
 		}
-		history, err := ch.apiProvider.Slack().GetConversationHistoryContext(ctx,
+		history, err := ch.apiProvider.UserSlack().GetConversationHistoryContext(ctx,
 			&slack.GetConversationHistoryParameters{
 				ChannelID: unreadChannels[i].ChannelID,
 				Oldest:    unreadChannels[i].LastRead,
@@ -906,7 +1243,7 @@ func (ch *ConversationsHandler) processClientCountsResponse(ctx context.Context,
 			Inclusive: false,
 		}
 
-		history, err := ch.apiProvider.Slack().GetConversationHistoryContext(ctx, &historyParams)
+		history, err := ch.apiProvider.UserSlack().GetConversationHistoryContext(ctx, &historyParams)
 		if err != nil {
 			ch.logger.Warn("Failed to get history for channel",
 				zap.String("channel", unreadChannels[i].ChannelID),
@@ -1035,7 +1372,7 @@ func (ch *ConversationsHandler) getUnreadsViaConversationsInfo(ctx context.Conte
 		}
 
 		history, err := limiter.CallWithRetry(ctx, rl, 2, slackRetryAfter, func() (*slack.GetConversationHistoryResponse, error) {
-			return ch.apiProvider.Slack().GetConversationHistoryContext(ctx, &historyParams)
+			return ch.apiProvider.UserSlack().GetConversationHistoryContext(ctx, &historyParams)
 		})
 		if err != nil {
 			ch.logger.Warn("Failed to get history for channel",
@@ -1148,7 +1485,7 @@ func (ch *ConversationsHandler) scanTypeGroupForUnreads(
 			Cursor:          cursor,
 		}
 
-		channels, nextCursor, err := ch.apiProvider.Slack().GetConversationsForUserContext(ctx, userConvParams)
+		channels, nextCursor, err := ch.apiProvider.UserSlack().GetConversationsForUserContext(ctx, userConvParams)
 		apiCalls++
 		if err != nil {
 			ch.logger.Warn("Failed to list conversations for type group",
@@ -1181,7 +1518,7 @@ func (ch *ConversationsHandler) scanTypeGroupForUnreads(
 			// that silently skip channels (see: slack-go does NOT auto-retry
 			// on *RateLimitedError for standard client methods).
 			info, err := limiter.CallWithRetry(ctx, rl, 2, slackRetryAfter, func() (*slack.Channel, error) {
-				return ch.apiProvider.Slack().GetConversationInfoContext(ctx, &slack.GetConversationInfoInput{
+				return ch.apiProvider.UserSlack().GetConversationInfoContext(ctx, &slack.GetConversationInfoInput{
 					ChannelID: channel.ID,
 				})
 			})
@@ -1242,7 +1579,7 @@ func (ch *ConversationsHandler) scanTypeGroupForUnreads(
 					Inclusive: false,
 				}
 				history, err := limiter.CallWithRetry(ctx, rl, 2, slackRetryAfter, func() (*slack.GetConversationHistoryResponse, error) {
-					return ch.apiProvider.Slack().GetConversationHistoryContext(ctx, &historyParams)
+					return ch.apiProvider.UserSlack().GetConversationHistoryContext(ctx, &historyParams)
 				})
 				apiCalls++
 				if err != nil {
@@ -1434,6 +1771,238 @@ func (ch *ConversationsHandler) ConversationsJoinHandler(ctx context.Context, re
 
 	ch.logger.Info("Joined conversation", zap.String("channel", channel))
 	return mcp.NewToolResultText(fmt.Sprintf("Successfully joined %s", channel)), nil
+}
+
+func (ch *ConversationsHandler) ConversationsRenameHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ch.logger.Debug("ConversationsRenameHandler called", zap.Any("params", request.Params))
+
+	channel := request.GetString("channel_id", "")
+	if channel == "" {
+		return nil, fmt.Errorf("channel_id is required")
+	}
+
+	name := request.GetString("name", "")
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+
+	channel, err := ch.resolveChannelID(ctx, channel)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve channel: %w", err)
+	}
+
+	renamed, err := ch.apiProvider.UserSlack().RenameConversationContext(ctx, channel, name)
+	if err != nil {
+		ch.logger.Error("Failed to rename conversation", zap.Error(err))
+		return nil, fmt.Errorf("failed to rename conversation: %v", err)
+	}
+
+	ch.logger.Info("Renamed conversation", zap.String("channel", channel), zap.String("name", renamed.Name))
+	return mcp.NewToolResultText(fmt.Sprintf("Successfully renamed %s to #%s", channel, renamed.Name)), nil
+}
+
+func (ch *ConversationsHandler) ConversationsSetTopicHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ch.logger.Debug("ConversationsSetTopicHandler called", zap.Any("params", request.Params))
+
+	channel := request.GetString("channel_id", "")
+	if channel == "" {
+		return nil, fmt.Errorf("channel_id is required")
+	}
+
+	args := request.GetArguments()
+	topic, hasTopic := args["topic"].(string)
+	purpose, hasPurpose := args["purpose"].(string)
+	if !hasTopic && !hasPurpose {
+		return nil, fmt.Errorf("at least one of topic or purpose is required")
+	}
+
+	channel, err := ch.resolveChannelID(ctx, channel)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve channel: %w", err)
+	}
+
+	var updated []string
+	if hasTopic {
+		if _, err := ch.apiProvider.UserSlack().SetTopicOfConversationContext(ctx, channel, topic); err != nil {
+			ch.logger.Error("Failed to set conversation topic", zap.Error(err))
+			return nil, fmt.Errorf("failed to set conversation topic: %v", err)
+		}
+		updated = append(updated, "topic")
+	}
+	if hasPurpose {
+		if _, err := ch.apiProvider.UserSlack().SetPurposeOfConversationContext(ctx, channel, purpose); err != nil {
+			ch.logger.Error("Failed to set conversation purpose", zap.Error(err))
+			return nil, fmt.Errorf("failed to set conversation purpose: %v", err)
+		}
+		updated = append(updated, "purpose")
+	}
+
+	ch.logger.Info("Updated conversation", zap.String("channel", channel), zap.Strings("fields", updated))
+	return mcp.NewToolResultText(fmt.Sprintf("Successfully updated %s of %s", strings.Join(updated, " and "), channel)), nil
+}
+
+func (ch *ConversationsHandler) ConversationsCreateHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ch.logger.Debug("ConversationsCreateHandler called", zap.Any("params", request.Params))
+
+	params, err := ch.parseParamsToolCreateConversation(request)
+	if err != nil {
+		ch.logger.Error("Failed to parse create-conversation params", zap.Error(err))
+		return nil, err
+	}
+
+	channel, err := ch.apiProvider.UserSlack().CreateConversationContext(ctx, slack.CreateConversationParams{
+		ChannelName: params.name,
+		IsPrivate:   params.isPrivate,
+	})
+	if err != nil {
+		ch.logger.Error("Slack CreateConversationContext failed", zap.Error(err))
+		return nil, fmt.Errorf("failed to create channel %q: %w", params.name, err)
+	}
+
+	ch.logger.Info("Created conversation", zap.String("channel", channel.ID), zap.String("name", channel.Name))
+	return mcp.NewToolResultText(fmt.Sprintf("Created channel #%s with ID %s", channel.Name, channel.ID)), nil
+}
+
+func (ch *ConversationsHandler) parseParamsToolCreateConversation(request mcp.CallToolRequest) (*createConversationParams, error) {
+	name := request.GetString("name", "")
+	if name == "" {
+		return nil, errors.New("name is required")
+	}
+
+	return &createConversationParams{
+		name:      name,
+		isPrivate: request.GetBool("is_private", false),
+	}, nil
+}
+
+func (ch *ConversationsHandler) ConversationsInviteHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ch.logger.Debug("ConversationsInviteHandler called", zap.Any("params", request.Params))
+
+	params, err := ch.parseParamsToolInvite(ctx, request)
+	if err != nil {
+		ch.logger.Error("Failed to parse invite params", zap.Error(err))
+		return nil, err
+	}
+
+	channel, err := ch.apiProvider.UserSlack().InviteUsersToConversationContext(ctx, params.channel, params.users...)
+	if err != nil {
+		ch.logger.Error("Slack InviteUsersToConversationContext failed", zap.Error(err))
+		return nil, fmt.Errorf("failed to invite users to channel %s: %w", params.channel, err)
+	}
+
+	ch.logger.Info("Invited users to conversation", zap.String("channel", channel.ID), zap.Strings("users", params.users))
+	return mcp.NewToolResultText(fmt.Sprintf("Invited [%s] to %s", strings.Join(params.users, ", "), channel.ID)), nil
+}
+
+func (ch *ConversationsHandler) parseParamsToolInvite(ctx context.Context, request mcp.CallToolRequest) (*inviteParams, error) {
+	channel := request.GetString("channel_id", "")
+	if channel == "" {
+		return nil, errors.New("channel_id is required")
+	}
+
+	channel, err := ch.resolveChannelID(ctx, channel)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve channel: %w", err)
+	}
+
+	raw := request.GetString("users", "")
+	if raw == "" {
+		return nil, errors.New("users must be a non-empty comma-separated list of Slack user IDs, @handles, or emails")
+	}
+
+	userIDs, err := ch.resolveUserTokens(ctx, raw)
+	if err != nil {
+		return nil, err
+	}
+
+	return &inviteParams{channel: channel, users: userIDs}, nil
+}
+
+func (ch *ConversationsHandler) ConversationsInviteSharedHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ch.logger.Debug("ConversationsInviteSharedHandler called", zap.Any("params", request.Params))
+
+	if toolConfig := os.Getenv("SLACK_MCP_INVITE_SHARED_TOOL"); toolConfig == "" {
+		ch.logger.Error("Invite-shared tool disabled by default")
+		return nil, errors.New(
+			"by default, the conversations_invite_shared tool is disabled to guard against accidentally sending real Slack Connect invites. " +
+				"To enable it, set the SLACK_MCP_INVITE_SHARED_TOOL environment variable, e.g. 'SLACK_MCP_INVITE_SHARED_TOOL=true'",
+		)
+	}
+
+	params, err := ch.parseParamsToolInviteShared(ctx, request)
+	if err != nil {
+		ch.logger.Error("Failed to parse invite-shared params", zap.Error(err))
+		return nil, err
+	}
+
+	var inviteID string
+	var isLegacySharedChannel bool
+	if len(params.emails) > 0 {
+		inviteID, isLegacySharedChannel, err = ch.apiProvider.Slack().InviteSharedEmailsToConversationContext(ctx, params.channel, params.emails...)
+	} else {
+		inviteID, isLegacySharedChannel, err = ch.apiProvider.Slack().InviteSharedUserIDsToConversationContext(ctx, params.channel, params.userIDs...)
+	}
+	if err != nil {
+		ch.logger.Error("Slack InviteSharedToConversationContext failed", zap.Error(err))
+		return nil, fmt.Errorf("failed to send Slack Connect invite for channel %s: %w", params.channel, err)
+	}
+
+	invitees := params.emails
+	if len(invitees) == 0 {
+		invitees = params.userIDs
+	}
+
+	ch.logger.Info("Sent Slack Connect invite",
+		zap.String("channel", params.channel),
+		zap.Strings("invitees", invitees),
+		zap.String("invite_id", inviteID),
+	)
+	return mcp.NewToolResultText(fmt.Sprintf(
+		"Sent Slack Connect invite for channel %s to [%s] (invite_id=%s, is_legacy_shared_channel=%v)",
+		params.channel, strings.Join(invitees, ", "), inviteID, isLegacySharedChannel,
+	)), nil
+}
+
+func (ch *ConversationsHandler) parseParamsToolInviteShared(ctx context.Context, request mcp.CallToolRequest) (*inviteSharedParams, error) {
+	channel := request.GetString("channel_id", "")
+	if channel == "" {
+		return nil, errors.New("channel_id is required")
+	}
+
+	channel, err := ch.resolveChannelID(ctx, channel)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve channel: %w", err)
+	}
+
+	emailsRaw := request.GetString("emails", "")
+	userIDsRaw := request.GetString("user_ids", "")
+	if emailsRaw == "" && userIDsRaw == "" {
+		return nil, errors.New("either emails or user_ids must be provided")
+	}
+	if emailsRaw != "" && userIDsRaw != "" {
+		return nil, errors.New("provide either emails or user_ids, not both")
+	}
+
+	splitAndTrim := func(raw string) []string {
+		tokens := strings.Split(raw, ",")
+		out := make([]string, 0, len(tokens))
+		for _, t := range tokens {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				out = append(out, t)
+			}
+		}
+		return out
+	}
+
+	params := &inviteSharedParams{channel: channel}
+	if emailsRaw != "" {
+		params.emails = splitAndTrim(emailsRaw)
+	} else {
+		params.userIDs = splitAndTrim(userIDsRaw)
+	}
+
+	return params, nil
 }
 
 // sortChannelsByPriority sorts channels: DMs > group_dm > partner > internal
@@ -1838,6 +2407,7 @@ func (ch *ConversationsHandler) parseParamsToolAddMessage(ctx context.Context, r
 		text:        msgText,
 		contentType: contentType,
 		blocks:      blocks,
+		asUser:      request.GetBool("as_user", false),
 	}, nil
 }
 
@@ -1886,6 +2456,7 @@ func (ch *ConversationsHandler) parseParamsToolReaction(ctx context.Context, req
 		channel:   channel,
 		timestamp: timestamp,
 		emoji:     emoji,
+		asUser:    request.GetBool("as_user", false),
 	}, nil
 }
 

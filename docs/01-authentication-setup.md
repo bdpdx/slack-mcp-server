@@ -50,6 +50,8 @@ Instead of using browser-based tokens (`xoxc`/`xoxd`), you can use a User OAuth 
     - `usergroups:read` - View user groups in a workspace.
     - `usergroups:write` - Create and manage user groups.
     - `channels:write` - Join and leave public channels.
+    - `files:read` - View files and canvases shared in channels.
+    - `files:write` - Upload and share files in conversations.
 
 3. Install the app to your workspace
 4. Copy the "User OAuth Token" (starts with `xoxp-`)
@@ -80,7 +82,9 @@ To create the app from a manifest with permissions preconfigured, use the follow
                 "search:read",
                 "usergroups:read",
                 "usergroups:write",
-                "channels:write"
+                "channels:write",
+                "files:read",
+                "files:write"
             ]
         }
     },
