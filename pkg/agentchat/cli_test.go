@@ -1,8 +1,12 @@
 package agentchat
 
 import (
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -78,6 +82,44 @@ func TestHelpListsCommandsAndSucceeds(t *testing.T) {
 			assert.Contains(t, help, want, "%v", args)
 		}
 	}
+}
+
+// SAC-4: a stuck listener must not hold a %agents prompt hostage.
+func TestRelayHookGivesUpAfterTimeout(t *testing.T) {
+	old := relayTimeout
+	relayTimeout = 200 * time.Millisecond
+	defer func() { relayTimeout = old }()
+	t.Setenv("SLACK_MCP_XOXB_TOKEN", "")
+	t.Setenv("SLACK_MCP_XOXP_TOKEN", "")
+
+	dir, err := os.MkdirTemp("/tmp", "sac")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+	env := filepath.Join(dir, EnvFileName)
+	require.NoError(t, os.WriteFile(env, []byte("SLACK_MCP_XOXB_TOKEN=xoxb-x\nSLACK_MCP_XOXP_TOKEN=xoxp-x\n"), 0o600))
+	home := NewHome(env)
+	require.NoError(t, os.MkdirAll(home.StateDir, 0o700))
+	ln, err := net.Listen("unix", home.ControlSocket)
+	require.NoError(t, err)
+	defer ln.Close()
+	var held []net.Conn
+	go func() { // accepts, never answers
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			held = append(held, c)
+		}
+	}()
+
+	var out, errOut strings.Builder
+	start := time.Now()
+	code := RunCLI([]string{"--env-file", env, "relay-hook"},
+		strings.NewReader(`{"prompt":"%agents: hi","session_id":"s"}`), &out, &errOut)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, out.String(), `"decision":"block"`)
+	assert.Less(t, time.Since(start), 2*time.Second)
 }
 
 func TestRelayContext(t *testing.T) {

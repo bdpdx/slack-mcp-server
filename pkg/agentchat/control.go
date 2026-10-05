@@ -130,7 +130,11 @@ func SendControl(ctx context.Context, socket string, req ControlRequest) (Contro
 		return ControlResponse{}, err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
+	deadline := time.Now().Add(2 * time.Minute)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
+	_ = conn.SetDeadline(deadline)
 	data, err := json.Marshal(req)
 	if err != nil {
 		return ControlResponse{}, err

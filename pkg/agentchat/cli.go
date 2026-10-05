@@ -69,6 +69,10 @@ func relayContext(channelName, ts string) string {
 		"Carry out that text yourself as the user's instruction.", channelName, ts)
 }
 
+// relayTimeout bounds everything the %agents relay hook does, so a stuck
+// listener or a slow Slack never holds the user's prompt for long.
+var relayTimeout = 10 * time.Second
+
 type stringList []string
 
 func (s *stringList) String() string     { return strings.Join(*s, ",") }
@@ -181,6 +185,8 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "ack":
 		err = c.ack(ctx, rest[1:])
 	case "relay-hook":
+		ctx, cancel := context.WithTimeout(ctx, relayTimeout)
+		defer cancel()
 		return c.relayHook(ctx, event)
 	default:
 		err = fmt.Errorf("unknown command %q", rest[0])
