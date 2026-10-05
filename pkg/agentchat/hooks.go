@@ -109,7 +109,8 @@ func FormatApproval(ownerID, agent, tool string, input json.RawMessage) string {
 // askHookReason tells Claude where its question went instead of the terminal.
 func askHookReason(channelName, ts string) string {
 	return fmt.Sprintf("The user is on Slack, so these questions were posted to #%s (ts %s) instead of being shown in the terminal. "+
-		"End your turn now without asking again; the user's answer will arrive as a [slack-agent-chat] notice from that channel.", channelName, ts)
+		"Do not ask again. Keep working on anything that does not depend on the answers; if nothing is left, end your turn. "+
+		"The user's answer will arrive as a [slack-agent-chat] notice from that channel, even mid-turn.", channelName, ts)
 }
 
 // askHook (Claude PreToolUse on AskUserQuestion) posts the questions to the

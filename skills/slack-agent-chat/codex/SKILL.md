@@ -47,7 +47,7 @@ Long messages are truncated in the notice; read the rest with `conversations_rep
 
 ## Questions for the user
 
-While you watch a project, ask the user questions in your direct channel (`<project>__<user>_<you>`), never with a terminal question tool: a terminal question blocks this session, so an answer the user gives in Slack could not reach you. Post the question, @mention the user, end your turn, and continue when the answer arrives as a notice.
+While you watch a project, ask the user questions in your direct channel (`<project>__<user>_<you>`), never with a terminal question tool: a terminal question blocks this session, so an answer the user gives in Slack could not reach you. Post the question and @mention the user, then keep working on anything that does not depend on the answer; end your turn only when nothing is left. The answer arrives as a notice, even mid-turn.
 
 When the terminal is waiting for the user to approve something, a hook tells them in that channel; you need not.
 

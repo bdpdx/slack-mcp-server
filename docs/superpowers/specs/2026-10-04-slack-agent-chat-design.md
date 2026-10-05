@@ -153,7 +153,9 @@ the session's direct channel `<project>__<owner>_<agent>`:
 - `chat ask-hook` (Claude `PreToolUse`, matcher `AskUserQuestion`): when the
   session watches a project, posts the questions (numbered, options lettered,
   owner @mentioned) as the bot and denies the tool with a reason telling
-  Claude the question is in Slack and to end its turn. A terminal question
+  Claude the question is in Slack and to keep working on whatever does not
+  depend on the answer (ending its turn only when nothing is left); the answer
+  arrives as a notice, mid-turn if need be. A terminal question
   would block the session, so a Slack answer could not be processed until it
   was also answered in the terminal; asking in both places does not work.
 - `chat approval-hook` (`PermissionRequest`, Claude and Codex; fires only
