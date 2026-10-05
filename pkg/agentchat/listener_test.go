@@ -389,6 +389,33 @@ func TestListenerRecoveryReadsAllReplyPages(t *testing.T) {
 	}
 }
 
+// SAC-6: after a listener restart, every restored session catches up on
+// what arrived while the listener was down, without repeats.
+func TestListenerRecoverAllAfterRestart(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	state := filepath.Join(t.TempDir(), "state.json")
+	first, err := NewListener(api, d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", state, zap.NewNop())
+	require.NoError(t, err)
+	first.Now = func() time.Time { return time.Unix(2000, 0) }
+	require.NoError(t, first.Subscribe(context.Background(), claudeSub("s1"), 0))
+	require.NoError(t, first.Subscribe(context.Background(), claudeSub("s2"), 0))
+	first.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.1", User: "UBR", Text: "before-restart"})
+	require.Len(t, d.got, 2)
+
+	// The listener stops; one more message arrives while it is down.
+	api.history["C1"] = []slack.Message{msg("2002.1", "UBR", "while-down"), msg("2001.1", "UBR", "before-restart")}
+	d.got = nil
+
+	restarted, err := NewListener(api, d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", state, zap.NewNop())
+	require.NoError(t, err)
+	restarted.RecoverAll(context.Background())
+	require.Len(t, d.got, 2)
+	for _, got := range d.got {
+		assert.Contains(t, got.text, "while-down")
+		assert.NotContains(t, got.text, "before-restart")
+	}
+}
+
 func TestListenerStatusAndUnsubscribe(t *testing.T) {
 	api, d := newFakeSlack(), &fakeDeliverer{}
 	l := newTestListener(t, api, d)

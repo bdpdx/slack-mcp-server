@@ -620,3 +620,17 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 	}
 	return ControlResponse{OK: true, Sessions: l.Status()}
 }
+
+// RecoverAll catches every restored session up on messages that arrived while
+// the listener was down; messages already delivered to a session are skipped.
+func (l *Listener) RecoverAll(ctx context.Context) {
+	l.mu.Lock()
+	subs := make([]*Subscription, 0, len(l.state.Subscriptions))
+	for _, sub := range l.state.Subscriptions {
+		subs = append(subs, sub)
+	}
+	l.mu.Unlock()
+	for _, sub := range subs {
+		l.recover(ctx, sub, sub.Channels, nil, 0)
+	}
+}

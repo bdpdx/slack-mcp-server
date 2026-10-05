@@ -106,6 +106,12 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go ServeControl(ctx, ln, l.Control)
+	go func() {
+		// Drop sessions that ended while the listener was down, then catch the
+		// rest up on what they missed.
+		l.Sweep(ctx)
+		l.RecoverAll(ctx)
+	}()
 
 	sm := socketmode.New(botAPI)
 	go func() {
