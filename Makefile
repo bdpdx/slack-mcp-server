@@ -107,6 +107,25 @@ test: ## Run the tests
 test-integration: ## Run integration tests
 	$(GO) test -count=1 -v -run=".*Integration.*" ./...
 
+AGENT_CHAT_BIN ?= $(HOME)/.bin/slack-mcp-server
+CODEX_HOMES ?= $(HOME)/.codex $(HOME)/.codex-rezilient
+CLAUDE_HOME ?= $(HOME)/.claude
+
+.PHONY: install-agent-chat
+install-agent-chat: ## Install the binary and the slack-agent-chat skills
+	$(GO) build $(COMMON_BUILD_ARGS) -o $(AGENT_CHAT_BIN) ./cmd/slack-mcp-server
+	@for home in $(CODEX_HOMES); do \
+		mkdir -p $$home/skills/slack-agent-chat; \
+		for f in SKILL.md hooks.json; do \
+			sed 's#@BIN@#$(AGENT_CHAT_BIN)#g' skills/slack-agent-chat/codex/$$f > $$home/skills/slack-agent-chat/$$f; \
+		done; \
+		echo "installed skill into $$home/skills/slack-agent-chat"; \
+	done
+	@mkdir -p $(CLAUDE_HOME)/skills/slack-agent-chat
+	@sed 's#@BIN@#$(AGENT_CHAT_BIN)#g' skills/slack-agent-chat/claude/SKILL.md > $(CLAUDE_HOME)/skills/slack-agent-chat/SKILL.md
+	@echo "installed skill into $(CLAUDE_HOME)/skills/slack-agent-chat"
+	@echo "Claude hook command: $(AGENT_CHAT_BIN) chat --env-file $(CLAUDE_HOME)/slack-mcp-server.env relay-hook"
+
 .PHONY: format
 format: ## Format the code
 	$(GO) fmt ./...

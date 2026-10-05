@@ -1,0 +1,17 @@
+{
+  "description": "slack-agent-chat: relay %agents console prompts to Slack as the user",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "@BIN@ chat --env-file \"${CODEX_HOME:-$HOME/.codex}/slack-mcp-server.env\" relay-hook",
+            "timeout": 15,
+            "statusMessage": "slack-agent-chat relay"
+          }
+        ]
+      }
+    ]
+  }
+}
