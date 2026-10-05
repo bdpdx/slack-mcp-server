@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/slack-go/slack"
@@ -67,6 +68,13 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 		return err
 	}
 
+	// The lock makes this the home's only listener; it is held until exit, so
+	// the socket removal below can never hit another listener's socket.
+	release, err := AcquireListenerLock(filepath.Join(home.StateDir, "listener.lock"))
+	if err != nil {
+		return err
+	}
+	defer release()
 	ln, err := ListenControl(home.ControlSocket)
 	if err != nil {
 		return err

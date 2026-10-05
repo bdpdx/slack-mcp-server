@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -42,7 +43,32 @@ type SessionStatus struct {
 // ControlHandler answers one request.
 type ControlHandler func(ctx context.Context, req ControlRequest) ControlResponse
 
-// ListenControl binds the control socket, replacing a stale one.
+// AcquireListenerLock takes the home's exclusive listener lock, held for the
+// listener's whole life; it fails with ErrListenerRunning while another
+// process holds it. Call release on exit.
+func AcquireListenerLock(path string) (release func(), err error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, ErrListenerRunning
+		}
+		return nil, err
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
+}
+
+// ListenControl binds the control socket, replacing a stale one. Callers hold
+// the listener lock, so a socket nobody answers on is safe to remove.
 func ListenControl(socket string) (net.Listener, error) {
 	if err := os.MkdirAll(filepath.Dir(socket), 0o700); err != nil {
 		return nil, err

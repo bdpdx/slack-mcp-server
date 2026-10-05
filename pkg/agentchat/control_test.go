@@ -3,6 +3,7 @@ package agentchat
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -35,6 +36,18 @@ func TestControlRoundTrip(t *testing.T) {
 
 	_, err = ListenControl(path)
 	assert.ErrorIs(t, err, ErrListenerRunning)
+}
+
+func TestListenerLockIsExclusive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "listener.lock")
+	release, err := AcquireListenerLock(path)
+	require.NoError(t, err)
+	_, err = AcquireListenerLock(path)
+	assert.ErrorIs(t, err, ErrListenerRunning)
+	release()
+	release, err = AcquireListenerLock(path)
+	require.NoError(t, err)
+	release()
 }
 
 func TestListenControlReplacesStaleSocket(t *testing.T) {
