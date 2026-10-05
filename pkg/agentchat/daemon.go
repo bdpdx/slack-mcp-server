@@ -13,7 +13,10 @@ import (
 	"go.uber.org/zap"
 )
 
-const idleExit = 60 * time.Second
+const (
+	idleExit      = 60 * time.Second
+	sweepInterval = 60 * time.Second
+)
 
 // ParseEventsAPIMessage extracts a message event from a Socket Mode
 // events_api payload; ok is false for any other event.
@@ -93,7 +96,7 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 		return fmt.Errorf("user auth.test: %w", err)
 	}
 
-	l, err := NewListener(botAPI, &HostDeliverer{CodexSocket: home.CodexSocket, CodexHome: home.Dir},
+	l, err := NewListener(botAPI, &HostDeliverer{CodexSocket: home.CodexSocket},
 		Identity{UserID: self.UserID, BotID: self.BotID}, owner.UserID, home.StateFile, log)
 	if err != nil {
 		ln.Close()
@@ -123,7 +126,7 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 	}()
 
 	go func() {
-		idleSince := time.Now()
+		idleSince, lastSweep := time.Now(), time.Now()
 		tick := time.NewTicker(5 * time.Second)
 		defer tick.Stop()
 		for {
@@ -131,6 +134,10 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 			case <-ctx.Done():
 				return
 			case now := <-tick.C:
+				if now.Sub(lastSweep) >= sweepInterval {
+					l.Sweep(ctx)
+					lastSweep = now
+				}
 				if l.HasSubscriptions() {
 					idleSince = now
 				} else if now.Sub(idleSince) >= idleExit {

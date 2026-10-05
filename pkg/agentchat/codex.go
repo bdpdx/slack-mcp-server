@@ -1,25 +1,20 @@
 package agentchat
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
-	"os"
-	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-var (
-	// ErrThreadNotLoaded means the thread exists but is not loaded on the daemon.
-	ErrThreadNotLoaded = errors.New("codex thread is not loaded on the app-server daemon")
-	// ErrCodexUnavailable means the app-server daemon could not be reached.
-	ErrCodexUnavailable = errors.New("codex app-server is unavailable")
-)
+// ErrCodexUnavailable means the app-server daemon could not be reached. It
+// says nothing about whether the session is still there.
+var ErrCodexUnavailable = errors.New("codex app-server is unavailable")
 
 type rpcError struct {
 	Code    int    `json:"code"`
@@ -93,33 +88,50 @@ func (c *codexConn) call(ctx context.Context, method string, params, result any)
 	}
 }
 
-// DeliverCodex pushes text into a Codex thread: turn/steer while a turn is
-// running, turn/start when idle. A JSON-RPC rejection (the turn ended between
-// the status check and the request) re-checks the status and retries.
-func DeliverCodex(ctx context.Context, socket, threadID, clientMsgID, text string) error {
+// threadStatus reads a thread's status type. A thread the daemon no longer
+// knows is reported as ErrSessionGone.
+func (c *codexConn) threadStatus(ctx context.Context, threadID string) (string, error) {
+	var read struct {
+		Thread struct {
+			Status struct {
+				Type string `json:"type"`
+			} `json:"status"`
+		} `json:"thread"`
+	}
+	err := c.call(ctx, "thread/read", map[string]any{"threadId": threadID, "includeTurns": false}, &read)
+	var rerr *rpcError
+	if errors.As(err, &rerr) && strings.Contains(strings.ToLower(rerr.Message), "not found") {
+		return "", fmt.Errorf("%w: %v", ErrSessionGone, err)
+	}
+	return read.Thread.Status.Type, err
+}
+
+// DeliverCodex pushes text into a Codex thread and returns the method used:
+// turn/steer while a turn is running, turn/start when idle. A JSON-RPC
+// rejection (the turn ended between the status check and the request)
+// re-checks the status and retries. The daemon unloads a thread once no
+// terminal is attached and it is idle, so a thread that is not loaded is
+// reported as ErrSessionGone rather than started headless.
+func DeliverCodex(ctx context.Context, socket, threadID, clientMsgID, text string) (string, error) {
 	c, err := dialCodex(ctx, socket)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer c.ws.Close()
 	input := []map[string]string{{"type": "text", "text": text}}
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		var read struct {
-			Thread struct {
-				Status struct {
-					Type string `json:"type"`
-				} `json:"status"`
-			} `json:"thread"`
+		status, err := c.threadStatus(ctx, threadID)
+		if err != nil {
+			return "", err
 		}
-		if err := c.call(ctx, "thread/read", map[string]any{"threadId": threadID, "includeTurns": false}, &read); err != nil {
-			return err
-		}
-		switch read.Thread.Status.Type {
+		var method string
+		switch status {
 		case "notLoaded":
-			return ErrThreadNotLoaded
+			return "", fmt.Errorf("%w: codex thread %s is not loaded", ErrSessionGone, threadID)
 		case "idle":
-			lastErr = c.call(ctx, "turn/start", map[string]any{
+			method = "turn/start"
+			lastErr = c.call(ctx, method, map[string]any{
 				"threadId": threadID, "input": input, "clientUserMessageId": clientMsgID,
 			}, nil)
 		case "active":
@@ -132,37 +144,45 @@ func DeliverCodex(ctx context.Context, socket, threadID, clientMsgID, text strin
 			if err := c.call(ctx, "thread/turns/list", map[string]any{
 				"threadId": threadID, "sortDirection": "desc", "itemsView": "notLoaded", "limit": 1,
 			}, &turns); err != nil {
-				return err
+				return "", err
 			}
 			if len(turns.Data) == 0 || turns.Data[0].Status != "inProgress" {
 				lastErr = errors.New("active thread has no in-progress turn")
 				continue
 			}
-			lastErr = c.call(ctx, "turn/steer", map[string]any{
+			method = "turn/steer"
+			lastErr = c.call(ctx, method, map[string]any{
 				"threadId": threadID, "input": input,
 				"expectedTurnId": turns.Data[0].ID, "clientUserMessageId": clientMsgID,
 			}, nil)
 		default:
-			return fmt.Errorf("codex thread status %q", read.Thread.Status.Type)
+			return "", fmt.Errorf("codex thread status %q", status)
 		}
 		if lastErr == nil {
-			return nil
+			return method, nil
 		}
 		var rerr *rpcError
 		if !errors.As(lastErr, &rerr) {
-			return lastErr
+			return "", lastErr
 		}
 	}
-	return lastErr
+	return "", lastErr
 }
 
-// QueueCodex hands text to `codex queue`, which delivers it once the thread is idle.
-func QueueCodex(ctx context.Context, codexHome, threadID, text string) error {
-	cmd := exec.CommandContext(ctx, "codex", "queue", "--thread", threadID, "--message", text)
-	cmd.Env = append(os.Environ(), "CODEX_HOME="+codexHome)
-	out, err := cmd.CombinedOutput()
+// CodexThreadAlive reports whether a Codex thread is still loaded on the
+// daemon. An unreachable daemon is an error, not a dead session.
+func CodexThreadAlive(ctx context.Context, socket, threadID string) (bool, error) {
+	c, err := dialCodex(ctx, socket)
 	if err != nil {
-		return fmt.Errorf("codex queue: %v: %s", err, bytes.TrimSpace(out))
+		return false, err
 	}
-	return nil
+	defer c.ws.Close()
+	status, err := c.threadStatus(ctx, threadID)
+	if errors.Is(err, ErrSessionGone) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return status != "notLoaded", nil
 }

@@ -88,16 +88,23 @@ type fakeDeliverer struct {
 	mu   sync.Mutex
 	got  []delivery
 	errs map[string]error // by session
+	dead map[string]bool  // sessions Alive reports as gone
 }
 
-func (d *fakeDeliverer) Deliver(_ context.Context, sub *Subscription, clientID, text string) error {
+func (d *fakeDeliverer) Deliver(_ context.Context, sub *Subscription, clientID, text string) (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.errs[sub.SessionID]; err != nil {
-		return err
+		return "", err
 	}
 	d.got = append(d.got, delivery{sub.SessionID, clientID, text})
-	return nil
+	return "fake", nil
+}
+
+func (d *fakeDeliverer) Alive(_ context.Context, sub *Subscription) (bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return !d.dead[sub.SessionID], nil
 }
 
 func newTestListener(t *testing.T, api *fakeSlack, d *fakeDeliverer) *Listener {
@@ -232,7 +239,9 @@ type blockingDeliverer struct {
 	release chan struct{}
 }
 
-func (b *blockingDeliverer) Deliver(context.Context, *Subscription, string, string) error {
+func (b *blockingDeliverer) Alive(context.Context, *Subscription) (bool, error) { return true, nil }
+
+func (b *blockingDeliverer) Deliver(context.Context, *Subscription, string, string) (string, error) {
 	b.mu.Lock()
 	b.calls++
 	n := b.calls
@@ -241,7 +250,7 @@ func (b *blockingDeliverer) Deliver(context.Context, *Subscription, string, stri
 		close(b.entered)
 		<-b.release
 	}
-	return nil
+	return "fake", nil
 }
 
 func TestListenerConcurrentDeliveriesOfOneMessagePushOnce(t *testing.T) {
@@ -306,6 +315,19 @@ func TestListenerRecoveryOnRejoin(t *testing.T) {
 	assert.Contains(t, d.got[0].text, "thread reply")
 	assert.NotContains(t, d.got[0].text, "acked")
 	assert.NotContains(t, d.got[0].text, "before join")
+}
+
+// SAC-10: sessions that ended without `watch stop` are dropped even when no
+// message arrives, so the listener can idle-exit.
+func TestListenerSweepDropsGoneSessions(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{dead: map[string]bool{"s1": true}}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s2"), 0))
+	l.Sweep(context.Background())
+	st := l.Status()
+	require.Len(t, st, 1)
+	assert.Equal(t, "s2", st[0].SessionID)
 }
 
 func TestListenerStatusAndUnsubscribe(t *testing.T) {

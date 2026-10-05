@@ -65,3 +65,13 @@ func TestDeliverClaudeGone(t *testing.T) {
 	err := DeliverClaude(context.Background(), shortSocketPath(t), "tok", "x")
 	assert.ErrorIs(t, err, ErrSessionGone)
 }
+
+func TestClaudeSessionAlive(t *testing.T) {
+	path := shortSocketPath(t)
+	assert.False(t, ClaudeSessionAlive(path), "no socket file")
+	ln, err := net.Listen("unix", path)
+	require.NoError(t, err)
+	assert.True(t, ClaudeSessionAlive(path))
+	ln.Close()
+	assert.False(t, ClaudeSessionAlive(path), "socket closed")
+}

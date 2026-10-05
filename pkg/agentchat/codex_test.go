@@ -103,7 +103,9 @@ func TestDeliverCodexIdleStartsTurn(t *testing.T) {
 		return map[string]any{}, ""
 	}}
 	sock := f.start(t)
-	require.NoError(t, DeliverCodex(context.Background(), sock, "th", "cid", "hi"))
+	method, err := DeliverCodex(context.Background(), sock, "th", "cid", "hi")
+	require.NoError(t, err)
+	assert.Equal(t, "turn/start", method)
 	assert.Equal(t, []string{"initialize", "initialized", "thread/read", "turn/start"}, f.methods())
 	p := f.last("turn/start")
 	assert.Equal(t, "th", p["threadId"])
@@ -125,7 +127,9 @@ func TestDeliverCodexActiveSteers(t *testing.T) {
 		return map[string]any{}, ""
 	}}
 	sock := f.start(t)
-	require.NoError(t, DeliverCodex(context.Background(), sock, "th", "cid", "hi"))
+	method, err := DeliverCodex(context.Background(), sock, "th", "cid", "hi")
+	require.NoError(t, err)
+	assert.Equal(t, "turn/steer", method)
 	assert.Equal(t, "turn-9", f.last("turn/steer")["expectedTurnId"])
 	lp := f.last("thread/turns/list")
 	assert.Equal(t, "desc", lp["sortDirection"])
@@ -152,11 +156,15 @@ func TestDeliverCodexRetriesAfterSteerRejected(t *testing.T) {
 		return map[string]any{}, ""
 	}}
 	sock := f.start(t)
-	require.NoError(t, DeliverCodex(context.Background(), sock, "th", "cid", "hi"))
+	method, err := DeliverCodex(context.Background(), sock, "th", "cid", "hi")
+	require.NoError(t, err)
+	assert.Equal(t, "turn/start", method)
 	assert.Equal(t, []string{"initialize", "initialized", "thread/read", "thread/turns/list", "turn/steer", "thread/read", "turn/start"}, f.methods())
 }
 
-func TestDeliverCodexNotLoaded(t *testing.T) {
+// SAC-10: the daemon unloads a thread once no terminal is attached and it is
+// idle, so a thread that is not loaded (or no longer exists) is a gone session.
+func TestDeliverCodexNotLoadedIsGone(t *testing.T) {
 	f := &fakeCodex{respond: func(m string, _ map[string]any) (any, string) {
 		if m == "thread/read" {
 			return status("notLoaded"), ""
@@ -164,11 +172,38 @@ func TestDeliverCodexNotLoaded(t *testing.T) {
 		return map[string]any{}, ""
 	}}
 	sock := f.start(t)
-	assert.ErrorIs(t, DeliverCodex(context.Background(), sock, "th", "cid", "hi"), ErrThreadNotLoaded)
+	_, err := DeliverCodex(context.Background(), sock, "th", "cid", "hi")
+	assert.ErrorIs(t, err, ErrSessionGone)
+	assert.NotContains(t, f.methods(), "turn/start")
+}
+
+func TestDeliverCodexUnknownThreadIsGone(t *testing.T) {
+	f := &fakeCodex{respond: func(m string, _ map[string]any) (any, string) {
+		if m == "thread/read" {
+			return nil, "thread not found: th"
+		}
+		return map[string]any{}, ""
+	}}
+	sock := f.start(t)
+	_, err := DeliverCodex(context.Background(), sock, "th", "cid", "hi")
+	assert.ErrorIs(t, err, ErrSessionGone)
 }
 
 func TestDeliverCodexUnavailable(t *testing.T) {
-	assert.ErrorIs(t, DeliverCodex(context.Background(), shortSocketPath(t), "th", "cid", "hi"), ErrCodexUnavailable)
+	_, err := DeliverCodex(context.Background(), shortSocketPath(t), "th", "cid", "hi")
+	assert.ErrorIs(t, err, ErrCodexUnavailable)
+	assert.NotErrorIs(t, err, ErrSessionGone, "an unreachable daemon is not proof the session is gone")
+}
+
+func TestCodexThreadAlive(t *testing.T) {
+	for state, want := range map[string]bool{"idle": true, "active": true, "notLoaded": false} {
+		f := &fakeCodex{respond: func(string, map[string]any) (any, string) { return status(state), "" }}
+		alive, err := CodexThreadAlive(context.Background(), f.start(t), "th")
+		require.NoError(t, err, state)
+		assert.Equal(t, want, alive, state)
+	}
+	_, err := CodexThreadAlive(context.Background(), shortSocketPath(t), "th")
+	assert.ErrorIs(t, err, ErrCodexUnavailable, "unknown, not dead")
 }
 
 func TestClientMessageIDDeterministic(t *testing.T) {

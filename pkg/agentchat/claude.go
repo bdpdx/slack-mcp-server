@@ -43,3 +43,14 @@ func DeliverClaude(ctx context.Context, socket, token, text string) error {
 	_, err = conn.Write(payload)
 	return err
 }
+
+// ClaudeSessionAlive reports whether a Claude Code session still listens on
+// its inbox socket; the socket goes away when the session ends.
+func ClaudeSessionAlive(socket string) bool {
+	conn, err := net.DialTimeout("unix", socket, 2*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}

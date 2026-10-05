@@ -43,13 +43,22 @@ Each home has its own Slack app (bot token, user token, app-level token).
 - **Codex**: direct WebSocket to `<CODEX_HOME>/app-server-control/app-server-control.sock`;
   `initialize` → `thread/read`; `idle` → `turn/start`; `active` →
   `thread/turns/list` (desc, limit 1) → `turn/steer` with `expectedTurnId`;
-  JSON-RPC rejection → re-read and retry (3 attempts); `notLoaded` or daemon
-  unreachable → `codex queue --thread … --message …`. Deterministic
+  JSON-RPC rejection → re-read and retry (3 attempts). The daemon unloads a
+  thread once no terminal is attached and it is idle, so `notLoaded` or an
+  unknown thread → the session is gone; drop its subscription (SAC-10). Daemon
+  unreachable → delivery fails (no 👀); the message is caught up on the next
+  `watch start`. There is no `codex queue` fallback. Deterministic
   `clientUserMessageId` (UUIDv5 of session, channel, ts).
 - **Claude**: connect to the session's `CLAUDE_CODE_MESSAGING_SOCKET`, write
   `{"type":"auth","token":…}` then `{"type":"user","message":{"role":"user","content":…}}`.
   Socket missing or refusing → the session is gone; drop its subscription.
-- After a successful delivery, the listener's bot adds 👀 (`eyes`) to the message.
+- Every minute the listener checks each subscribed session the same way and
+  drops gone ones, so it can idle-exit after sessions quit without `watch stop`.
+  Between a Codex terminal quitting and the daemon unloading its thread, a
+  message can still start an unwatched turn; `watch stop` before quitting
+  avoids that window.
+- After a successful delivery, the listener's bot adds 👀 (`eyes`) to the
+  message and logs the method used (`turn/steer`, `turn/start`, `inbox`).
 
 ## Routing
 

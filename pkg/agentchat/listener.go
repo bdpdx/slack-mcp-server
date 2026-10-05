@@ -306,19 +306,23 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 		text = FormatBatch(notices)
 	}
 	last := fresh[len(fresh)-1].msg
-	if err := l.Deliverer.Deliver(ctx, sub, clientMessageID(sub.SessionID, last.Channel, last.TS), text); err != nil {
-		l.Log.Warn("delivery failed", zap.String("session", sub.SessionID), zap.String("kind", sub.Kind), zap.Error(err))
+	method, err := l.Deliverer.Deliver(ctx, sub, clientMessageID(sub.SessionID, last.Channel, last.TS), text)
+	if err != nil {
 		if errors.Is(err, ErrSessionGone) {
+			l.Log.Info("session gone; dropping its subscription", zap.String("session", sub.SessionID), zap.String("kind", sub.Kind), zap.Error(err))
 			l.Unsubscribe(sub.SessionID, "")
+			return
 		}
+		l.Log.Warn("delivery failed", zap.String("session", sub.SessionID), zap.String("kind", sub.Kind), zap.Error(err))
 		return
 	}
+	l.Log.Info("delivered", zap.String("session", sub.SessionID), zap.String("kind", sub.Kind), zap.String("method", method), zap.Int("messages", len(fresh)))
 	l.mu.Lock()
 	for _, it := range fresh {
 		l.state.MarkDelivered(sub.SessionID, it.msg.Channel, it.msg.TS, l.Now())
 	}
 	l.state.Prune(l.Now())
-	err := l.state.Save(l.StateFile)
+	err = l.state.Save(l.StateFile)
 	l.mu.Unlock()
 	if err != nil {
 		l.Log.Error("saving state failed", zap.Error(err))
@@ -511,6 +515,29 @@ func (l *Listener) Unsubscribe(sessionID, channel string) {
 	}
 	if err := l.state.Save(l.StateFile); err != nil {
 		l.Log.Error("saving state failed", zap.Error(err))
+	}
+}
+
+// Sweep drops subscriptions whose sessions have ended, so a session that quit
+// without `watch stop` stops receiving and the listener can idle-exit. A
+// session whose liveness cannot be determined is kept.
+func (l *Listener) Sweep(ctx context.Context) {
+	l.mu.Lock()
+	subs := make([]*Subscription, 0, len(l.state.Subscriptions))
+	for _, sub := range l.state.Subscriptions {
+		subs = append(subs, sub)
+	}
+	l.mu.Unlock()
+	for _, sub := range subs {
+		alive, err := l.Deliverer.Alive(ctx, sub)
+		if err != nil {
+			l.Log.Warn("liveness check failed", zap.String("session", sub.SessionID), zap.Error(err))
+			continue
+		}
+		if !alive {
+			l.Log.Info("session gone; dropping its subscription", zap.String("session", sub.SessionID), zap.String("kind", sub.Kind))
+			l.Unsubscribe(sub.SessionID, "")
+		}
 	}
 }
 
