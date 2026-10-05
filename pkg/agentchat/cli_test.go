@@ -122,6 +122,16 @@ func TestRelayHookGivesUpAfterTimeout(t *testing.T) {
 	assert.Less(t, time.Since(start), 2*time.Second)
 }
 
+// SAC-5: the long-lived listener must not carry one session's identity or secrets.
+func TestListenerEnvKeepsOnlyNeutralVariables(t *testing.T) {
+	got := listenerEnv([]string{
+		"HOME=/h", "PATH=/bin", "USER=u", "TMPDIR=/t", "LANG=en_US.UTF-8", "LC_ALL=C", "CODEX_HOME=/h/.codex",
+		"CODEX_THREAD_ID=th", "CLAUDE_CODE_MESSAGING_TOKEN=secret", "CLAUDE_CODE_SESSION_ID=s",
+		"SLACK_MCP_XOXB_TOKEN=xoxb", "AWS_SECRET_ACCESS_KEY=k",
+	})
+	assert.ElementsMatch(t, []string{"HOME=/h", "PATH=/bin", "USER=u", "TMPDIR=/t", "LANG=en_US.UTF-8", "LC_ALL=C", "CODEX_HOME=/h/.codex"}, got)
+}
+
 func TestRelayContext(t *testing.T) {
 	got := relayContext("proj", "5.0")
 	assert.Contains(t, got, "#proj")

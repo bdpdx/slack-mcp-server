@@ -237,6 +237,8 @@ func (c *cli) ensureListener(ctx context.Context) error {
 	}
 	cmd := exec.Command(self, "chat", "--env-file", c.home.EnvFile, "listen")
 	cmd.Stdout, cmd.Stderr = logf, logf
+	cmd.Dir = c.home.StateDir // not the session's directory, which may be a worktree that goes away
+	cmd.Env = listenerEnv(os.Environ())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		return err
@@ -563,4 +565,18 @@ func (c *cli) relayTarget(ctx context.Context, session, target string) (string, 
 		return "", "", fmt.Errorf("this session watches %d channels; use %%agents@<channel>: to pick one", len(s.Channels))
 	}
 	return "", "", errors.New("this session is not watching a channel; start a watch or use %agents@<channel>:")
+}
+
+// listenerEnv returns the environment for a detached listener: only neutral
+// variables, never the starting session's identity or secrets.
+func listenerEnv(environ []string) []string {
+	keep := map[string]bool{"HOME": true, "PATH": true, "USER": true, "LOGNAME": true, "SHELL": true, "TMPDIR": true, "LANG": true, "CODEX_HOME": true}
+	var out []string
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if keep[name] || strings.HasPrefix(name, "LC_") {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
