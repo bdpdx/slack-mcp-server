@@ -99,18 +99,49 @@ type cli struct {
 	user   *slack.Client
 }
 
+const chatUsage = `usage: slack-mcp-server chat [--env-file FILE] COMMAND
+
+  --env-file FILE   slack-mcp-server.env to use (default: detected from the
+                    Codex or Claude Code session's home)
+
+Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
+  watch start --channel CHANNEL [--channel CHANNEL] [--backlog N]
+                    push this session the channel's messages
+  watch stop [--channel CHANNEL]
+                    stop pushing one channel, or all of them
+  watch status      list the sessions this home's listener serves
+  channel create NAME [--invite AGENT,AGENT]
+                    create a private channel, invite the user and the named
+                    agents, and watch it
+  channel invite CHANNEL AGENT[,AGENT]
+                    add agents to a channel
+  post --channel CHANNEL --text TEXT [--thread TS]
+                    post as the user (agents reply with conversations_add_message)
+  ack CHANNEL TS    mark a message processed (adds a check-mark reaction)
+  relay-hook        UserPromptSubmit hook for %agents prompts (reads stdin)
+  listen            run the listener in the foreground (started automatically)
+`
+
 // RunCLI runs `slack-mcp-server chat ARGS` and returns the exit code.
 func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("chat", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	fs.Usage = func() { fmt.Fprint(stderr, chatUsage) }
 	envFile := fs.String("env-file", "", "path to slack-mcp-server.env")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	rest := fs.Args()
 	if len(rest) == 0 {
-		fmt.Fprintln(stderr, "usage: slack-mcp-server chat [--env-file F] listen|watch|channel|post|ack|relay-hook ...")
+		fmt.Fprint(stderr, chatUsage)
 		return 2
+	}
+	if rest[0] == "help" {
+		fmt.Fprint(stdout, chatUsage)
+		return 0
 	}
 	// The hook sees every prompt: anything that is not a relay passes untouched,
 	// before configuration can fail.

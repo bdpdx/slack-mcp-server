@@ -36,6 +36,11 @@ func main() {
 	flag.StringVar(&enabledToolsFlag, "enabled-tools", "", "Comma-separated list of enabled tools (empty = all tools)")
 	flag.BoolVar(&noCache, "no-cache", false, "Skip user/channel cache loading on startup for faster initialization. Lookups by #channel-name or @username will not work; use channel/user IDs instead.")
 	flag.StringVar(&envFile, "env-file", "", "Path to the slack-mcp-server.env file (default: detected from the Codex or Claude Code session)")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s (MCP server):\n", os.Args[0])
+		flag.PrintDefaults()
+		fmt.Fprintf(flag.CommandLine.Output(), "\nAgent chat helpers: %s chat --help\n", os.Args[0])
+	}
 	flag.Parse()
 
 	envPath, err := agentchat.ResolveEnvFile(envFile, os.Getenv)

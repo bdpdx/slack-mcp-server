@@ -68,6 +68,18 @@ func TestRelayHookIgnoresOrdinaryPromptsEvenWithoutEnvFile(t *testing.T) {
 	assert.Contains(t, out.String(), `"decision":"block"`)
 }
 
+func TestHelpListsCommandsAndSucceeds(t *testing.T) {
+	for _, args := range [][]string{{"--help"}, {"-h"}, {"help"}} {
+		var out, errOut strings.Builder
+		code := RunCLI(args, strings.NewReader(""), &out, &errOut)
+		assert.Equal(t, 0, code, "%v", args)
+		help := out.String() + errOut.String()
+		for _, want := range []string{"watch start", "watch stop", "watch status", "channel create", "channel invite", "post", "ack CHANNEL TS", "relay-hook", "--env-file"} {
+			assert.Contains(t, help, want, "%v", args)
+		}
+	}
+}
+
 func TestRelayContext(t *testing.T) {
 	got := relayContext("proj", "5.0")
 	assert.Contains(t, got, "#proj")
