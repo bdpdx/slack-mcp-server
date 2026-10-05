@@ -20,7 +20,6 @@ const (
 	reactionDelivered = "eyes"
 	reactionAcked     = "white_check_mark"
 	repeatWindow      = 10 * time.Minute
-	memberRefresh     = 5 * time.Minute
 	relayExpiry       = 2 * time.Minute
 )
 
@@ -28,7 +27,6 @@ const (
 type SlackAPI interface {
 	AuthTestContext(ctx context.Context) (*slack.AuthTestResponse, error)
 	GetUserInfoContext(ctx context.Context, user string) (*slack.User, error)
-	GetUsersInConversationContext(ctx context.Context, params *slack.GetUsersInConversationParameters) ([]string, string, error)
 	GetConversationInfoContext(ctx context.Context, input *slack.GetConversationInfoInput) (*slack.Channel, error)
 	GetConversationHistoryContext(ctx context.Context, params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error)
 	GetConversationRepliesContext(ctx context.Context, params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error)
@@ -52,7 +50,6 @@ type Listener struct {
 	state    *State
 	repeats  *RepeatFilter
 	users    map[string]*slack.User
-	loadedAt map[string]time.Time
 	chNames  map[string]string
 	relays   map[string]time.Time      // expected %agents echoes: session|channel|text → expiry
 	sessLock map[string]*sync.Mutex    // serializes deliveries per session
@@ -77,7 +74,7 @@ func NewListener(api SlackAPI, d Deliverer, self Identity, ownerID, stateFile st
 	l := &Listener{
 		API: api, Deliverer: d, Self: self, OwnerID: ownerID, StateFile: stateFile,
 		Now: time.Now, Log: log, state: st,
-		users: map[string]*slack.User{}, loadedAt: map[string]time.Time{}, chNames: map[string]string{},
+		users: map[string]*slack.User{}, chNames: map[string]string{},
 		relays: map[string]time.Time{}, sessLock: map[string]*sync.Mutex{}, queues: map[string]chan []pending{},
 	}
 	l.repeats = NewRepeatFilter(repeatWindow, func() time.Time { return l.Now() })
@@ -126,52 +123,6 @@ func (l *Listener) name(ctx context.Context, id string) string {
 	return u.Name
 }
 
-// loadMembers caches the channel's members so plain @names resolve.
-func (l *Listener) loadMembers(ctx context.Context, channel string) {
-	l.mu.Lock()
-	at, loaded := l.loadedAt[channel]
-	fresh := loaded && l.Now().Sub(at) < memberRefresh
-	l.mu.Unlock()
-	if fresh {
-		return
-	}
-	cursor := ""
-	for {
-		ids, next, err := l.API.GetUsersInConversationContext(ctx, &slack.GetUsersInConversationParameters{ChannelID: channel, Cursor: cursor, Limit: 200})
-		if err != nil {
-			l.Log.Warn("conversations.members failed", zap.String("channel", channel), zap.Error(err))
-			return
-		}
-		for _, id := range ids {
-			l.user(ctx, id)
-		}
-		if next == "" {
-			break
-		}
-		cursor = next
-	}
-	l.mu.Lock()
-	l.loadedAt[channel] = l.Now()
-	l.mu.Unlock()
-}
-
-// resolve maps a plain @name to a known user, preferring an agent when an
-// agent and a person share the name.
-func (l *Listener) resolve(name string) string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	person := ""
-	for id, u := range l.users {
-		if strings.EqualFold(u.Name, name) || strings.EqualFold(u.Profile.DisplayName, name) || strings.EqualFold(u.RealName, name) {
-			if u.IsBot {
-				return id
-			}
-			person = id
-		}
-	}
-	return person
-}
-
 func (l *Listener) channelName(ctx context.Context, channel string) string {
 	l.mu.Lock()
 	n, ok := l.chNames[channel]
@@ -191,13 +142,9 @@ func (l *Listener) channelName(ctx context.Context, channel string) string {
 
 // --- routing and delivery ---
 
-// prepare applies the routing rule and builds m's notice.
-func (l *Listener) prepare(ctx context.Context, m Message) (Notice, bool) {
-	l.loadMembers(ctx, m.Channel)
-	mentions, addressed := LeadingMentions(m.Text, l.resolve)
-	if !ShouldDeliver(m, l.Self, addressed, mentions) {
-		return Notice{}, false
-	}
+// notice builds m's notice. Every agent watching the channel gets every
+// message except its own, as a person in the channel would see it.
+func (l *Listener) notice(ctx context.Context, m Message) Notice {
 	sender := l.name(ctx, m.User)
 	if sender == "" {
 		sender = "bot " + m.BotID
@@ -211,7 +158,7 @@ func (l *Listener) prepare(ctx context.Context, m Message) (Notice, bool) {
 		ThreadTS:    m.ThreadTS,
 		Text:        RenderMentions(m.Text, func(id string) string { return l.name(ctx, id) }),
 		Files:       m.Files,
-	}, true
+	}
 }
 
 // HandleMessage routes one live message to every subscribed session.
@@ -229,10 +176,7 @@ func (l *Listener) HandleMessage(ctx context.Context, m Message) {
 		l.Log.Info("dropped repeated agent message", zap.String("channel", m.Channel), zap.String("ts", m.TS), zap.String("user", m.User))
 		return
 	}
-	n, ok := l.prepare(ctx, m)
-	if !ok {
-		return
-	}
+	n := l.notice(ctx, m)
 	for _, sub := range watchers {
 		if m.User != "" && m.User == l.OwnerID && l.consumeRelay(sub.SessionID, m) {
 			continue
@@ -458,9 +402,7 @@ func (l *Listener) recover(ctx context.Context, sub *Subscription, channels []st
 			if !m.Deliverable() || m.From(l.Self) {
 				continue
 			}
-			if n, ok := l.prepare(ctx, m); ok {
-				items = append(items, pending{m, n})
-			}
+			items = append(items, pending{m, l.notice(ctx, m)})
 		}
 	}
 	sort.SliceStable(items, func(i, j int) bool { return TSLess(items[i].msg.TS, items[j].msg.TS) })
@@ -498,11 +440,9 @@ func (l *Listener) routedBacklog(ctx context.Context, channel string, n int) ([]
 			if !m.Deliverable() || m.From(l.Self) {
 				continue
 			}
-			if notice, ok := l.prepare(ctx, m); ok {
-				found = append(found, pending{m, notice})
-				if len(found) == n {
-					break
-				}
+			found = append(found, pending{m, l.notice(ctx, m)})
+			if len(found) == n {
+				break
 			}
 		}
 		if !resp.HasMore || resp.ResponseMetaData.NextCursor == "" {

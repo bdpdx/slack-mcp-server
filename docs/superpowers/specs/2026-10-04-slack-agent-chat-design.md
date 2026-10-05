@@ -68,14 +68,12 @@ Each home has its own Slack app (bot token, user token, app-level token).
 
 - Private channels only by convention; channel membership is the allow-list.
 - Ignore own messages and non-content subtypes (edits, deletes, joins).
-- Mentions = `<@U…>` tokens and plain `@name` text that resolve to channel
-  members (agents or people). Only the run of mentions that opens a message
-  (separated by whitespace, `,:;&` or "and") routes it (CS-31). No leading
-  mentions → every agent except the sender, even if the message mentions
-  someone later; such a later mention marks a command for that agent alone.
-  Leading mentions → only the agents among them, so a message that opens with
-  only people (e.g. a reply to the user, SAC-11) or names that resolve to no
-  channel member reaches no agent. Threads follow the same rule.
+- Every message goes to every agent watching the channel except its sender,
+  as a person in the channel would see it. @mentions do not route: an agent
+  reads every message and acts on the parts addressed to it. (CS-31 tried
+  routing on leading mentions; agents naming several recipients mid-message,
+  e.g. `@codex-b … @codex-r …`, lost messages, so it was dropped.) Work that
+  should not reach every agent moves to a side channel (see Channels).
 - Exact repeats from agent senders (same channel, thread, sender, trimmed text
   within 10 min) are dropped and logged. The human's messages are never dropped.
 - Messages from the owner (the user token's user) are labeled as console-user
@@ -84,9 +82,9 @@ Each home has its own Slack app (bot token, user token, app-level token).
 ## History and acknowledgment
 
 - First subscription to a channel in a home sets its join point to now
-  (`--backlog N` delivers the last N routed messages instead of nothing).
+  (`--backlog N` delivers the last N messages from others instead of nothing).
 - Re-subscribing (new session, restart) delivers pending messages since the
-  join point: routed to this agent, not from it, lacking its ✅, not yet
+  join point: not from this agent, lacking its ✅, not yet
   delivered to this session; batched into one notice, capped at 50.
 - The agent acknowledges with `chat ack CHANNEL TS` (adds ✅ `white_check_mark`).
 
@@ -111,6 +109,19 @@ the agent to carry it out locally without re-sending. Errors block the prompt.
 lowercased, characters outside `[a-z0-9_-]` become `-`, max 80), invites the
 owner and named agents, and starts this session's watch. `chat channel invite
 CHANNEL a,b` adds agents later.
+
+Side channels: every project-channel message costs every agent context, so
+agents use a side channel whenever a message need not be in the group to keep
+the others' context complete. Any agent may create one, with one or more other
+agents, when necessary, named `<project>__<agent>_<agent>…` (project channel
+name, two underscores, then every participant including the creator, sorted,
+joined by `_`), e.g. `proj__claude_codex-b`. Bot names therefore never contain
+`_`. The owner is always invited, so nothing is hidden from them; DMs are not
+used because the owner cannot see them and they carry no project. The creator
+posts a pointer in the project channel naming the side channel; invited agents
+join with `watch start --backlog N` so they also get what was posted before
+they joined. Outcomes are reported back in the project channel. Agents do not
+archive channels; the owner does.
 
 ## One-time Slack setup per app
 
