@@ -134,6 +134,8 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
                     instead of the terminal while watching a project
   approval-hook     PermissionRequest hook: tell the user in Slack that the
                     terminal is waiting for approval
+  stop-hook         Stop hook: DM the user the final response of a turn they
+                    started at the terminal (relay-hook marks those turns)
   listen            run the listener in the foreground (started automatically)
 `
 
@@ -165,12 +167,13 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if json.NewDecoder(stdin).Decode(&event) != nil {
 			return 0
 		}
+		markTurn(*envFile, event, stderr)
 		if _, _, ok := ParseRelayPrompt(event.Prompt); !ok {
 			return 0
 		}
 	}
-	var toolEvent toolHookEvent
-	if isToolHook(rest[0]) && json.NewDecoder(stdin).Decode(&toolEvent) != nil {
+	var hook hookEvent
+	if isQuietHook(rest[0]) && json.NewDecoder(stdin).Decode(&hook) != nil {
 		return 0
 	}
 	path, err := ResolveEnvFile(*envFile, os.Getenv)
@@ -181,7 +184,7 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if rest[0] == "relay-hook" {
 			return emitBlock(stdout, err)
 		}
-		if isToolHook(rest[0]) {
+		if isQuietHook(rest[0]) {
 			fmt.Fprintf(stderr, "slack-agent-chat: %v\n", err)
 			return 0
 		}
@@ -209,13 +212,16 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		ctx, cancel := context.WithTimeout(ctx, relayTimeout)
 		defer cancel()
 		return c.relayHook(ctx, event)
-	case "ask-hook", "approval-hook":
+	case "ask-hook", "approval-hook", "stop-hook":
 		ctx, cancel := context.WithTimeout(ctx, relayTimeout)
 		defer cancel()
-		if rest[0] == "ask-hook" {
-			return c.askHook(ctx, toolEvent)
+		switch rest[0] {
+		case "ask-hook":
+			return c.askHook(ctx, hook)
+		case "approval-hook":
+			return c.approvalHook(ctx, hook)
 		}
-		return c.approvalHook(ctx, toolEvent)
+		return c.stopHook(ctx, hook)
 	default:
 		err = fmt.Errorf("unknown command %q", rest[0])
 	}
@@ -649,6 +655,22 @@ func (c *cli) ack(ctx context.Context, args []string) error {
 	}
 	c.printJSON(map[string]any{"ok": true})
 	return nil
+}
+
+// markTurn records whether the prompt was typed at the terminal, for
+// stop-hook. It never blocks the prompt: failures are only logged.
+func markTurn(envFile string, event relayEvent, stderr io.Writer) {
+	session := event.SessionID
+	if session == "" {
+		session = os.Getenv("CODEX_THREAD_ID")
+	}
+	path, err := ResolveEnvFile(envFile, os.Getenv)
+	if err == nil {
+		err = MarkTurn(NewHome(path), session, event.Prompt)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "slack-agent-chat: marking turn: %v\n", err)
+	}
 }
 
 func emitBlock(w io.Writer, err error) int {

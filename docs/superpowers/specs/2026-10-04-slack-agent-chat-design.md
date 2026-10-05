@@ -164,13 +164,30 @@ the session's direct channel `<project>__<owner>_<agent>`:
 - Both hooks never fail their host: bad input, a session watching no project,
   or any Slack error leaves the tool call to the host's normal handling.
 
+## Turn-end DMs
+
+When a turn the owner started by typing at the terminal ends, the agent's bot
+DMs the owner its final response (one DM conversation per agent app), in
+place of a push notification.
+
+- `relay-hook` (`UserPromptSubmit`) marks the session's turn as typed unless
+  the prompt contains `[slack-agent-chat]` (a listener notice), in case the
+  host runs the hook for injected messages; the mark is a file under
+  `<state>/terminal-turns/<session>`. It never blocks the prompt.
+- `stop-hook` (`Stop`, both hosts; it fires only for the main agent, never
+  subagents) takes the mark and, if set, sends `last_assistant_message` with a
+  header naming the agent and working directory, as `markdown` blocks split at
+  10,000 characters on line breaks (code fences closed and reopened).
+- Turns started by Slack notices, background tasks or subagents are never
+  marked, so they send nothing.
+
 ## One-time Slack setup per app
 
 Socket Mode on; app-level token with `connections:write`; Event Subscriptions
 → bot events `message.groups` and `member_joined_channel` (and
 `message.channels` if public channels are used); user token scope
-`groups:write` (creating `__users` and inviting to it as the owner); reinstall
-if prompted.
+`groups:write` (creating `__users` and inviting to it as the owner); bot
+scopes `chat:write` and `im:write` (turn-end DMs); reinstall if prompted.
 
 ## Out of scope
 

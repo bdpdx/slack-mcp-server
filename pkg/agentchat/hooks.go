@@ -10,17 +10,21 @@ import (
 	"github.com/slack-go/slack"
 )
 
-// toolHookEvent is the part of a PreToolUse or PermissionRequest hook event
-// the Slack hooks read. Claude Code and Codex share these fields.
-type toolHookEvent struct {
-	SessionID string          `json:"session_id"`
-	ToolName  string          `json:"tool_name"`
-	ToolInput json.RawMessage `json:"tool_input"`
+// hookEvent is the part of a PreToolUse, PermissionRequest or Stop hook
+// event the Slack hooks read. Claude Code and Codex share these fields.
+type hookEvent struct {
+	SessionID            string          `json:"session_id"`
+	Cwd                  string          `json:"cwd"`
+	ToolName             string          `json:"tool_name"`
+	ToolInput            json.RawMessage `json:"tool_input"`
+	LastAssistantMessage string          `json:"last_assistant_message"`
 }
 
-// isToolHook reports whether cmd is a hook that must never fail its host:
-// any error leaves the tool call to the host's normal handling.
-func isToolHook(cmd string) bool { return cmd == "ask-hook" || cmd == "approval-hook" }
+// isQuietHook reports whether cmd is a hook that must never fail or block
+// its host: any error leaves things to the host's normal handling.
+func isQuietHook(cmd string) bool {
+	return cmd == "ask-hook" || cmd == "approval-hook" || cmd == "stop-hook"
+}
 
 var slackEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 
@@ -113,7 +117,7 @@ func askHookReason(channelName, ts string) string {
 // block the session so that a Slack answer could not be processed. A
 // session watching no project, or any failure, leaves the question to the
 // terminal.
-func (c *cli) askHook(ctx context.Context, ev toolHookEvent) int {
+func (c *cli) askHook(ctx context.Context, ev hookEvent) int {
 	id, name, me, err := c.directChannel(ctx, c.hookSession(ev))
 	if err != nil {
 		return 0
@@ -137,7 +141,7 @@ func (c *cli) askHook(ctx context.Context, ev toolHookEvent) int {
 
 // approvalHook (PermissionRequest) tells the owner in the session's direct
 // channel that the terminal is waiting for approval. It never decides.
-func (c *cli) approvalHook(ctx context.Context, ev toolHookEvent) int {
+func (c *cli) approvalHook(ctx context.Context, ev hookEvent) int {
 	id, name, me, err := c.directChannel(ctx, c.hookSession(ev))
 	if err != nil {
 		return 0
@@ -149,7 +153,7 @@ func (c *cli) approvalHook(ctx context.Context, ev toolHookEvent) int {
 	return 0
 }
 
-func (c *cli) hookSession(ev toolHookEvent) string {
+func (c *cli) hookSession(ev hookEvent) string {
 	if ev.SessionID != "" {
 		return ev.SessionID
 	}

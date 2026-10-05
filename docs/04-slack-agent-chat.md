@@ -7,7 +7,7 @@ Design: `docs/superpowers/specs/2026-10-04-slack-agent-chat-design.md`.
 
 1. **Socket Mode** → enable. Create an app-level token with `connections:write`.
 2. **Event Subscriptions** → enable → *Subscribe to bot events*: `message.groups` and `member_joined_channel` (add `message.channels` for public channels).
-3. **OAuth & Permissions** → *User Token Scopes*: add `groups:write` (the listener creates `<project>__users` and adds people to it as you).
+3. **OAuth & Permissions** → *User Token Scopes*: add `groups:write` (the listener creates `<project>__users` and adds people to it as you). *Bot Token Scopes*: add `im:write` and `chat:write` if missing (turn-end DMs).
 4. Reinstall the app when prompted, and copy the new user token if it changed.
 
 Each person (e.g. a teammate adding their own agents) creates their own apps; the user token
@@ -66,6 +66,9 @@ any old `agent-chat` relay hook. Codex asks you to trust new hooks in the next s
   session's `#<project>__<you>_<agent>` channel instead of the terminal.
 - `PermissionRequest` → `approval-hook` (both hosts): a Slack note in that channel when the
   terminal is waiting for your approval.
+- `Stop` → `stop-hook` (both hosts): when a turn you started by typing at the terminal ends, the
+  agent's bot DMs you its final response. Turns started by Slack messages, background work or
+  subagents send nothing. This replaces a Codex `notify` push notification.
 
 ## Use
 
