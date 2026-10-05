@@ -184,6 +184,64 @@ func TestListenerSkipSuppressesDelivery(t *testing.T) {
 	assert.Equal(t, "s2", d.got[0].session)
 }
 
+func TestListenerExpectedRelayNeverEchoesToSender(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s2"), 0))
+
+	// Registered before the post, so the echo cannot win the race.
+	l.ExpectRelay("s1", "C1", "ship a & b ")
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.5", User: "UBR", Text: "ship a &amp; b"})
+	require.Len(t, d.got, 1)
+	assert.Equal(t, "s2", d.got[0].session)
+
+	// The expectation is consumed: the same words typed later in Slack arrive normally.
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.6", User: "UBR", Text: "ship a &amp; b"})
+	assert.Len(t, d.got, 3)
+}
+
+// blockingDeliverer holds its first delivery until released.
+type blockingDeliverer struct {
+	mu      sync.Mutex
+	calls   int
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingDeliverer) Deliver(context.Context, *Subscription, string, string) error {
+	b.mu.Lock()
+	b.calls++
+	n := b.calls
+	b.mu.Unlock()
+	if n == 1 {
+		close(b.entered)
+		<-b.release
+	}
+	return nil
+}
+
+func TestListenerConcurrentDeliveriesOfOneMessagePushOnce(t *testing.T) {
+	b := &blockingDeliverer{entered: make(chan struct{}), release: make(chan struct{})}
+	l, err := NewListener(newFakeSlack(), b, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
+	require.NoError(t, err)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+	m := Message{Channel: "C1", TS: "2001.1", User: "UBR", Text: "x"}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); l.HandleMessage(context.Background(), m) }()
+	<-b.entered
+	go func() { defer wg.Done(); l.HandleMessage(context.Background(), m) }() // e.g. recovery racing the live event
+	time.Sleep(50 * time.Millisecond)
+	close(b.release)
+	wg.Wait()
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	assert.Equal(t, 1, b.calls)
+}
+
 func TestListenerDropsGoneClaudeSession(t *testing.T) {
 	api := newFakeSlack()
 	d := &fakeDeliverer{errs: map[string]error{"s1": fmt.Errorf("%w: gone", ErrSessionGone)}}

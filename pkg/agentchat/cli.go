@@ -488,6 +488,10 @@ func (c *cli) relayHook(ctx context.Context, event relayEvent) int {
 	if err != nil {
 		return emitBlock(c.stdout, err)
 	}
+	// Announce the relay before posting so its echo cannot reach this session first.
+	if _, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "expect", SessionID: session, Channel: channelID, Text: text}); err != nil {
+		fmt.Fprintf(c.stderr, "slack-agent-chat: could not register relay: %v\n", err)
+	}
 	ts, err := c.postAsOwner(ctx, channelID, "", text)
 	if err != nil {
 		return emitBlock(c.stdout, err)

@@ -22,6 +22,7 @@ type ControlRequest struct {
 	SessionID    string        `json:"session_id,omitempty"`
 	Channel      string        `json:"channel,omitempty"`
 	TS           string        `json:"ts,omitempty"`
+	Text         string        `json:"text,omitempty"`
 }
 
 // ControlResponse is the listener's reply.

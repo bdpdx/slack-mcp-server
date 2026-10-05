@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"slices"
 	"sort"
 	"strings"
@@ -20,6 +21,7 @@ const (
 	reactionAcked     = "white_check_mark"
 	repeatWindow      = 10 * time.Minute
 	memberRefresh     = 5 * time.Minute
+	relayExpiry       = 2 * time.Minute
 )
 
 // SlackAPI is the part of *slack.Client the listener uses.
@@ -49,6 +51,8 @@ type Listener struct {
 	users    map[string]*slack.User
 	loadedAt map[string]time.Time
 	chNames  map[string]string
+	relays   map[string]time.Time   // expected %agents echoes: session|channel|text → expiry
+	sessLock map[string]*sync.Mutex // serializes deliveries per session
 }
 
 type pending struct {
@@ -66,6 +70,7 @@ func NewListener(api SlackAPI, d Deliverer, self Identity, ownerID, stateFile st
 		API: api, Deliverer: d, Self: self, OwnerID: ownerID, StateFile: stateFile,
 		Now: time.Now, Log: log, state: st,
 		users: map[string]*slack.User{}, loadedAt: map[string]time.Time{}, chNames: map[string]string{},
+		relays: map[string]time.Time{}, sessLock: map[string]*sync.Mutex{},
 	}
 	l.repeats = NewRepeatFilter(repeatWindow, func() time.Time { return l.Now() })
 	return l, nil
@@ -214,13 +219,67 @@ func (l *Listener) HandleMessage(ctx context.Context, m Message) {
 		return
 	}
 	for _, sub := range watchers {
+		if m.User != "" && m.User == l.OwnerID && l.consumeRelay(sub.SessionID, m) {
+			continue
+		}
 		l.deliverTo(ctx, sub, []pending{{m, n}})
 	}
+}
+
+func relayKey(sessionID, channel, text string) string {
+	return sessionID + "|" + channel + "|" + strings.TrimSpace(html.UnescapeString(text))
+}
+
+// ExpectRelay records that sessionID is about to post text to channel as the
+// owner (an %agents relay), so its echo is not delivered back to that session.
+func (l *Listener) ExpectRelay(sessionID, channel, text string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.relays[relayKey(sessionID, channel, text)] = l.Now().Add(relayExpiry)
+}
+
+// consumeRelay reports whether m is the echo of a relay sessionID sent, and
+// if so records it as delivered to that session.
+func (l *Listener) consumeRelay(sessionID string, m Message) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.Now()
+	for k, exp := range l.relays {
+		if now.After(exp) {
+			delete(l.relays, k)
+		}
+	}
+	key := relayKey(sessionID, m.Channel, m.Text)
+	if _, ok := l.relays[key]; !ok {
+		return false
+	}
+	delete(l.relays, key)
+	l.state.MarkDelivered(sessionID, m.Channel, m.TS, now)
+	if err := l.state.Save(l.StateFile); err != nil {
+		l.Log.Error("saving state failed", zap.Error(err))
+	}
+	return true
+}
+
+func (l *Listener) sessionLock(sessionID string) *sync.Mutex {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	m := l.sessLock[sessionID]
+	if m == nil {
+		m = &sync.Mutex{}
+		l.sessLock[sessionID] = m
+	}
+	return m
 }
 
 // deliverTo pushes the items sub hasn't had yet as one notice, records them
 // and marks each one delivered with a reaction.
 func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pending) {
+	// One delivery per session at a time, so live events and recovery cannot
+	// both push the same message.
+	sl := l.sessionLock(sub.SessionID)
+	sl.Lock()
+	defer sl.Unlock()
 	l.mu.Lock()
 	var fresh []pending
 	for _, it := range items {
@@ -492,6 +551,8 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 		l.Unsubscribe(req.SessionID, req.Channel)
 	case "skip":
 		l.Skip(req.SessionID, req.Channel, req.TS)
+	case "expect":
+		l.ExpectRelay(req.SessionID, req.Channel, req.Text)
 	case "status":
 	default:
 		return ControlResponse{Error: "unknown op " + req.Op}
