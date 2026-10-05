@@ -60,6 +60,14 @@ func main() {
 		)
 	}
 
+	err = validateToolConfig(os.Getenv("SLACK_MCP_UPLOAD_FILE_TOOL"))
+	if err != nil {
+		logger.Fatal("error in SLACK_MCP_UPLOAD_FILE_TOOL",
+			zap.String("context", "console"),
+			zap.Error(err),
+		)
+	}
+
 	err = server.ValidateEnabledTools(enabledTools)
 	if err != nil {
 		logger.Fatal("error in SLACK_MCP_ENABLED_TOOLS",

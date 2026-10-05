@@ -224,6 +224,8 @@ type SlackAPI interface {
 	LeaveConversationContext(ctx context.Context, channelID string) (bool, error)
 	JoinConversationContext(ctx context.Context, channelID string) (*slack.Channel, string, []string, error)
 	RenameConversationContext(ctx context.Context, channelID, channelName string) (*slack.Channel, error)
+	SetTopicOfConversationContext(ctx context.Context, channelID, topic string) (*slack.Channel, error)
+	SetPurposeOfConversationContext(ctx context.Context, channelID, purpose string) (*slack.Channel, error)
 	CreateConversationContext(ctx context.Context, params slack.CreateConversationParams) (*slack.Channel, error)
 	InviteUsersToConversationContext(ctx context.Context, channelID string, users ...string) (*slack.Channel, error)
 	InviteSharedEmailsToConversationContext(ctx context.Context, channelID string, emails ...string) (string, bool, error)
@@ -237,6 +239,7 @@ type SlackAPI interface {
 	// Used to get files
 	GetFileInfoContext(ctx context.Context, fileID string, count, page int) (*slack.File, []slack.Comment, *slack.Paging, error)
 	GetFileContext(ctx context.Context, downloadURL string, writer io.Writer) error
+	UploadFileContext(ctx context.Context, params slack.UploadFileParameters) (*slack.FileSummary, error)
 
 	// Used to get channel info (for unread counts with xoxp tokens)
 	GetConversationInfoContext(ctx context.Context, input *slack.GetConversationInfoInput) (*slack.Channel, error)
@@ -283,7 +286,10 @@ type MCPSlackClient struct {
 type ApiProvider struct {
 	transport string
 	client    SlackAPI
-	logger    *zap.Logger
+	// userClient is a user-token (xoxp) client used for calls that must act as
+	// the user when a bot token is the primary client. nil when not configured.
+	userClient SlackAPI
+	logger     *zap.Logger
 
 	rateLimiter        *rate.Limiter
 	cacheTTL           time.Duration
@@ -421,6 +427,14 @@ func (c *MCPSlackClient) JoinConversationContext(ctx context.Context, channelID 
 
 func (c *MCPSlackClient) RenameConversationContext(ctx context.Context, channelID, channelName string) (*slack.Channel, error) {
 	return c.slackClient.RenameConversationContext(ctx, channelID, channelName)
+}
+
+func (c *MCPSlackClient) SetTopicOfConversationContext(ctx context.Context, channelID, topic string) (*slack.Channel, error) {
+	return c.slackClient.SetTopicOfConversationContext(ctx, channelID, topic)
+}
+
+func (c *MCPSlackClient) SetPurposeOfConversationContext(ctx context.Context, channelID, purpose string) (*slack.Channel, error) {
+	return c.slackClient.SetPurposeOfConversationContext(ctx, channelID, purpose)
 }
 
 func (c *MCPSlackClient) CreateConversationContext(ctx context.Context, params slack.CreateConversationParams) (*slack.Channel, error) {
@@ -584,6 +598,10 @@ func (c *MCPSlackClient) GetFileContext(ctx context.Context, downloadURL string,
 	return c.slackClient.GetFileContext(ctx, downloadURL, writer)
 }
 
+func (c *MCPSlackClient) UploadFileContext(ctx context.Context, params slack.UploadFileParameters) (*slack.FileSummary, error) {
+	return c.slackClient.UploadFileContext(ctx, params)
+}
+
 func (c *MCPSlackClient) GetConversationInfoContext(ctx context.Context, input *slack.GetConversationInfoInput) (*slack.Channel, error) {
 	return c.slackClient.GetConversationInfoContext(ctx, input)
 }
@@ -677,27 +695,8 @@ func New(transport string, logger *zap.Logger) *ApiProvider {
 	xoxcToken := os.Getenv("SLACK_MCP_XOXC_TOKEN")
 	xoxdToken := os.Getenv("SLACK_MCP_XOXD_TOKEN")
 
-	// Warn if both user and bot tokens are set
-	if xoxpToken != "" && xoxbToken != "" {
-		logger.Warn(
-			"Both SLACK_MCP_XOXP_TOKEN and SLACK_MCP_XOXB_TOKEN are set. "+
-				"Using User token (xoxp) for full features. "+
-				"Bot token will be ignored.",
-			zap.String("context", "console"),
-		)
-	}
-
-	// Priority 1: XOXP token (User OAuth)
-	if xoxpToken != "" {
-		authProvider, err = auth.NewValueAuth(xoxpToken, "")
-		if err != nil {
-			logger.Fatal("Failed to create auth provider with XOXP token", zap.Error(err))
-		}
-
-		return newWithXOXP(transport, authProvider, logger)
-	}
-
-	// Priority 2: XOXB token (Bot)
+	// Priority 1: XOXB token (Bot). If a user token is also set, keep a
+	// separate user client for the calls that must act as the user.
 	if xoxbToken != "" {
 		authProvider, err = auth.NewValueAuth(xoxbToken, "")
 		if err != nil {
@@ -709,7 +708,37 @@ func New(transport string, logger *zap.Logger) *ApiProvider {
 			zap.String("token_type", "xoxb"),
 		)
 
-		return newWithXOXB(transport, authProvider, logger)
+		ap := newWithXOXB(transport, authProvider, logger)
+
+		if xoxpToken != "" && xoxpToken != "demo" {
+			userAuthProvider, err := auth.NewValueAuth(xoxpToken, "")
+			if err != nil {
+				logger.Fatal("Failed to create auth provider with XOXP token", zap.Error(err))
+			}
+
+			userClient, err := NewMCPSlackClient(userAuthProvider, logger)
+			if err != nil {
+				logger.Fatal("Failed to create MCP Slack user client", zap.Error(err))
+			}
+			ap.userClient = userClient
+
+			logger.Info("Both SLACK_MCP_XOXB_TOKEN and SLACK_MCP_XOXP_TOKEN are set. "+
+				"Using Bot token by default and User token for channel management, DM, and delete-message tools.",
+				zap.String("context", "console"),
+			)
+		}
+
+		return ap
+	}
+
+	// Priority 2: XOXP token (User OAuth)
+	if xoxpToken != "" {
+		authProvider, err = auth.NewValueAuth(xoxpToken, "")
+		if err != nil {
+			logger.Fatal("Failed to create auth provider with XOXP token", zap.Error(err))
+		}
+
+		return newWithXOXP(transport, authProvider, logger)
 	}
 
 	// Priority 3: XOXC/XOXD tokens (session-based)
@@ -1270,6 +1299,35 @@ func (ap *ApiProvider) GetChannelsType(ctx context.Context, channelType string) 
 }
 
 func (ap *ApiProvider) getChannelsMultiType(ctx context.Context, channelTypes []string) []Channel {
+	chans := ap.getChannelsMultiTypeWith(ctx, ap.client, channelTypes)
+	if ap.userClient == nil {
+		return chans
+	}
+
+	// Merge in channels visible to the user token (e.g. private channels the
+	// bot isn't a member of) so names resolve for user-token tools. Entries
+	// from the primary client win on ID or name collisions (e.g. @user DMs).
+	seenIDs := make(map[string]struct{}, len(chans))
+	seenNames := make(map[string]struct{}, len(chans))
+	for _, c := range chans {
+		seenIDs[c.ID] = struct{}{}
+		seenNames[c.Name] = struct{}{}
+	}
+	for _, c := range ap.getChannelsMultiTypeWith(ctx, ap.userClient, channelTypes) {
+		if _, ok := seenIDs[c.ID]; ok {
+			continue
+		}
+		if _, ok := seenNames[c.Name]; ok {
+			continue
+		}
+		seenIDs[c.ID] = struct{}{}
+		seenNames[c.Name] = struct{}{}
+		chans = append(chans, c)
+	}
+	return chans
+}
+
+func (ap *ApiProvider) getChannelsMultiTypeWith(ctx context.Context, client SlackAPI, channelTypes []string) []Channel {
 	params := &slack.GetConversationsParameters{
 		Types:           channelTypes,
 		Limit:           999,
@@ -1290,7 +1348,7 @@ func (ap *ApiProvider) getChannelsMultiType(ctx context.Context, channelTypes []
 			return nil
 		}
 
-		channels, nextcur, err = ap.client.GetConversationsContext(ctx, params)
+		channels, nextcur, err = client.GetConversationsContext(ctx, params)
 		ap.logger.Debug("Fetched channels",
 			zap.Strings("channelTypes", channelTypes),
 			zap.Int("count", len(channels)),
@@ -1408,6 +1466,34 @@ func (ap *ApiProvider) Slack() SlackAPI {
 	return ap.client
 }
 
+// UserSlack returns the user-token client for calls that must act as the user
+// (channel create/rename/invite, DMs, message deletion). It falls back to the
+// primary client when no separate user token is configured.
+func (ap *ApiProvider) UserSlack() SlackAPI {
+	if ap.userClient != nil {
+		return ap.userClient
+	}
+	return ap.client
+}
+
+// SlackAs returns the user-token client when asUser is set and the default
+// client otherwise. It fails when asUser is set but only a bot token is configured.
+func (ap *ApiProvider) SlackAs(asUser bool) (SlackAPI, error) {
+	if !asUser {
+		return ap.client, nil
+	}
+	if ap.UserIsBotToken() {
+		return nil, errors.New("as_user requires a user token; set SLACK_MCP_XOXP_TOKEN alongside SLACK_MCP_XOXB_TOKEN")
+	}
+	return ap.UserSlack(), nil
+}
+
+// HasUserClient reports whether a separate user-token client is configured
+// alongside the bot token.
+func (ap *ApiProvider) HasUserClient() bool {
+	return ap.userClient != nil
+}
+
 func (ap *ApiProvider) IsBotToken() bool {
 	client, ok := ap.client.(*MCPSlackClient)
 	return ok && client != nil && client.IsBotToken()
@@ -1415,6 +1501,18 @@ func (ap *ApiProvider) IsBotToken() bool {
 
 func (ap *ApiProvider) IsOAuth() bool {
 	client, ok := ap.client.(*MCPSlackClient)
+	return ok && client != nil && client.IsOAuth()
+}
+
+// UserIsBotToken reports whether the client returned by UserSlack uses a bot token.
+func (ap *ApiProvider) UserIsBotToken() bool {
+	client, ok := ap.UserSlack().(*MCPSlackClient)
+	return ok && client != nil && client.IsBotToken()
+}
+
+// UserIsOAuth reports whether the client returned by UserSlack uses an OAuth token.
+func (ap *ApiProvider) UserIsOAuth() bool {
+	client, ok := ap.UserSlack().(*MCPSlackClient)
 	return ok && client != nil && client.IsOAuth()
 }
 
