@@ -23,6 +23,7 @@ type fakeSlack struct {
 	names     map[string]string
 	history   map[string][]slack.Message
 	replies   map[string][]slack.Message // key channel|thread_ts
+	replyPage int                        // when > 0, replies are served this many per page
 	reactions []string                   // name|channel|ts
 }
 
@@ -73,7 +74,20 @@ func (f *fakeSlack) GetConversationHistoryContext(_ context.Context, p *slack.Ge
 	return &slack.GetConversationHistoryResponse{Messages: out}, nil
 }
 func (f *fakeSlack) GetConversationRepliesContext(_ context.Context, p *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error) {
-	return f.replies[p.ChannelID+"|"+p.Timestamp], false, "", nil
+	all := f.replies[p.ChannelID+"|"+p.Timestamp]
+	if f.replyPage <= 0 {
+		return all, false, "", nil
+	}
+	start := 0
+	if p.Cursor != "" {
+		fmt.Sscanf(p.Cursor, "%d", &start)
+	}
+	end := min(start+f.replyPage, len(all))
+	next := ""
+	if end < len(all) {
+		next = fmt.Sprint(end)
+	}
+	return all[start:end], next != "", next, nil
 }
 func (f *fakeSlack) AddReactionContext(_ context.Context, name string, item slack.ItemRef) error {
 	f.mu.Lock()
@@ -328,6 +342,31 @@ func TestListenerSweepDropsGoneSessions(t *testing.T) {
 	st := l.Status()
 	require.Len(t, st, 1)
 	assert.Equal(t, "s2", st[0].SessionID)
+}
+
+// SAC-7: catch-up must read every page of a long thread's replies.
+func TestListenerRecoveryReadsAllReplyPages(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	api.replyPage = 2
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0)) // join point = 2000.000000
+
+	parent := msg("2001.1", "UCB", "parent")
+	parent.ReplyCount, parent.LatestReply = 4, "2001.5"
+	api.history["C1"] = []slack.Message{parent}
+	thread := []slack.Message{parent}
+	for i, text := range []string{"r-one", "r-two", "r-three", "r-four"} {
+		r := msg(fmt.Sprintf("2001.%d", i+2), "UBR", text)
+		r.ThreadTimestamp = "2001.1"
+		thread = append(thread, r)
+	}
+	api.replies["C1|2001.1"] = thread
+
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s2"), 0))
+	require.Len(t, d.got, 1)
+	for _, text := range []string{"r-one", "r-two", "r-three", "r-four"} {
+		assert.Contains(t, d.got[0].text, text)
+	}
 }
 
 func TestListenerStatusAndUnsubscribe(t *testing.T) {

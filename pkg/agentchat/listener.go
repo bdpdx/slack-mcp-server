@@ -472,14 +472,21 @@ func (l *Listener) pendingSince(ctx context.Context, channel, join string) ([]Me
 			}
 			keep(m)
 			if m.ReplyCount > 0 && TSLess(join, m.LatestReply) {
-				replies, _, _, err := l.API.GetConversationRepliesContext(ctx, &slack.GetConversationRepliesParameters{ChannelID: channel, Timestamp: m.Timestamp, Oldest: join, Limit: 200})
-				if err != nil {
-					return nil, err
-				}
-				for _, r := range replies {
-					if r.Timestamp != m.Timestamp && TSLess(join, r.Timestamp) {
-						keep(r)
+				replyCursor := ""
+				for replyPage := 0; replyPage < 20; replyPage++ {
+					replies, _, next, err := l.API.GetConversationRepliesContext(ctx, &slack.GetConversationRepliesParameters{ChannelID: channel, Timestamp: m.Timestamp, Oldest: join, Cursor: replyCursor, Limit: 200})
+					if err != nil {
+						return nil, err
 					}
+					for _, r := range replies {
+						if r.Timestamp != m.Timestamp && TSLess(join, r.Timestamp) {
+							keep(r)
+						}
+					}
+					if next == "" {
+						break
+					}
+					replyCursor = next
 				}
 			}
 		}
