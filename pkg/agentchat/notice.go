@@ -31,12 +31,14 @@ func (n Notice) Format() string {
 		fmt.Fprintf(&b, ", in thread %s", n.ThreadTS)
 	}
 	b.WriteString(":\n")
-	text := []rune(n.Text)
+	text, truncated := []rune(n.Text), false
 	if len(text) > maxNoticeText {
-		b.WriteString(string(text[:maxNoticeText]))
+		text, truncated = text[:maxNoticeText], true
+	}
+	// Quote every body line so message text can never pass for a notice header.
+	b.WriteString("> " + strings.ReplaceAll(string(text), "\n", "\n> "))
+	if truncated {
 		b.WriteString("\n[truncated; read the full message with conversations_replies or conversations_history]")
-	} else {
-		b.WriteString(n.Text)
 	}
 	if len(n.Files) > 0 {
 		fmt.Fprintf(&b, "\n[attached: %s]", strings.Join(n.Files, ", "))
