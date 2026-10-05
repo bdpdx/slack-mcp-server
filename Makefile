@@ -118,10 +118,9 @@ install-agent-chat: build ## Build, then install the slack-agent-chat skills (AG
 	fi
 	@for home in $(CODEX_HOMES); do \
 		mkdir -p $$home/skills/slack-agent-chat; \
-		for f in SKILL.md hooks.json; do \
-			sed 's#@BIN@#$(AGENT_CHAT_BIN)#g' skills/slack-agent-chat/codex/$$f > $$home/skills/slack-agent-chat/$$f; \
-		done; \
+		sed 's#@BIN@#$(AGENT_CHAT_BIN)#g' skills/slack-agent-chat/codex/SKILL.md > $$home/skills/slack-agent-chat/SKILL.md; \
 		echo "installed skill into $$home/skills/slack-agent-chat"; \
+		echo "  Codex hook ($$home/hooks.json, UserPromptSubmit): $(AGENT_CHAT_BIN) chat --env-file $$home/slack-mcp-server.env relay-hook"; \
 	done
 	@mkdir -p $(CLAUDE_HOME)/skills/slack-agent-chat
 	@sed 's#@BIN@#$(AGENT_CHAT_BIN)#g' skills/slack-agent-chat/claude/SKILL.md > $(CLAUDE_HOME)/skills/slack-agent-chat/SKILL.md
