@@ -18,7 +18,7 @@ Run every `@BIN@ chat …` command with escalated permissions (outside the sandb
 - Add agents or people later (only when the user asks): `@BIN@ chat channel invite <channel> [<agent>,<agent>] [--invite-user <person>]`
 - Stop: `@BIN@ chat watch stop [--channel <channel>]` · check: `@BIN@ chat watch status`
 
-Project names: lowercase letters, digits, `-`, `_` (periods become `-`), never `__`; the command prints the final name.
+Project names: lowercase letters, digits, `-`, `_` (periods become `-`), never `__`, at most 32 characters; the command prints the final name.
 
 The commands also set up channels derived from the project, named `<project>__…`:
 - `<project>__<user>_<you>`: you and the user alone. Starting a watch on a project creates it and watches it too. The user talks to you directly here; treat it like the project channel, but replies stay here.

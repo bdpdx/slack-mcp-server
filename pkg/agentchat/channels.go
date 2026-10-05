@@ -19,6 +19,21 @@ import (
 // contain "_" (and no bot is named "users").
 const derivedSep = "__"
 
+// maxProjectName leaves room in Slack's 80-character limit for the names of
+// the channels derived from a project, such as side channels.
+const maxProjectName = 32
+
+// ValidateProjectName checks a normalized name for use as a project channel.
+func ValidateProjectName(name string) error {
+	if strings.Contains(name, derivedSep) {
+		return fmt.Errorf("project names cannot contain %q; open side channels with `side`", derivedSep)
+	}
+	if len(name) > maxProjectName {
+		return fmt.Errorf("project name %q is %d characters; the limit is %d, leaving room for derived channel names", name, len(name), maxProjectName)
+	}
+	return nil
+}
+
 // ProjectOf returns the project a channel belongs to: the name itself for a
 // project channel, or the part before "__" for a derived one.
 func ProjectOf(name string) (project string, derived bool) {

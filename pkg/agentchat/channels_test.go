@@ -3,6 +3,7 @@ package agentchat
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/slack-go/slack"
@@ -106,4 +107,11 @@ func TestEnsureChannelCreatesThenFinds(t *testing.T) {
 	f.taken["proj__claude_codex-b"] = true
 	_, _, err = ensureChannel(ctx, f, "proj__claude_codex-b", "UCL", nil)
 	assert.ErrorContains(t, err, "exists but this identity is not in it")
+}
+
+func TestValidateProjectName(t *testing.T) {
+	assert.NoError(t, ValidateProjectName("my-proj"))
+	assert.NoError(t, ValidateProjectName(strings.Repeat("a", 32)))
+	assert.ErrorContains(t, ValidateProjectName(strings.Repeat("a", 33)), "the limit is 32")
+	assert.ErrorContains(t, ValidateProjectName("proj__x"), "cannot contain")
 }

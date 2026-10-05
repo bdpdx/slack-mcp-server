@@ -106,8 +106,10 @@ the agent to carry it out locally without re-sending. Errors block the prompt.
 
 ## Channels
 
-A project channel's name never contains `__`; channels derived from it are
-named `<project>__…`. Usernames and agent names never contain `.` or `_`, and
+A project channel's name never contains `__` and is at most 32 characters
+(`channel create` refuses longer ones rather than truncating, leaving room in
+Slack's 80-character limit for derived names, which error instead of
+truncating); channels derived from it are named `<project>__…`. Usernames and agent names never contain `.` or `_`, and
 no bot is named `users`. User names in channel names are Slack usernames
 (`auth.test` `user`); agent names are what Slack shows for the bot (display
 name, else real name, else username). Channel names are lowercased, characters

@@ -462,8 +462,8 @@ func (c *cli) channel(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if _, derived := ProjectOf(name); derived {
-			return fmt.Errorf("project names cannot contain %q; open side channels with `side`", derivedSep)
+		if err := ValidateProjectName(name); err != nil {
+			return err
 		}
 		agents, err := c.lookupUsers(ctx, *invite, true)
 		if err != nil {
