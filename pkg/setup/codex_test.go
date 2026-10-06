@@ -13,6 +13,10 @@ import (
 
 const notifyLine = `notify = ["/Apps/Client", "turn-ended", "--previous-notify", "[\"python3\",\"\\/u\\/notify\\/codex-push.py\"]"]`
 
+// testBin is a writable stand-in for the linked binary; setup writes the
+// Codex start script beside it.
+var testBin = filepath.Join(os.TempDir(), "setup-test-bin", "slack-mcp-server")
+
 func TestUsesAutoReview(t *testing.T) {
 	assert.True(t, usesAutoReview("model = \"x\"\napprovals_reviewer = \"auto_review\"\n"))
 	assert.False(t, usesAutoReview("# approvals_reviewer = \"auto_review\"\n"))
@@ -38,7 +42,7 @@ func TestInstallCodex(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(home, "hooks.json"), []byte(`{"description":"mine","hooks":{"PermissionRequest":[{"hooks":[{"type":"command","command":"/old/slack-mcp-server chat --env-file /x approval-hook"}]}]}}`), 0o600))
 	r := &fakeRunner{}
 	p := &Scripted{Answers: []string{"y"}} // remove codex-push.py from notify
-	res, err := InstallCodex(home, t.TempDir(), "/b/slack-mcp-server", r, p, testNow)
+	res, err := InstallCodex(home, t.TempDir(), testBin, r, p, testNow)
 	require.NoError(t, err)
 
 	hooks, _ := os.ReadFile(filepath.Join(home, "hooks.json"))
@@ -47,18 +51,18 @@ func TestInstallCodex(t *testing.T) {
 	assert.Contains(t, string(hooks), `"description": "mine"`)
 
 	rules, _ := os.ReadFile(filepath.Join(home, "rules", "default.rules"))
-	assert.Equal(t, `prefix_rule(pattern=["/b/slack-mcp-server", "chat"], decision="allow")`+"\n", string(rules))
+	assert.Equal(t, `prefix_rule(pattern=["`+testBin+`", "chat"], decision="allow")`+"\n", string(rules))
 
 	cfg, _ := os.ReadFile(filepath.Join(home, "config.toml"))
 	assert.NotContains(t, string(cfg), "codex-push.py")
 	assert.FileExists(t, filepath.Join(home, "config.toml.bak-20261005120000"))
 
 	require.Len(t, r.calls, 4, "mcp remove/add, then launchctl enable/bootstrap")
-	assert.True(t, strings.HasPrefix(r.calls[1], "CODEX_HOME="+home+" codex mcp add slack -- /b/slack-mcp-server"))
+	assert.True(t, strings.HasPrefix(r.calls[1], "CODEX_HOME="+home+" codex mcp add slack -- "+testBin))
 	assert.NotEmpty(t, res.Changed)
 
 	// Second run: nothing new, rule not duplicated, notify not asked again.
-	_, err = InstallCodex(home, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{}, &Scripted{}, testNow)
+	_, err = InstallCodex(home, t.TempDir(), testBin, &fakeRunner{}, &Scripted{}, testNow)
 	require.NoError(t, err)
 	rules, _ = os.ReadFile(filepath.Join(home, "rules", "default.rules"))
 	assert.Equal(t, 1, strings.Count(string(rules), "prefix_rule"))
@@ -67,7 +71,7 @@ func TestInstallCodex(t *testing.T) {
 func TestInstallCodexKeepsNotifyWhenDeclined(t *testing.T) {
 	home := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(home, "config.toml"), []byte(notifyLine+"\n"), 0o600))
-	_, err := InstallCodex(home, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{}, &Scripted{Answers: []string{"n"}}, testNow)
+	_, err := InstallCodex(home, t.TempDir(), testBin, &fakeRunner{}, &Scripted{Answers: []string{"n"}}, testNow)
 	require.NoError(t, err)
 	cfg, _ := os.ReadFile(filepath.Join(home, "config.toml"))
 	assert.Contains(t, string(cfg), "codex-push.py")
@@ -79,7 +83,7 @@ func TestInstallCodexRejectsNonObjectHooks(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, "hooks.json")
 	require.NoError(t, os.WriteFile(path, []byte(`{"hooks":[1]}`), 0o600))
-	_, err := InstallCodex(home, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{}, &Scripted{}, testNow)
+	_, err := InstallCodex(home, t.TempDir(), testBin, &fakeRunner{}, &Scripted{}, testNow)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), path)
 	assert.NoFileExists(t, filepath.Join(home, "skills"))
@@ -90,7 +94,7 @@ func TestInstallCodexBacksUpConfigBeforeCLI(t *testing.T) {
 	home := t.TempDir()
 	cfg := filepath.Join(home, "config.toml")
 	require.NoError(t, os.WriteFile(cfg, []byte("model = \"x\"\n"), 0o600))
-	_, err := InstallCodex(home, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{}, &Scripted{}, testNow)
+	_, err := InstallCodex(home, t.TempDir(), testBin, &fakeRunner{}, &Scripted{}, testNow)
 	require.NoError(t, err)
 	got, err := os.ReadFile(cfg + ".bak-20261005120000")
 	require.NoError(t, err, "config.toml is backed up before codex mcp edits it")
@@ -99,7 +103,7 @@ func TestInstallCodexBacksUpConfigBeforeCLI(t *testing.T) {
 	// Without the codex CLI nothing edits config.toml: no backup.
 	home2 := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(home2, "config.toml"), []byte("model = \"x\"\n"), 0o600))
-	_, err = InstallCodex(home2, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{missing: map[string]bool{"codex": true}}, &Scripted{}, testNow)
+	_, err = InstallCodex(home2, t.TempDir(), testBin, &fakeRunner{missing: map[string]bool{"codex": true}}, &Scripted{}, testNow)
 	require.NoError(t, err)
 	assert.NoFileExists(t, filepath.Join(home2, "config.toml.bak-20261005120000"))
 }
@@ -115,18 +119,18 @@ func TestInstallCodexReplacesStaleRules(t *testing.T) {
 		"# keep me\n"
 	require.NoError(t, os.WriteFile(rulesPath, []byte(old), 0o600))
 
-	_, err := InstallCodex(home, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{}, &Scripted{}, testNow)
+	_, err := InstallCodex(home, t.TempDir(), testBin, &fakeRunner{}, &Scripted{}, testNow)
 	require.NoError(t, err)
 	got, _ := os.ReadFile(rulesPath)
 	assert.Equal(t, `prefix_rule(pattern=["/old/y", "chat"], decision="allow")`+"\n"+
 		`prefix_rule(pattern=["git", "status"], decision="allow")`+"\n"+
 		`prefix_rule(pattern=["/x/slack-mcp-server", "setup"], decision="allow")`+"\n"+
 		"# keep me\n"+
-		`prefix_rule(pattern=["/b/slack-mcp-server", "chat"], decision="allow")`+"\n", string(got))
+		`prefix_rule(pattern=["`+testBin+`", "chat"], decision="allow")`+"\n", string(got))
 
 	// Same path again: file unchanged, no new backup.
 	before, _ := filepath.Glob(filepath.Join(home, "rules", "*"))
-	res, err := InstallCodex(home, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{}, &Scripted{}, testNow.Add(time.Hour))
+	res, err := InstallCodex(home, t.TempDir(), testBin, &fakeRunner{}, &Scripted{}, testNow.Add(time.Hour))
 	require.NoError(t, err)
 	again, _ := os.ReadFile(rulesPath)
 	assert.Equal(t, string(got), string(again))

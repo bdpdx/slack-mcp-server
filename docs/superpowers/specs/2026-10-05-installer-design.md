@@ -136,6 +136,11 @@ unrelated settings alone.
   keep all other hooks.
 - **Hook timeout:** approval-hook's timeout must exceed its `--wait`
   (default 10m) by about a minute: 660s.
+- **Codex start script:** each Codex home gets `start-<home dir without leading dot>` beside the
+  linked binary (0755): exports `CODEX_HOME` and `PROJECT_ROOT` (blank by default; a value the user
+  sets is kept on re-runs), takes `-m|--model` (`daybreak` → `gpt-daybreak-blue-latest`; no `-m` →
+  Codex's default) and `-p|--project-root` (overrides `PROJECT_ROOT`; with neither, the current
+  directory), and runs `codex --remote unix:// -C <project root> [-m <model>] <other args>`.
 - **Codex `notify`:** if it passes `codex-push.py` via `--previous-notify`,
   ask before removing that part (Slack DMs replace it); keep the rest.
 - **Missing CLI** (`claude`/`codex` not on PATH): skip MCP registration and

@@ -37,7 +37,7 @@ func (f fakeValidator) BotNameTaken(context.Context, string, string, string) (bo
 }
 
 func opts(user, repo string, p Prompter) Options {
-	return Options{Repo: repo, Bin: "/b/slack-mcp-server", UserHome: user,
+	return Options{Repo: repo, Bin: filepath.Join(repo, "bin", "slack-mcp-server"), UserHome: user,
 		P: p, V: fakeValidator{}, R: &fakeRunner{}, Now: func() time.Time { return testNow }}
 }
 

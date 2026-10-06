@@ -185,5 +185,14 @@ func InstallCodex(home, userHome, bin string, r Runner, p Prompter, now time.Tim
 	if err != nil {
 		return res, err
 	}
+
+	script, wrote, err := installStartScript(home, bin, now)
+	if err != nil {
+		return res, err
+	}
+	if wrote {
+		res.Changed = append(res.Changed, script)
+	}
+	res.Notes = append(res.Notes, fmt.Sprintf("start Codex for this home with %s, run from your project directory (or pass -p <dir>, or set PROJECT_ROOT in the script); -m daybreak picks gpt-daybreak-blue-latest", filepath.Base(script)))
 	return res, nil
 }
