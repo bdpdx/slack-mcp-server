@@ -231,7 +231,7 @@ func installHome(o Options, h Home) (Result, error) {
 	if h.Type == TypeCodex {
 		return InstallCodex(h.Path, o.Bin, o.R, o.P, o.Now())
 	}
-	return InstallClaude(h.Path, o.Bin, o.R, o.Now())
+	return InstallClaude(h.Path, o.UserHome, o.Bin, o.R, o.Now())
 }
 
 // configureEnv does bot setup and writes the env file. It returns an empty

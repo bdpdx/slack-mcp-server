@@ -24,18 +24,27 @@ func (f *fakeRunner) LookPath(name string) (string, error) {
 	return "/usr/local/bin/" + name, nil
 }
 
+// Run records the call; an env entry without '=' (unset) shows as -u NAME.
 func (f *fakeRunner) Run(env []string, name string, args ...string) (string, error) {
-	f.calls = append(f.calls, strings.TrimSpace(strings.Join(env, " ")+" "+name+" "+strings.Join(args, " ")))
+	var parts []string
+	for _, e := range env {
+		if !strings.Contains(e, "=") {
+			e = "-u " + e
+		}
+		parts = append(parts, e)
+	}
+	f.calls = append(f.calls, strings.TrimSpace(strings.Join(parts, " ")+" "+name+" "+strings.Join(args, " ")))
 	return "", nil
 }
 
 func TestInstallClaude(t *testing.T) {
-	home := filepath.Join(t.TempDir(), ".claude") // the standard name: no CLAUDE_CONFIG_DIR
+	user := t.TempDir()
+	home := filepath.Join(user, ".claude") // the default home: no CLAUDE_CONFIG_DIR
 	require.NoError(t, os.MkdirAll(home, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(home, "settings.json"),
 		[]byte(`{"model":"x","hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}`), 0o600))
 	r := &fakeRunner{}
-	res, err := InstallClaude(home, "/bin dir/slack-mcp-server", r, testNow)
+	res, err := InstallClaude(home, user, "/bin dir/slack-mcp-server", r, testNow)
 	require.NoError(t, err)
 
 	skill, err := os.ReadFile(filepath.Join(home, "skills", "slack-agent-chat", "SKILL.md"))
@@ -55,44 +64,44 @@ func TestInstallClaude(t *testing.T) {
 	assert.FileExists(t, filepath.Join(home, "settings.json.bak-20261005120000"))
 
 	require.Len(t, r.calls, 2)
-	assert.Equal(t, "claude mcp remove -s user slack", r.calls[0])
-	assert.Contains(t, r.calls[1], "claude mcp add -s user slack -- /bin dir/slack-mcp-server --transport stdio --env-file "+filepath.Join(home, "slack-mcp-server.env"))
+	assert.Equal(t, "-u CLAUDE_CONFIG_DIR claude mcp remove -s user slack", r.calls[0], "an inherited CLAUDE_CONFIG_DIR is dropped")
+	assert.Contains(t, r.calls[1], "-u CLAUDE_CONFIG_DIR claude mcp add -s user slack -- /bin dir/slack-mcp-server --transport stdio --env-file "+filepath.Join(home, "slack-mcp-server.env"))
 	assert.NotEmpty(t, res.Changed)
 }
 
 func TestInstallClaudeRefusesInvalidSettings(t *testing.T) {
 	home := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(home, "settings.json"), []byte(`{"hooks": {`), 0o600))
-	_, err := InstallClaude(home, "/b/slack-mcp-server", &fakeRunner{}, testNow)
+	_, err := InstallClaude(home, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{}, testNow)
 	assert.ErrorContains(t, err, "not valid JSON")
 	data, _ := os.ReadFile(filepath.Join(home, "settings.json"))
 	assert.Equal(t, `{"hooks": {`, string(data), "never overwritten")
 }
 
 func TestRegisterMCPWithoutCLI(t *testing.T) {
-	manual, err := RegisterMCP(&fakeRunner{missing: map[string]bool{"claude": true}}, TypeClaude, "/h", "/b/slack-mcp-server")
+	manual, err := RegisterMCP(&fakeRunner{missing: map[string]bool{"claude": true}}, TypeClaude, "/h", "/u", "/b/slack-mcp-server")
 	require.NoError(t, err)
 	assert.Contains(t, manual, "claude mcp add -s user slack -- /b/slack-mcp-server --transport stdio --env-file /h/slack-mcp-server.env")
 }
 
 func TestRegisterMCPNonStandardClaudeHome(t *testing.T) {
 	r := &fakeRunner{}
-	_, err := RegisterMCP(r, TypeClaude, "/x/agent", "/b/slack-mcp-server")
+	_, err := RegisterMCP(r, TypeClaude, "/x/agent", "/u", "/b/slack-mcp-server")
 	require.NoError(t, err)
 	require.Len(t, r.calls, 2)
 	assert.Equal(t, "CLAUDE_CONFIG_DIR=/x/agent claude mcp remove -s user slack", r.calls[0])
 	assert.Contains(t, r.calls[1], "CLAUDE_CONFIG_DIR=/x/agent claude mcp add -s user slack -- ")
 
-	manual, err := RegisterMCP(&fakeRunner{missing: map[string]bool{"claude": true}}, TypeClaude, "/x/agent", "/b/slack-mcp-server")
+	manual, err := RegisterMCP(&fakeRunner{missing: map[string]bool{"claude": true}}, TypeClaude, "/x/agent", "/u", "/b/slack-mcp-server")
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(manual, "CLAUDE_CONFIG_DIR=/x/agent claude mcp add"), manual)
 }
 
 func TestRegisterMCPManualQuotesEnvValue(t *testing.T) {
-	manual, err := RegisterMCP(&fakeRunner{missing: map[string]bool{"claude": true}}, TypeClaude, "/a b/agent", "/b/slack-mcp-server")
+	manual, err := RegisterMCP(&fakeRunner{missing: map[string]bool{"claude": true}}, TypeClaude, "/a b/agent", "/u", "/b/slack-mcp-server")
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(manual, "CLAUDE_CONFIG_DIR='/a b/agent' claude mcp add"), manual)
-	manual, err = RegisterMCP(&fakeRunner{missing: map[string]bool{"codex": true}}, TypeCodex, "/a b/.codex", "/b/slack-mcp-server")
+	manual, err = RegisterMCP(&fakeRunner{missing: map[string]bool{"codex": true}}, TypeCodex, "/a b/.codex", "/u", "/b/slack-mcp-server")
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(manual, "CODEX_HOME='/a b/.codex' codex mcp add"), manual)
 }
@@ -100,7 +109,7 @@ func TestRegisterMCPManualQuotesEnvValue(t *testing.T) {
 func TestInstallClaudeInvalidSettingsChangesNothing(t *testing.T) {
 	home := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(home, "settings.json"), []byte(`{"hooks": []}`), 0o600))
-	_, err := InstallClaude(home, "/b/slack-mcp-server", &fakeRunner{}, testNow)
+	_, err := InstallClaude(home, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{}, testNow)
 	assert.ErrorContains(t, err, "settings.json")
 	assert.ErrorContains(t, err, "not a JSON object")
 	assert.NoDirExists(t, filepath.Join(home, "skills"))
@@ -109,7 +118,7 @@ func TestInstallClaudeInvalidSettingsChangesNothing(t *testing.T) {
 
 	home2 := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(home2, "settings.json"), []byte(`{`), 0o600))
-	_, err = InstallClaude(home2, "/b/slack-mcp-server", &fakeRunner{}, testNow)
+	_, err = InstallClaude(home2, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{}, testNow)
 	assert.Error(t, err)
 	assert.NoDirExists(t, filepath.Join(home2, "skills"))
 }
@@ -117,7 +126,7 @@ func TestInstallClaudeInvalidSettingsChangesNothing(t *testing.T) {
 func TestInstallClaudeNullSettings(t *testing.T) {
 	home := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(home, "settings.json"), []byte(`null`), 0o600))
-	_, err := InstallClaude(home, "/b/slack-mcp-server", &fakeRunner{}, testNow)
+	_, err := InstallClaude(home, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{}, testNow)
 	require.NoError(t, err)
 	data, _ := os.ReadFile(filepath.Join(home, "settings.json"))
 	assert.Contains(t, string(data), `"hooks"`)
@@ -127,9 +136,31 @@ func TestInstallClaudeKeepsShellCharsUnescaped(t *testing.T) {
 	home := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(home, "settings.json"),
 		[]byte(`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"a && b 2>/dev/null <in"}]}]}}`), 0o600))
-	_, err := InstallClaude(home, "/b/slack-mcp-server", &fakeRunner{}, testNow)
+	_, err := InstallClaude(home, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{}, testNow)
 	require.NoError(t, err)
 	data, _ := os.ReadFile(filepath.Join(home, "settings.json"))
 	assert.Contains(t, string(data), `"command": "a && b 2>/dev/null <in"`)
 	assert.NotContains(t, string(data), `\u0026`)
+}
+
+func TestRegisterMCPClaudeHomeTarget(t *testing.T) {
+	r := &fakeRunner{}
+	_, err := RegisterMCP(r, TypeClaude, "/x/.claude", "/u", "/b/slack-mcp-server")
+	require.NoError(t, err)
+	assert.Equal(t, "CLAUDE_CONFIG_DIR=/x/.claude claude mcp remove -s user slack", r.calls[0], "a .claude outside the user home is not the default")
+
+	r = &fakeRunner{}
+	_, err = RegisterMCP(r, TypeClaude, "/u/.claude/", "/u", "/b/slack-mcp-server")
+	require.NoError(t, err)
+	assert.Equal(t, "-u CLAUDE_CONFIG_DIR claude mcp remove -s user slack", r.calls[0])
+
+	manual, err := RegisterMCP(&fakeRunner{missing: map[string]bool{"claude": true}}, TypeClaude, "/u/.claude", "/u", "/b/slack-mcp-server")
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(manual, "env -u CLAUDE_CONFIG_DIR claude mcp add"), manual)
+}
+
+func TestCommandEnv(t *testing.T) {
+	base := []string{"PATH=/bin", "CODEX_HOME=/inherited", "CLAUDE_CONFIG_DIR=/inherited", "HOME=/u"}
+	assert.Equal(t, []string{"PATH=/bin", "HOME=/u", "CODEX_HOME=/h"},
+		commandEnv(base, []string{"CODEX_HOME=/h", "CLAUDE_CONFIG_DIR"}))
 }

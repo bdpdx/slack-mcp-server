@@ -50,7 +50,7 @@ func writeJSONObject(path string, doc map[string]any, now time.Time) (bool, erro
 
 // InstallClaude installs the skill, hooks and MCP registration in a Claude
 // Code home. The env file is written separately.
-func InstallClaude(home, bin string, r Runner, now time.Time) (Result, error) {
+func InstallClaude(home, userHome, bin string, r Runner, now time.Time) (Result, error) {
 	res := Result{Home: home}
 	settings := filepath.Join(home, "settings.json")
 	doc, err := readJSONObject(settings)
@@ -74,7 +74,7 @@ func InstallClaude(home, bin string, r Runner, now time.Time) (Result, error) {
 	} else if wrote {
 		res.Changed = append(res.Changed, settings)
 	}
-	manual, err := RegisterMCP(r, TypeClaude, home, bin)
+	manual, err := RegisterMCP(r, TypeClaude, home, userHome, bin)
 	if err != nil {
 		return res, err
 	}

@@ -121,7 +121,7 @@ func InstallCodex(home, bin string, r Runner, p Prompter, now time.Time) (Result
 		}
 	}
 
-	manual, err := RegisterMCP(r, TypeCodex, home, bin)
+	manual, err := RegisterMCP(r, TypeCodex, home, "", bin)
 	if err != nil {
 		return res, err
 	}
