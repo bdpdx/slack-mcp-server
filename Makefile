@@ -61,7 +61,7 @@ install-agent-chat: build ## Build, then install the slack-agent-chat skills (AG
 		echo "installed skill into $$home/skills/slack-agent-chat"; \
 		echo "  Codex hooks ($$home/hooks.json):"; \
 		echo "    UserPromptSubmit:  $(AGENT_CHAT_BIN) chat --env-file $$home/slack-mcp-server.env relay-hook"; \
-		echo "    PermissionRequest: $(AGENT_CHAT_BIN) chat --env-file $$home/slack-mcp-server.env approval-hook  (timeout 660)"; \
+		echo "    PermissionRequest: $(AGENT_CHAT_BIN) chat --env-file $$home/slack-mcp-server.env approval-hook  (timeout 660; skip with approvals_reviewer = auto_review)"; \
 		echo "    Stop:              $(AGENT_CHAT_BIN) chat --env-file $$home/slack-mcp-server.env stop-hook"; \
 	done
 	@mkdir -p $(CLAUDE_HOME)/skills/slack-agent-chat

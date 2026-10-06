@@ -65,7 +65,10 @@ any old `agent-chat` relay hook. Codex asks you to trust new hooks in the next s
 - `UserPromptSubmit` → `relay-hook`: `%agents:` prompts (both hosts).
 - `PreToolUse` with matcher `AskUserQuestion` → `ask-hook` (Claude): questions go to the
   session's `#<project>__<you>_<agent>` channel instead of the terminal.
-- `PermissionRequest` → `approval-hook` (both hosts), with `"timeout": 660`: approval requests
+- `PermissionRequest` → `approval-hook`, with `"timeout": 660`. Claude runs it only when it would
+  show a permission dialog. Codex runs it *before* its `auto_review` reviewer, so with
+  `approvals_reviewer = "auto_review"` the hook would take over every request the reviewer would
+  approve on its own; leave it out of such Codex homes. When installed: approval requests
   come to that channel with Allow / Deny / Answer in terminal buttons. Only the button can allow;
   a thread reply can deny (`no` plus a reason for the agent) or say `terminal`. With no answer in
   10 minutes (`--wait`), the terminal asks instead.

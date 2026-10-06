@@ -161,8 +161,10 @@ the session's direct channel `<project>__<owner>_<agent>`:
   arrives as a notice, mid-turn if need be. A terminal question
   would block the session, so a Slack answer could not be processed until it
   was also answered in the terminal; asking in both places does not work.
-- `chat approval-hook [--wait 10m]` (`PermissionRequest`, Claude and Codex;
-  fires only when the user is about to be prompted) asks in the direct channel
+- `chat approval-hook [--wait 10m]` (`PermissionRequest`; Claude fires it only
+  when the user is about to be prompted, but Codex fires it before its
+  `auto_review` reviewer, so Codex homes using `auto_review` must not install
+  it or every reviewer-approvable request lands on the owner) asks in the direct channel
   and answers the prompt for the owner. The message shows the tool and its
   command or description, with buttons Allow / Deny / Answer in terminal.
   A request the message cannot show exactly (detail over 2,500 characters, or
