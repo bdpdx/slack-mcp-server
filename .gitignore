@@ -9,3 +9,6 @@ slack-mcp-server.env
 
 # Claude Code agent worktrees
 .claude/worktrees/
+
+# Subagent-driven development scratch space
+.superpowers/
