@@ -254,7 +254,7 @@ func (e *stepError) Unwrap() error { return e.err }
 
 func installHome(o Options, h Home) (Result, error) {
 	if h.Type == TypeCodex {
-		return InstallCodex(h.Path, o.Bin, o.R, o.P, o.Now())
+		return InstallCodex(h.Path, o.UserHome, o.Bin, o.R, o.P, o.Now())
 	}
 	return InstallClaude(h.Path, o.UserHome, o.Bin, o.R, o.Now())
 }

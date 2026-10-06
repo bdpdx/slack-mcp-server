@@ -125,6 +125,7 @@ unrelated settings alone.
 | Skill | `skills/slack-agent-chat/{SKILL.md,COLLABORATION.md}` from the binary, `@BIN@` → link path | same |
 | Hooks | `settings.json`: `UserPromptSubmit` relay-hook (15s), `PreToolUse` matcher `AskUserQuestion` ask-hook (15s), `PermissionRequest` approval-hook (660s), `Stop` stop-hook (15s) | `hooks.json`: relay-hook, stop-hook (`statusMessage: "SlackAgentChat"`); approval-hook (660s) only if `config.toml` lacks `approvals_reviewer = "auto_review"` |
 | Rules | — | `rules/default.rules`: `prefix_rule(pattern=["<bin>", "chat"], decision="allow")` |
+| App-server | — | launchd agent `~/Library/LaunchAgents/com.openai.<dir>.app-server.plist` (`<dir>` = home name minus leading `.`) running `~/.local/libexec/codex-app-server-supervisor` (created from `codex` on PATH if missing). Missing plist: written, `launchctl enable` + `bootstrap`, no question. Existing plist: verified (label, `CODEX_HOME`, program), never rewritten; if not running, asks to enable and start. Skipped with a note if Codex is not installed |
 
 - **Tool settings** are written without asking (the user edits the `.env` to change them); they default to on: ADD_MESSAGE, JOIN,
   USERGROUPS_WRITE, RENAME_CHANNEL, SET_TOPIC, INVITE, ATTACHMENT,

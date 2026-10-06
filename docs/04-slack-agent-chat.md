@@ -59,6 +59,8 @@ This runs prerequisites, build and the interactive setup, which links `./build/s
 installs the skills and writes the SlackAgentChat hooks for each agent home. Codex asks you to
 trust new hooks in the next session.
 
+Codex needs a running app-server to receive Slack messages, so for each Codex home the installer also sets up a launchd agent `~/Library/LaunchAgents/com.openai.<dir>.app-server.plist` (for `~/.codex-test`, `com.openai.codex-test.app-server`). A missing agent is created, enabled and started; an existing one is verified and, if it is not running, you are asked whether to start it.
+
 - `UserPromptSubmit` → `relay-hook`: `%agents:` prompts (both hosts).
 - `PreToolUse` with matcher `AskUserQuestion` → `ask-hook` (Claude): questions go to the
   session's `#<project>__<you>_<agent>` channel instead of the terminal.

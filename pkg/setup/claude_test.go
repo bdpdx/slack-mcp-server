@@ -15,6 +15,14 @@ import (
 type fakeRunner struct {
 	missing map[string]bool
 	calls   []string
+	// scripts maps a "name args..." prefix (env ignored) to the result of a
+	// matching Run; the longest matching prefix wins.
+	scripts map[string]fakeResult
+}
+
+type fakeResult struct {
+	out string
+	err error
 }
 
 func (f *fakeRunner) LookPath(name string) (string, error) {
@@ -34,7 +42,15 @@ func (f *fakeRunner) Run(env []string, name string, args ...string) (string, err
 		parts = append(parts, e)
 	}
 	f.calls = append(f.calls, strings.TrimSpace(strings.Join(parts, " ")+" "+name+" "+strings.Join(args, " ")))
-	return "", nil
+	cmd := name + " " + strings.Join(args, " ")
+	best := ""
+	var res fakeResult
+	for prefix, v := range f.scripts {
+		if strings.HasPrefix(cmd, prefix) && len(prefix) > len(best) {
+			best, res = prefix, v
+		}
+	}
+	return res.out, res.err
 }
 
 func TestInstallClaude(t *testing.T) {
