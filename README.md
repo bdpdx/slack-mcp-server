@@ -325,7 +325,6 @@ tail -n 20 -f ~/Library/Logs/Claude/mcp*.log
 
 - Never share API tokens
 - Keep env files private (mode `0600`; the server refuses files other users can read)
-- Report vulnerabilities privately; see [SECURITY.md](SECURITY.md)
 
 ## License
 

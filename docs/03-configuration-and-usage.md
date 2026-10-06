@@ -34,20 +34,6 @@ Start the server with `--transport sse` (endpoint `/sse`) or `--transport http`.
 
 Point an SSE-capable client at `http://127.0.0.1:13080/sse` with the bearer header. Prefer keeping the server on loopback; if it must be reachable from elsewhere, put it behind a TLS-terminating reverse proxy or tunnel you control and always set `SLACK_MCP_API_KEY`.
 
-### Using Docker
-
-There are no published images; `docker-compose.yml` builds the image from the local `Dockerfile` (non-root, digest-pinned base images) and publishes the port on `127.0.0.1` only.
-
-```bash
-cp .env.dist slack-mcp-server.env
-chmod 600 slack-mcp-server.env
-# add your tokens, and set SLACK_MCP_HOST="0.0.0.0" and SLACK_MCP_API_KEY
-docker network create app-tier
-DOCKER_UID=$(id -u) DOCKER_GID=$(id -g) docker compose up -d --build
-```
-
-The env file is bind-mounted read-only and passed with `--env-file`; the container runs as your uid so the server accepts the file's ownership. The server must listen on `0.0.0.0` inside the container for the published port to reach it, which is why `SLACK_MCP_API_KEY` is required. `docker-compose.dev.yml` runs the server under delve, with the debugger port also bound to `127.0.0.1`.
-
 ### Console Arguments
 
 | Argument                    | Required ? | Description                                                                                                                                                                                                         |
