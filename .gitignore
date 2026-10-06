@@ -15,3 +15,6 @@
 /npm/slack-mcp-server/LICENSE
 /npm/slack-mcp-server/README.md
 docker-compose.release.yml
+
+# Claude Code agent worktrees
+.claude/worktrees/
