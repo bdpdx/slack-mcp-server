@@ -807,31 +807,57 @@ func (l *Listener) HandleInteraction(payload []byte) {
 	}
 }
 
-// approvalReply consumes a reply in a watched approval thread, so it is
-// never delivered as a notice. The owner's first reply that denies or picks
-// the terminal answers the request. A reply cannot allow: anything posting
-// with the owner's token, an agent included, could have written it.
+// approvalReply consumes the owner's answer to a waiting approval request,
+// so it is never also delivered as a notice:
+//   - any reply in the request's thread (from anyone; only the owner's first
+//     one that denies or picks the terminal answers it);
+//   - a message in the channel itself, from the owner, that opens with a deny
+//     word, "terminal" or an allow word, while a request there is unanswered
+//     (the newest one, if several). Other messages are delivered as usual.
+//
+// A reply never allows: anything posting with the owner's token, an agent
+// included, could have written it. An allow word earns a hint to click.
 func (l *Listener) approvalReply(m Message) bool {
-	if m.ThreadTS == "" {
-		return false
-	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for _, a := range l.approvals {
-		if a.channel != m.Channel || a.ts != m.ThreadTS {
-			continue
-		}
-		if m.User == l.OwnerID && a.decision == "" {
-			switch decision, reason := ParseApprovalReply(m.Text); decision {
-			case decisionAllow:
-				a.hint = true
-			default:
-				a.decision, a.reason = decision, reason
+	var target *approval
+	explicit := true
+	decision, reason := "", ""
+	if m.ThreadTS != "" {
+		for _, a := range l.approvals {
+			if a.channel == m.Channel && a.ts == m.ThreadTS {
+				target = a
+				break
 			}
 		}
-		return true
+		if target == nil {
+			return false
+		}
+		decision, reason = ParseApprovalReply(m.Text)
+	} else {
+		if m.User != l.OwnerID {
+			return false
+		}
+		for _, a := range l.approvals {
+			if a.channel == m.Channel && a.decision == "" && (target == nil || TSLess(target.ts, a.ts)) {
+				target = a
+			}
+		}
+		if target == nil {
+			return false
+		}
+		if decision, reason, explicit = classifyApprovalReply(m.Text); !explicit {
+			return false
+		}
 	}
-	return false
+	if m.User == l.OwnerID && target.decision == "" && explicit {
+		if decision == decisionAllow {
+			target.hint = true
+		} else {
+			target.decision, target.reason = decision, reason
+		}
+	}
+	return true
 }
 
 // TakeApproval returns request id's answer for the waiting hook: a decision

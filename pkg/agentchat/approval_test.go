@@ -152,3 +152,44 @@ func TestListenerApprovalReplies(t *testing.T) {
 	l.HandleMessage(ctx, Message{Channel: "C1", TS: "2000.6", ThreadTS: "1999.1", User: "UBR", Text: "other thread"})
 	assert.Len(t, del.got, 1, "other threads are delivered as usual")
 }
+
+// While a request waits, the owner can answer it in the channel itself with
+// a recognised opening word; anything else there is an ordinary message.
+func TestListenerApprovalChannelReplies(t *testing.T) {
+	api, del := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListener(t, api, del)
+	ctx := context.Background()
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0))
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "old", Channel: "C1", TS: "2000.1"}).OK)
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "new", Channel: "C1", TS: "2000.2"}).OK)
+	post := func(ts, user, text string) {
+		l.HandleMessage(ctx, Message{Channel: "C1", TS: ts, User: user, Text: text})
+	}
+
+	post("2000.3", "UBR", "what does that script do?")
+	assert.Len(t, del.got, 1, "an ordinary message is delivered and answers nothing")
+	d, _ := takeApproval(t, l, "new")
+	assert.Equal(t, "", d)
+
+	post("2000.4", "UMI", "no")
+	d, _ = takeApproval(t, l, "new")
+	assert.Equal(t, "", d, "only the owner answers")
+
+	post("2000.5", "UBR", "yes")
+	d, _ = takeApproval(t, l, "new")
+	assert.Equal(t, decisionHint, d, "typed approval only earns the hint")
+
+	post("2000.6", "UBR", "No, use the staging db instead")
+	d, r := takeApproval(t, l, "new")
+	assert.Equal(t, decisionDeny, d, "the newest waiting request is answered")
+	assert.Equal(t, "use the staging db instead", r)
+	d, _ = takeApproval(t, l, "old")
+	assert.Equal(t, "", d)
+
+	post("2000.7", "UBR", "terminal")
+	d, _ = takeApproval(t, l, "old")
+	assert.Equal(t, decisionTerminal, d, "then the next waiting one")
+
+	post("2000.8", "UBR", "no worries, carry on")
+	assert.Len(t, del.got, 3, "with nothing waiting, even a deny word is an ordinary message (UMI's no was delivered too)")
+}

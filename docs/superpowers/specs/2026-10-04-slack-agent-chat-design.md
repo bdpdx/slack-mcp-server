@@ -172,10 +172,12 @@ the session's direct channel `<project>__<owner>_<agent>`:
   button and can only be denied or sent to the terminal.
   Only a click can allow: Slack vouches for who clicked, while every agent
   home holds the owner's user token and could post a reply as the owner. The
-  owner can also reply in its thread with a deny word (no, deny, stop…)
-  followed by a reason for the agent, or `terminal`; any other reply denies
-  with the reply as the reason, except an allow word (yes, ok, 👍…), which
-  only earns a hint in the thread to click Allow. Only the owner counts.
+  owner can also reply with a deny word (no, deny, stop…) followed by a
+  reason for the agent, or `terminal`; an allow word (yes, ok, 👍…) only earns
+  a hint to click Allow. In the request's thread any reply answers (other
+  text denies, as the reason). In the channel itself, only a message opening
+  with one of those words answers, and it answers the newest unanswered
+  request; other messages are delivered as usual. Only the owner counts.
   Both hosts show their own prompt only after the hook returns, so after
   `--wait` with no answer (or on Answer in terminal) the hook prints nothing
   and the terminal asks; the hook's configured timeout must exceed `--wait`.

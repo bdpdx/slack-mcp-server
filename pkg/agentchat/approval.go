@@ -50,22 +50,31 @@ var (
 // reply to the agent as the reason. (The listener does not let a reply
 // allow; see approvalReply.)
 func ParseApprovalReply(text string) (decision, reason string) {
+	decision, reason, _ = classifyApprovalReply(text)
+	return decision, reason
+}
+
+// classifyApprovalReply is ParseApprovalReply that also reports whether the
+// reply opened with one of the recognised words (explicit). A reply in the
+// direct channel itself, rather than the request's thread, answers the
+// request only when explicit; anything else there is an ordinary message.
+func classifyApprovalReply(text string) (decision, reason string, explicit bool) {
 	text = strings.TrimSpace(leadMentions.ReplaceAllString(text, ""))
 	m := firstWord.FindStringSubmatch(text)
 	if m == nil {
-		return decisionDeny, ""
+		return decisionDeny, "", false
 	}
 	word := strings.ToLower(strings.Trim(m[1], ".,!:;-—*_~`"))
 	rest := strings.TrimSpace(strings.TrimLeft(text[len(m[0]):], ".,!:;-— "))
 	switch {
 	case allowWords[word]:
-		return decisionAllow, ""
+		return decisionAllow, "", true
 	case denyWords[word]:
-		return decisionDeny, rest
+		return decisionDeny, rest, true
 	case word == "terminal":
-		return decisionTerminal, ""
+		return decisionTerminal, "", true
 	}
-	return decisionDeny, text
+	return decisionDeny, text, false
 }
 
 func approvalButton(id, decision, label, style string) *slack.ButtonBlockElement {
@@ -81,7 +90,7 @@ func approvalButton(id, decision, label, style string) *slack.ButtonBlockElement
 // the terminal, which shows the request in full.
 func approvalBlocks(text, unsafe, id string, wait time.Duration) []slack.Block {
 	var buttons []slack.BlockElement
-	note := "Or reply in the thread: _no_ plus a reason for the agent, or _terminal_. Only the button can allow."
+	note := "Or reply here: _no_ plus a reason for the agent, or _terminal_. Only the button can allow."
 	if unsafe == "" {
 		buttons = append(buttons, approvalButton(id, decisionAllow, "Allow", "primary"))
 	} else {

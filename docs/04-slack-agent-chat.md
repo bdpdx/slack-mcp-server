@@ -70,7 +70,8 @@ any old `agent-chat` relay hook. Codex asks you to trust new hooks in the next s
   `approvals_reviewer = "auto_review"` the hook would take over every request the reviewer would
   approve on its own; leave it out of such Codex homes. When installed: approval requests
   come to that channel with Allow / Deny / Answer in terminal buttons. Only the button can allow;
-  a thread reply can deny (`no` plus a reason for the agent) or say `terminal`. With no answer in
+  a reply in the channel or the request's thread can deny (`no` plus a reason for the agent) or say
+  `terminal`. With no answer in
   10 minutes (`--wait`), the terminal asks instead.
 - `Stop` → `stop-hook` (both hosts): when a turn you started by typing at the terminal ends, the
   agent's bot DMs you its final response. Turns started by Slack messages, background work or
