@@ -141,6 +141,8 @@ List all user groups (subteams) in the workspace.
 > **Required OAuth scopes:** `usergroups:read`
 
 ### 10. usergroups_create:
+
+> **Note:** Disabled by default. Set `SLACK_MCP_USERGROUPS_WRITE_TOOL=true` to enable.
 Create a new user group in the workspace.
 
 - **Parameters:**
@@ -154,6 +156,8 @@ Create a new user group in the workspace.
 > **Required OAuth scopes:** `usergroups:write`
 
 ### 11. usergroups_update:
+
+> **Note:** Disabled by default. Set `SLACK_MCP_USERGROUPS_WRITE_TOOL=true` to enable.
 Update an existing user group's metadata.
 
 - **Parameters:**
@@ -168,6 +172,8 @@ Update an existing user group's metadata.
 > **Required OAuth scopes:** `usergroups:write`
 
 ### 12. usergroups_users_update:
+
+> **Note:** Disabled by default. Set `SLACK_MCP_USERGROUPS_WRITE_TOOL=true` to enable.
 Update the members of a user group. This replaces all existing members.
 
 - **Parameters:**
@@ -190,6 +196,8 @@ Manage your user group membership: list groups you're in, join a group, or leave
   - For `join`/`leave`: JSON with result message and updated group info
 
 > **Required OAuth scopes:** `usergroups:read` (for list), `usergroups:read` + `usergroups:write` (for join/leave)
+
+> **Note:** The `join` and `leave` actions change group membership and are disabled unless `SLACK_MCP_USERGROUPS_WRITE_TOOL=true`.
 
 ### 14. conversations_unreads
 Get unread messages across channels. Results are prioritized: DMs > partner channels (Slack Connect) > internal channels.
@@ -253,22 +261,30 @@ Fetches a CSV directory of all users in the workspace.
 | `SLACK_MCP_XOXP_TOKEN`            | Yes*      | `nil`                     | User OAuth token (`xoxp-...`) |
 | `SLACK_MCP_XOXB_TOKEN`            | Yes*      | `nil`                     | Bot token (`xoxb-...`). Bot has limited access (invited channels only, no search). If both tokens are set, the bot token is the default and the user token is used for tools that must act as the user |
 | `SLACK_MCP_PORT`                  | No        | `13080`                   | Port for the MCP server to listen on                                                                                                                                                                                                                                                      |
-| `SLACK_MCP_HOST`                  | No        | `127.0.0.1`               | Host for the MCP server to listen on                                                                                                                                                                                                                                                      |
-| `SLACK_MCP_API_KEY`               | No        | `nil`                     | Bearer token for SSE and HTTP transports                                                                                                                                                                                                                                                            |
+| `SLACK_MCP_HOST`                  | No        | `127.0.0.1`               | Host for the MCP server to listen on. A non-loopback host (including `0.0.0.0`) always requires `SLACK_MCP_API_KEY`. |
+| `SLACK_MCP_API_KEY`               | Yes for `sse`/`http` | `nil`          | Bearer token required on every SSE/HTTP request. These transports refuse to start without it unless `SLACK_MCP_ALLOW_UNAUTHENTICATED=true` on a loopback host. |
+| `SLACK_MCP_ALLOW_UNAUTHENTICATED` | No        | `false`                   | Boolean. Run `sse`/`http` without an API key, loopback hosts only. |
+| `SLACK_MCP_ALLOWED_ORIGINS`       | No        | `nil`                     | Comma-separated browser origins allowed to call `sse`/`http`; any other `Origin` is rejected. |
+| `SLACK_MCP_ALLOWED_HOSTS`         | No        | `nil`                     | Extra `Host` header values (`name` or `name:port`) accepted by `sse`/`http`, e.g. a reverse proxy name. |
 | `SLACK_MCP_PROXY`                 | No        | `nil`                     | Proxy URL for outgoing requests                                                                                                                                                                                                                                                           |
 | `SLACK_MCP_SERVER_CA`             | No        | `nil`                     | Path to a PEM file of extra CA certificates, added to the system trust store |
-| `SLACK_MCP_ADD_MESSAGE_TOOL`      | No        | `nil`                     | Enable message posting via `conversations_add_message` by setting it to `true` for all channels, a comma-separated list of channel IDs to whitelist specific channels, or use `!` before a channel ID to allow all except specified ones. If empty, the tool is only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
-| `SLACK_MCP_ADD_MESSAGE_MARK`      | No        | `nil`                     | When `conversations_add_message` is enabled (via `SLACK_MCP_ADD_MESSAGE_TOOL` or `SLACK_MCP_ENABLED_TOOLS`), setting this to `true` will automatically mark sent messages as read.                                                                                                        |
-| `SLACK_MCP_ADD_MESSAGE_UNFURLING` | No        | `nil`                     | Enable to let Slack unfurl posted links or set comma-separated list of domains e.g. `github.com,slack.com` to whitelist unfurling only for them. If text contains whitelisted and unknown domain unfurling will be disabled for security reasons.                                         |
-| `SLACK_MCP_REACTION_TOOL`        | No        | `nil`                     | Enable `reactions_add` and `reactions_remove` tools by setting to `true` for all channels, a comma-separated list of channel IDs to whitelist specific channels, or use `!` before a channel ID to allow all except specified ones. If empty, the tools are only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
-| `SLACK_MCP_ATTACHMENT_TOOL`      | No        | `nil`                     | Enable the `attachment_get_data` tool by setting to `true`, `1`, or `yes`. Does not support channel-level restrictions. If empty, the tool is only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
-| `SLACK_MCP_UPLOAD_FILE_TOOL`     | No        | `nil`                     | Enable `files_upload` with `true` for all channels/DMs or a comma-separated channel/DM ID allowlist. Upload is disabled when empty unless explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
-| `SLACK_MCP_MARK_TOOL`             | No        | `nil`                     | Enable the `conversations_mark` tool by setting to `true` or `1`. Disabled by default to prevent accidental marking of messages as read.                                                                                                                                                  |
+| `SLACK_MCP_ADD_MESSAGE_TOOL`      | No        | `nil`                     | Channel policy for `conversations_add_message`: `true`/`1`/`yes`/`on` for all channels, `false`/`0`/`no`/`off`/empty for off, a comma-separated allow-list of channel IDs or names (`C123,#general,@alice`), or a deny-list with every entry prefixed by `!` (mixing is a startup error). If empty, the tool is only enabled when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
+| `SLACK_MCP_ADD_MESSAGE_MARK`      | No        | `false`                   | Boolean. Marks messages sent with `conversations_add_message` as read. |
+| `SLACK_MCP_ADD_MESSAGE_UNFURLING` | No        | `false`                   | `true` to unfurl every posted link, or a comma-separated domain allow-list (e.g. `github.com,slack.com`). Every URL in the text and blocks must be allowed, otherwise unfurling is disabled for that message. |
+| `SLACK_MCP_REACTION_TOOL`         | No        | `nil`                     | Channel policy for `reactions_add` and `reactions_remove`, same syntax as `SLACK_MCP_ADD_MESSAGE_TOOL`. |
+| `SLACK_MCP_ATTACHMENT_TOOL`       | No        | `false`                   | Boolean. Enables `attachment_get_data` (Slack-hosted files only, 5 MB cap). |
+| `SLACK_MCP_UPLOAD_FILE_TOOL`      | No        | `nil`                     | Channel policy for `files_upload`, same syntax as `SLACK_MCP_ADD_MESSAGE_TOOL`. |
+| `SLACK_MCP_DELETE_MESSAGE_TOOL`   | No        | `nil`                     | Channel policy for `conversations_delete_message`, same syntax as `SLACK_MCP_ADD_MESSAGE_TOOL`. |
+| `SLACK_MCP_ALLOW_AS_USER`         | No        | `false`                   | Boolean. Allows `as_user=true` on `conversations_add_message`, reactions and `files_upload`. With only a user token (`xoxp`), every action is taken as the user anyway. |
+| `SLACK_MCP_JOIN_TOOL`             | No        | `false`                   | Boolean. Enables `conversations_join` and `conversations_leave`. |
+| `SLACK_MCP_USERGROUPS_WRITE_TOOL` | No        | `false`                   | Boolean. Enables `usergroups_create`, `usergroups_update`, `usergroups_users_update` and the `join`/`leave` actions of `usergroups_me`. |
+| `SLACK_MCP_OPEN_CONVERSATION_TOOL`, `SLACK_MCP_RENAME_CHANNEL_TOOL`, `SLACK_MCP_CREATE_CHANNEL_TOOL`, `SLACK_MCP_SET_TOPIC_TOOL`, `SLACK_MCP_INVITE_TOOL`, `SLACK_MCP_INVITE_SHARED_TOOL` | No | `false` | Booleans enabling `conversations_open`, `conversations_rename`, `conversations_create`, `conversations_set_topic`, `conversations_invite` and `conversations_invite_shared`. |
+| `SLACK_MCP_MARK_TOOL`             | No        | `false`                   | Boolean. Enables `conversations_mark` (registered only with a user token; always acts as the user). |
 | `SLACK_MCP_USERS_CACHE`           | No        | `~/Library/Caches/slack-mcp-server/users_cache.json` (macOS)<br>`~/.cache/slack-mcp-server/users_cache.json` (Linux)<br>`%LocalAppData%/slack-mcp-server/users_cache.json` (Windows) | Path to the users cache file. Used to cache Slack user information to avoid repeated API calls on startup. |
 | `SLACK_MCP_CHANNELS_CACHE`        | No        | `~/Library/Caches/slack-mcp-server/channels_cache_v2.json` (macOS)<br>`~/.cache/slack-mcp-server/channels_cache_v2.json` (Linux)<br>`%LocalAppData%/slack-mcp-server/channels_cache_v2.json` (Windows) | Path to the channels cache file. Used to cache Slack channel information to avoid repeated API calls on startup. |
 | `SLACK_MCP_LOG_LEVEL`             | No        | `info`                    | Log-level for stdout or stderr. Valid values are: `debug`, `info`, `warn`, `error`, `panic` and `fatal`                                                                                                                                                                                   |
 | `SLACK_MCP_GOVSLACK`              | No        | `nil`                     | Set to `true` to enable [GovSlack](https://slack.com/solutions/govslack) mode. Routes API calls to `slack-gov.com` endpoints instead of `slack.com` for FedRAMP-compliant government workspaces.                                                                                          |
-| `SLACK_MCP_ENABLED_TOOLS`         | No        | `nil`                     | Comma-separated list of tools to register. If empty, all read-only tools and usergroups tools are registered; write tools (`conversations_add_message`, `files_upload`, `reactions_add`, `reactions_remove`, `attachment_get_data`) require their specific env var OR must be explicitly listed here. When `files_upload` is listed here, it is enabled without channel restrictions. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `files_upload`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_search_messages`, `channels_list`, `usergroups_list`, `usergroups_me`, `usergroups_create`, `usergroups_update`, `usergroups_users_update`. |
+| `SLACK_MCP_ENABLED_TOOLS`         | No        | `nil`                     | Comma-separated list of tools to register (same as `-e`). If empty, all read-only tools are registered and every tool that changes something stays off until its own variable enables it. A write tool listed here is enabled without channel restrictions when its own variable is unset; an explicit `false` still disables it. See [Configuration](docs/03-configuration-and-usage.md#tool-registration-and-permissions) for the full list. |
 
 *Set `SLACK_MCP_XOXP_TOKEN` (user), `SLACK_MCP_XOXB_TOKEN` (bot), or both. Browser session tokens (`xoxc`/`xoxd`) are not supported.
 
