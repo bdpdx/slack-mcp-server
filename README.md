@@ -91,7 +91,7 @@ Search messages in a public channel, private channel, or direct message (DM, or 
 
 ### 5. files_upload
 Upload and share a file in a Slack conversation. Requires the `files:write` OAuth scope and is disabled by default.
-- **Parameters:** `channel_id` and `filename` are required. Pass exactly one of `content` (UTF-8 text) or `content_base64` (base64-encoded bytes). Files are limited to 5 MB. Optional `title`, `initial_comment`, and `thread_ts` customize the shared file.
+- **Parameters:** `channel_id` and `filename` are required. Pass exactly one of `content` (UTF-8 text) or `content_base64` (base64-encoded bytes). Files are limited to 64 MiB. Optional `title`, `initial_comment`, and `thread_ts` customize the shared file.
 - **Safety:** Set `SLACK_MCP_UPLOAD_FILE_TOOL=true` to allow uploads anywhere, or provide a comma-separated channel/DM ID allowlist. This setting restricts destination conversations.
 
 ### 6. channels_list:
@@ -285,7 +285,7 @@ Fetches a CSV directory of all users in the workspace.
 | `SLACK_MCP_ADD_MESSAGE_MARK`      | No        | `false`                   | Boolean. Marks messages sent with `conversations_add_message` as read. |
 | `SLACK_MCP_ADD_MESSAGE_UNFURLING` | No        | `false`                   | `true` to unfurl every posted link, or a comma-separated domain allow-list (e.g. `github.com,slack.com`). Every URL in the text and blocks must be allowed, otherwise unfurling is disabled for that message. |
 | `SLACK_MCP_REACTION_TOOL`         | No        | `nil`                     | Channel policy for `reactions_add` and `reactions_remove`, same syntax as `SLACK_MCP_ADD_MESSAGE_TOOL`. |
-| `SLACK_MCP_ATTACHMENT_TOOL`       | No        | `false`                   | Boolean. Enables `attachment_get_data` (Slack-hosted files only, 5 MB cap). |
+| `SLACK_MCP_ATTACHMENT_TOOL`       | No        | `false`                   | Boolean. Enables `attachment_get_data` (Slack-hosted files only, 64 MiB cap). |
 | `SLACK_MCP_UPLOAD_FILE_TOOL`      | No        | `nil`                     | Channel policy for `files_upload`, same syntax as `SLACK_MCP_ADD_MESSAGE_TOOL`. |
 | `SLACK_MCP_DELETE_MESSAGE_TOOL`   | No        | `nil`                     | Channel policy for `conversations_delete_message`, same syntax as `SLACK_MCP_ADD_MESSAGE_TOOL`. |
 | `SLACK_MCP_ALLOW_AS_USER`         | No        | `false`                   | Boolean. Allows `as_user=true` on `conversations_add_message`, reactions and `files_upload`. With only a user token (`xoxp`), every action is taken as the user anyway. |

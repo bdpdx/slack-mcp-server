@@ -274,7 +274,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, cfg *toolc
 
 	if cfg.ToolEnabled(ToolAttachmentGetData) {
 		s.AddTool(mcp.NewTool(ToolAttachmentGetData,
-			mcp.WithDescription("Download an attachment's content by file ID. Returns file metadata and content (text files as-is, binary files as base64). Maximum file size is 5MB."),
+			mcp.WithDescription("Download an attachment's content by file ID. Returns file metadata and content (text files as-is, binary files as base64). Maximum file size is 64 MiB."),
 			mcp.WithTitleAnnotation("Get Attachment Data"),
 			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("file_id",
@@ -286,7 +286,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, cfg *toolc
 
 	if cfg.ToolEnabled(ToolFilesUpload) {
 		s.AddTool(mcp.NewTool(ToolFilesUpload,
-			mcp.WithDescription("Upload a file and share it to a Slack channel or DM. Provide either UTF-8 text in content or base64-encoded bytes in content_base64; files are limited to 5 MB. This write tool is disabled unless explicitly enabled."),
+			mcp.WithDescription("Upload a file and share it to a Slack channel or DM. Provide either UTF-8 text in content or base64-encoded bytes in content_base64; files are limited to 64 MiB. This write tool is disabled unless explicitly enabled."),
 			mcp.WithTitleAnnotation("Upload File"),
 			mcp.WithDestructiveHintAnnotation(true),
 			mcp.WithString("channel_id",

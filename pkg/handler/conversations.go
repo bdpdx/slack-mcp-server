@@ -28,7 +28,7 @@ import (
 const (
 	defaultConversationsNumericLimit    = 50
 	defaultConversationsExpressionLimit = "1d"
-	maxFileSizeBytes                    = 5 * 1024 * 1024 // 5MB limit
+	maxFileSizeBytes                    = provider.MaxFileDownloadBytes // 64 MiB, for downloads and uploads
 
 	// Upper bounds for numeric tool inputs.
 	maxConversationsNumericLimit = 999

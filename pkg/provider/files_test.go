@@ -141,5 +141,5 @@ func TestUnitDownloadFile(t *testing.T) {
 }
 
 func TestUnitMaxFileDownloadBytes(t *testing.T) {
-	assert.Equal(t, 5*1024*1024, MaxFileDownloadBytes)
+	assert.Equal(t, 64*1024*1024, MaxFileDownloadBytes)
 }

@@ -12,7 +12,7 @@ import (
 
 // MaxFileDownloadBytes caps how many bytes a single file download may read,
 // regardless of the size Slack reports for the file.
-const MaxFileDownloadBytes = 5 * 1024 * 1024
+const MaxFileDownloadBytes = 64 * 1024 * 1024
 
 // ErrFileTooLarge is returned when a download exceeds its byte cap.
 var ErrFileTooLarge = errors.New("file exceeds the maximum download size")
