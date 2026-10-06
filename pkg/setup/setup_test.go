@@ -53,7 +53,6 @@ func TestRunNewCodexHome(t *testing.T) {
 		" xapp-1 ",  // app token
 		"xoxb-good", // bot token
 		"xoxp-good", // user token
-		"y",         // default tools
 	}}
 	res, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
@@ -64,6 +63,7 @@ func TestRunNewCodexHome(t *testing.T) {
 	assert.Contains(t, p.Out.String(), "unique in this Slack workspace")
 	assert.Contains(t, p.Out.String(), "Display Information")
 	assert.Contains(t, p.Out.String(), "OAuth & Permissions")
+	assert.Contains(t, p.Out.String(), `If tokens do not appear click "Install to <Workspace>."`)
 
 	env, err := ReadEnv(EnvPath(codex))
 	require.NoError(t, err)
@@ -71,6 +71,11 @@ func TestRunNewCodexHome(t *testing.T) {
 	info, _ := os.Stat(EnvPath(codex))
 	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 	assert.FileExists(t, filepath.Join(repo, ".install", "manifests", "pat-codex.json"))
+	assert.Equal(t, "true", env["SLACK_MCP_JOIN_TOOL"], "permissive defaults are written without asking")
+	assert.Equal(t, "false", env["SLACK_MCP_DELETE_MESSAGE_TOOL"])
+	assert.Equal(t, "false", env["SLACK_MCP_INVITE_SHARED_TOOL"])
+	assert.NotContains(t, p.Out.String(), "Enable the default tools")
+	assert.Contains(t, p.Out.String(), "edit "+EnvPath(codex))
 
 	st, _ := LoadState(filepath.Join(repo, ".install-state.json"))
 	assert.Equal(t, "pat-codex", st.Home(codex).Bot)
@@ -104,7 +109,7 @@ func TestRunOffersManifestOnClipboard(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(user, ".claude"), 0o700))
 	var copied []byte
-	p := &Scripted{Answers: []string{"1", "pat-claude", "y", "", "xapp-1", "xoxb-good", "xoxp-good", "y"}}
+	p := &Scripted{Answers: []string{"1", "pat-claude", "y", "", "xapp-1", "xoxb-good", "xoxp-good"}}
 	o := opts(user, repo, p)
 	o.Clipboard = func(b []byte) error { copied = b; return nil }
 	_, err := Run(context.Background(), o)
@@ -130,7 +135,7 @@ func TestRunReasksOnlyBadToken(t *testing.T) {
 		"1", "pat-codex", "", // set up; name; Enter after the app step
 		"xapp-1", "xoxp-wrong", // bot slot given a user token: prefix failure, re-ask bot
 
-		"xoxb-good", "xoxp-good", "y",
+		"xoxb-good", "xoxp-good",
 	}}
 	_, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
@@ -163,7 +168,6 @@ func TestRunLiveCheckReasksOnlyBotToken(t *testing.T) {
 		"1", "pat-codex", "",
 		"xapp-1", "xoxb-bad", "xoxp-good", // Slack rejects the bot token
 		"xoxb-good", // only the bot token is asked again
-		"y",
 	}}
 	_, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
@@ -176,7 +180,7 @@ func TestRunLiveCheckReasksOnlyBotToken(t *testing.T) {
 func runWithValidator(t *testing.T, v fakeValidator) string {
 	user, repo := t.TempDir(), t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(user, ".codex"), 0o700))
-	p := &Scripted{Answers: []string{"1", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-good", "y"}}
+	p := &Scripted{Answers: []string{"1", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-good"}}
 	o := opts(user, repo, p)
 	o.V = v
 	_, err := Run(context.Background(), o)
@@ -231,20 +235,14 @@ func TestRunReinstallKeepsCustomToolValues(t *testing.T) {
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	require.NoError(t, os.WriteFile(EnvPath(codex), []byte(
 		"SLACK_MCP_XOXB_TOKEN=xoxb-old\nSLACK_MCP_ADD_MESSAGE_TOOL=C123,#general\nSLACK_MCP_DELETE_MESSAGE_TOOL='!C123 #x'\n"), 0o600))
-	answers := []string{"1", "2", "y", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-good", "n"}
-	for range len(DefaultOnTools) + len(DefaultOffTools) - 2 {
-		answers = append(answers, "") // keep each toggle's default
-	}
-	p := &Scripted{Answers: answers}
+	p := &Scripted{Answers: []string{"1", "2", "y", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-good"}}
 	res, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
 	require.Len(t, res, 1)
 	out := p.Out.String()
 	assert.Contains(t, out, "SLACK_MCP_ADD_MESSAGE_TOOL=C123,#general: custom (kept)")
 	assert.Contains(t, out, "SLACK_MCP_DELETE_MESSAGE_TOOL=!C123 #x: custom (kept)")
-	assert.NotContains(t, out, "Enable SLACK_MCP_ADD_MESSAGE_TOOL?")
-	assert.NotContains(t, out, "Enable SLACK_MCP_DELETE_MESSAGE_TOOL?")
-	assert.Contains(t, out, "Enable SLACK_MCP_JOIN_TOOL?")
+	assert.NotContains(t, out, "Enable", "tool settings are never asked")
 
 	env, err := ReadEnv(EnvPath(codex))
 	require.NoError(t, err)

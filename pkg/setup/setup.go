@@ -38,7 +38,7 @@ const (
 	userMsg     = "Your Slack username %q contains _ or ., which this setup's channel names use as separators. Ask your workspace admin to change it, then run setup again."
 	takenMsg    = "Warning: another bot in this workspace is already named %q. Bot names must be unique; consider reinstalling this home with a different name."
 	iconMsgFmt  = "Set an icon for %s: https://app.slack.com/apps → Build → %s → Settings → Basic Information → Display Information."
-	tokenHelpFm = "Bot token (xoxb-…) and user token (xoxp-…): https://app.slack.com/apps → Build → %s → Settings → Features → OAuth & Permissions → OAuth Tokens."
+	tokenHelpFm = "Bot token (xoxb-…) and user token (xoxp-…): https://app.slack.com/apps → Build → %s → Settings → Features → OAuth & Permissions → OAuth Tokens. If tokens do not appear click \"Install to <Workspace>.\""
 )
 
 // Run drives the interactive setup. ErrAborted ends it immediately.
@@ -277,10 +277,8 @@ func configureEnv(ctx context.Context, o Options, h Home, saved string) (string,
 	if err != nil {
 		return "", nil, err
 	}
-	tools, err := askTools(o.P, DefaultTools(existing), CustomTools(existing))
-	if err != nil {
-		return "", nil, err
-	}
+	tools := DefaultTools(existing)
+	reportTools(o.P, envPath, tools, CustomTools(existing))
 	data, err := RenderEnv(MergeEnv(existing, tok, tools))
 	if err != nil {
 		return "", nil, err
@@ -291,7 +289,25 @@ func configureEnv(ctx context.Context, o Options, h Home, saved string) (string,
 	return name, []string{fmt.Sprintf(iconMsgFmt, name, name)}, nil
 }
 
-func askTools(p Prompter, tools map[string]bool, custom map[string]string) (map[string]bool, error) {
+// reportTools says which tool settings were written: permissive defaults
+// (deleting messages and Slack Connect invites stay off), existing values
+// kept, custom channel lists untouched. Nothing is asked; the user edits the
+// .env to change them.
+func reportTools(p Prompter, envPath string, tools map[string]bool, custom map[string]string) {
+	var on, off []string
+	for k, v := range tools {
+		if v {
+			on = append(on, k)
+		} else {
+			off = append(off, k)
+		}
+	}
+	sort.Strings(on)
+	sort.Strings(off)
+	p.Say("\nTools enabled: %s", strings.Join(on, ", "))
+	if len(off) > 0 {
+		p.Say("Tools off: %s", strings.Join(off, ", "))
+	}
 	if len(custom) > 0 {
 		keys := make([]string, 0, len(custom))
 		for k := range custom {
@@ -303,29 +319,7 @@ func askTools(p Prompter, tools map[string]bool, custom map[string]string) (map[
 			p.Say("  %s=%s: custom (kept)", k, custom[k])
 		}
 	}
-	var on []string
-	for k, v := range tools {
-		if v {
-			on = append(on, k)
-		}
-	}
-	sort.Strings(on)
-	ok, err := p.Confirm(fmt.Sprintf("Enable the default tools (%s)?", strings.Join(on, ", ")), true)
-	if err != nil || ok {
-		return tools, err
-	}
-	keys := make([]string, 0, len(tools))
-	for k := range tools {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	out := map[string]bool{}
-	for _, k := range keys {
-		if out[k], err = p.Confirm("Enable "+k+"?", tools[k]); err != nil {
-			return nil, err
-		}
-	}
-	return out, nil
+	p.Say("To change them, edit %s and restart the agent.", envPath)
 }
 
 func setupBot(ctx context.Context, o Options, h Home, saved string) (string, Tokens, error) {

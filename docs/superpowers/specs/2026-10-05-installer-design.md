@@ -126,10 +126,9 @@ unrelated settings alone.
 | Hooks | `settings.json`: `UserPromptSubmit` relay-hook (15s), `PreToolUse` matcher `AskUserQuestion` ask-hook (15s), `PermissionRequest` approval-hook (660s), `Stop` stop-hook (15s) | `hooks.json`: relay-hook, stop-hook (`statusMessage: "SlackAgentChat"`); approval-hook (660s) only if `config.toml` lacks `approvals_reviewer = "auto_review"` |
 | Rules | — | `rules/default.rules`: `prefix_rule(pattern=["<bin>", "chat"], decision="allow")` |
 
-- **Tool settings** in the `.env` default to on: ADD_MESSAGE, JOIN,
+- **Tool settings** are written without asking (the user edits the `.env` to change them); they default to on: ADD_MESSAGE, JOIN,
   USERGROUPS_WRITE, RENAME_CHANNEL, SET_TOPIC, INVITE, ATTACHMENT,
-  UPLOAD_FILE (`=true`); INVITE_SHARED, DELETE_MESSAGE stay off. One prompt
-  accepts the defaults or toggles each. On Update, existing settings are
+  UPLOAD_FILE (`=true`); INVITE_SHARED, DELETE_MESSAGE stay off. On Update, existing settings are
   kept.
 - **Hook merge:** remove existing entries whose command runs any
   `slack-mcp-server chat … <hook>` (old or new path), add the current ones;
