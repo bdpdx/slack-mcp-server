@@ -82,3 +82,11 @@ func TestToolHooksPassThroughOnErrors(t *testing.T) {
 		}
 	}
 }
+
+// The terminal shows this to the owner, so it leads with a line for them.
+func TestAskHookReason(t *testing.T) {
+	got := askHookReason("proj__brian_claude", "1.2")
+	assert.True(t, strings.HasPrefix(got, "Question sent to Slack: #proj__brian_claude. Answer it there.\n"), got)
+	assert.Contains(t, got, "Do not ask again")
+	assert.Contains(t, got, "ts 1.2")
+}
