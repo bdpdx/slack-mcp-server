@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bdpdx/slack-mcp-server/pkg/provider"
+	"github.com/bdpdx/slack-mcp-server/pkg/toolconfig"
 	"github.com/gocarina/gocsv"
-	"github.com/korotovsky/slack-mcp-server/pkg/provider"
-	"github.com/korotovsky/slack-mcp-server/pkg/toolconfig"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/slack-go/slack"
 	"go.uber.org/zap"

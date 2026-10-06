@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/korotovsky/slack-mcp-server/pkg/version"
+	"github.com/bdpdx/slack-mcp-server/pkg/version"
 	"go.uber.org/zap"
 )
 

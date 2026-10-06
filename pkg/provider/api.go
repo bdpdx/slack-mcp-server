@@ -17,8 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/korotovsky/slack-mcp-server/pkg/limiter"
-	"github.com/korotovsky/slack-mcp-server/pkg/transport"
+	"github.com/bdpdx/slack-mcp-server/pkg/limiter"
+	"github.com/bdpdx/slack-mcp-server/pkg/transport"
 	"github.com/slack-go/slack"
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"

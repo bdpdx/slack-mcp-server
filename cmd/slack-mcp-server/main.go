@@ -11,11 +11,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/korotovsky/slack-mcp-server/pkg/agentchat"
-	"github.com/korotovsky/slack-mcp-server/pkg/filesdir"
-	"github.com/korotovsky/slack-mcp-server/pkg/provider"
-	"github.com/korotovsky/slack-mcp-server/pkg/server"
-	"github.com/korotovsky/slack-mcp-server/pkg/toolconfig"
+	"github.com/bdpdx/slack-mcp-server/pkg/agentchat"
+	"github.com/bdpdx/slack-mcp-server/pkg/filesdir"
+	"github.com/bdpdx/slack-mcp-server/pkg/provider"
+	"github.com/bdpdx/slack-mcp-server/pkg/server"
+	"github.com/bdpdx/slack-mcp-server/pkg/setup"
+	"github.com/bdpdx/slack-mcp-server/pkg/toolconfig"
 	"github.com/mattn/go-isatty"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -27,6 +28,13 @@ var defaultSsePort = 13080
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "chat" {
 		os.Exit(agentchat.RunCLI(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "setup" {
+		os.Exit(setup.Main(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "uninstall" {
+		os.Exit(setup.UninstallMain(os.Args[2:]))
 	}
 
 	var transport string

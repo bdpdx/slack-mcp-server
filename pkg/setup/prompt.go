@@ -1,0 +1,149 @@
+// Package setup is the interactive installer behind `slack-mcp-server
+// setup`: it configures Claude Code and Codex homes for Slack agent chat.
+package setup
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strconv"
+	"strings"
+)
+
+// ErrAborted ends setup when input runs out (EOF, Ctrl-D).
+var ErrAborted = errors.New("setup aborted")
+
+// Prompter asks the user questions. Ask returns def for an empty answer;
+// Choose numbers options from 1 and returns the chosen index; Secret reads a
+// pasted token (shown as typed, so it can be checked) and trims whitespace
+// and wrapping quotes.
+type Prompter interface {
+	Say(format string, a ...any)
+	Ask(question, def string) (string, error)
+	Confirm(question string, def bool) (bool, error)
+	Choose(question string, options []string, def int) (int, error)
+	Secret(question string) (string, error)
+}
+
+// lineSource returns one answer line or ErrAborted.
+type lineSource func() (string, error)
+
+type prompter struct {
+	out  io.Writer
+	next lineSource
+}
+
+func (p *prompter) Say(format string, a ...any) { fmt.Fprintf(p.out, format+"\n", a...) }
+
+func (p *prompter) Ask(q, def string) (string, error) {
+	if def != "" {
+		fmt.Fprintf(p.out, "%s [%s]: ", q, def)
+	} else {
+		fmt.Fprintf(p.out, "%s: ", q)
+	}
+	s, err := p.next()
+	if err != nil {
+		return "", err
+	}
+	if s = strings.TrimSpace(s); s == "" {
+		return def, nil
+	}
+	return s, nil
+}
+
+func (p *prompter) Confirm(q string, def bool) (bool, error) {
+	hint := "y/N"
+	if def {
+		hint = "Y/n"
+	}
+	for {
+		s, err := p.Ask(q+" ("+hint+")", "")
+		if err != nil {
+			return false, err
+		}
+		switch strings.ToLower(s) {
+		case "":
+			return def, nil
+		case "y", "yes":
+			return true, nil
+		case "n", "no":
+			return false, nil
+		}
+		p.Say("Please answer y or n.")
+	}
+}
+
+func (p *prompter) Choose(q string, options []string, def int) (int, error) {
+	p.Say("%s", q)
+	for i, o := range options {
+		p.Say("  %d) %s", i+1, o)
+	}
+	for {
+		s, err := p.Ask("Choice", strconv.Itoa(def+1))
+		if err != nil {
+			return 0, err
+		}
+		if n, err := strconv.Atoi(s); err == nil && n >= 1 && n <= len(options) {
+			return n - 1, nil
+		}
+		p.Say("Please enter a number from 1 to %d.", len(options))
+	}
+}
+
+func (p *prompter) Secret(q string) (string, error) {
+	fmt.Fprintf(p.out, "%s: ", q)
+	s, err := p.next()
+	if err != nil {
+		return "", err
+	}
+	return strings.Trim(strings.TrimSpace(s), `"'`), nil
+}
+
+// Terminal prompts on a real terminal. Pasted tokens are shown as typed, so
+// the user can check them.
+type Terminal struct{ prompter }
+
+// NewTerminal reads answers from in and writes prompts to out.
+func NewTerminal(in *os.File, out io.Writer) *Terminal {
+	r := bufio.NewReader(in)
+	t := &Terminal{prompter{out: out}}
+	t.next = func() (string, error) {
+		line, err := r.ReadString('\n')
+		if err != nil && line == "" {
+			return "", ErrAborted
+		}
+		return strings.TrimRight(line, "\r\n"), nil
+	}
+	return t
+}
+
+// Scripted answers prompts from a list, for tests; Out records the output.
+type Scripted struct {
+	Answers []string
+	Out     strings.Builder
+	p       *prompter
+}
+
+func (s *Scripted) get() *prompter {
+	if s.p == nil {
+		s.p = &prompter{out: &s.Out, next: func() (string, error) {
+			if len(s.Answers) == 0 {
+				return "", ErrAborted
+			}
+			a := s.Answers[0]
+			s.Answers = s.Answers[1:]
+			return a, nil
+		}}
+	}
+	return s.p
+}
+
+func (s *Scripted) Say(f string, a ...any)                 { s.get().Say(f, a...) }
+func (s *Scripted) Ask(q, d string) (string, error)        { return s.get().Ask(q, d) }
+func (s *Scripted) Confirm(q string, d bool) (bool, error) { return s.get().Confirm(q, d) }
+func (s *Scripted) Choose(q string, o []string, d int) (int, error) {
+	return s.get().Choose(q, o, d)
+}
+func (s *Scripted) Secret(q string) (string, error) { return s.get().Secret(q) }

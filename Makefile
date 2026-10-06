@@ -46,32 +46,13 @@ deps: ## Download dependencies
 test: ## Run the tests (all are local; none need Slack tokens or network)
 	$(GO) test -count=1 -race ./...
 
-AGENT_CHAT_BIN ?= $(HOME)/.bin/slack-mcp-server
-CODEX_HOMES ?= $(HOME)/.codex $(HOME)/.codex-rezilient
-CLAUDE_HOME ?= $(HOME)/.claude
+.PHONY: install
+install: ## Set up agent chat on this Mac (prerequisites, build, link, interactive setup)
+	./install.sh
 
-.PHONY: install-agent-chat
-install-agent-chat: build ## Build, then install the slack-agent-chat skills (AGENT_CHAT_BIN must be or link to ./build/$(BINARY_NAME))
-	@if [ ! -e "$(AGENT_CHAT_BIN)" ]; then \
-		echo "$(AGENT_CHAT_BIN) does not exist; link it to $(CURDIR)/build/$(BINARY_NAME)"; exit 1; \
-	fi
-	@for home in $(CODEX_HOMES); do \
-		mkdir -p $$home/skills/slack-agent-chat; \
-		sed 's#@BIN@#$(AGENT_CHAT_BIN)#g' skills/slack-agent-chat/codex/SKILL.md > $$home/skills/slack-agent-chat/SKILL.md; \
-		echo "installed skill into $$home/skills/slack-agent-chat"; \
-		echo "  Codex hooks ($$home/hooks.json):"; \
-		echo "    UserPromptSubmit:  $(AGENT_CHAT_BIN) chat --env-file $$home/slack-mcp-server.env relay-hook"; \
-		echo "    PermissionRequest: $(AGENT_CHAT_BIN) chat --env-file $$home/slack-mcp-server.env approval-hook  (timeout 660; skip with approvals_reviewer = auto_review)"; \
-		echo "    Stop:              $(AGENT_CHAT_BIN) chat --env-file $$home/slack-mcp-server.env stop-hook"; \
-	done
-	@mkdir -p $(CLAUDE_HOME)/skills/slack-agent-chat
-	@sed 's#@BIN@#$(AGENT_CHAT_BIN)#g' skills/slack-agent-chat/claude/SKILL.md > $(CLAUDE_HOME)/skills/slack-agent-chat/SKILL.md
-	@echo "installed skill into $(CLAUDE_HOME)/skills/slack-agent-chat"
-	@echo "Claude hooks ($(CLAUDE_HOME)/settings.json):"
-	@echo "  UserPromptSubmit:                    $(AGENT_CHAT_BIN) chat --env-file $(CLAUDE_HOME)/slack-mcp-server.env relay-hook"
-	@echo "  PreToolUse (matcher AskUserQuestion): $(AGENT_CHAT_BIN) chat --env-file $(CLAUDE_HOME)/slack-mcp-server.env ask-hook"
-	@echo "  PermissionRequest:                   $(AGENT_CHAT_BIN) chat --env-file $(CLAUDE_HOME)/slack-mcp-server.env approval-hook  (timeout 660)"
-	@echo "  Stop:                                $(AGENT_CHAT_BIN) chat --env-file $(CLAUDE_HOME)/slack-mcp-server.env stop-hook"
+.PHONY: uninstall
+uninstall: ## Remove agent chat from the agent homes you choose (asks before each)
+	./uninstall.sh
 
 .PHONY: format
 format: ## Format the code

@@ -52,15 +52,12 @@ Remove the old `[mcp_servers.slack.env]` token block from each `config.toml`.
 ## Install skills
 
 ```bash
-make install-agent-chat
+./install.sh
 ```
 
-This builds `./build/slack-mcp-server` and installs the skills pointing at `AGENT_CHAT_BIN`
-(default `~/.bin/slack-mcp-server`), which must be, or link to, that build output.
-
-The target prints the SlackAgentChat hook commands for each home. Add them to each Codex home's
-`hooks.json` (with `"statusMessage": "SlackAgentChat"`) and to `~/.claude/settings.json`, replacing
-any old `agent-chat` relay hook. Codex asks you to trust new hooks in the next session.
+This runs prerequisites, build and the interactive setup, which links `./build/slack-mcp-server`,
+installs the skills and writes the SlackAgentChat hooks for each agent home. Codex asks you to
+trust new hooks in the next session.
 
 - `UserPromptSubmit` → `relay-hook`: `%agents:` prompts (both hosts).
 - `PreToolUse` with matcher `AskUserQuestion` → `ask-hook` (Claude): questions go to the
@@ -76,6 +73,9 @@ any old `agent-chat` relay hook. Codex asks you to trust new hooks in the next s
 - `Stop` → `stop-hook` (both hosts): when a turn you started by typing at the terminal ends, the
   agent's bot DMs you its final response. Turns started by Slack messages, background work or
   subagents send nothing. This replaces a Codex `notify` push notification.
+
+Codex needs a running app-server to receive Slack messages, so for each Codex home the installer also sets up a launchd agent `~/Library/LaunchAgents/com.openai.<dir>.app-server.plist` (for `~/.codex-test`, `com.openai.codex-test.app-server`). A missing agent is created, enabled and started; an existing one is verified and, if it is not running, you are asked whether to start it.
+
 
 ## Use
 

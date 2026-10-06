@@ -36,6 +36,6 @@ codex mcp add slack -- ~/.bin/slack-mcp-server --transport stdio --env-file ~/.c
 
 For other stdio clients (e.g. Claude Desktop or Cursor), configure the command `~/.bin/slack-mcp-server` (use the absolute path) with the arguments `--transport stdio --env-file <path to env file>`.
 
-See [Slack Agent Chat](04-slack-agent-chat.md) for the agent-chat skills and hooks (`make install-agent-chat`), and [Configuration and Usage](03-configuration-and-usage.md) for SSE/HTTP transports and Docker.
+See [Slack Agent Chat](04-slack-agent-chat.md) for the agent-chat skills and hooks (`./install.sh`), and [Configuration and Usage](03-configuration-and-usage.md) for SSE/HTTP transports.
 
 See next: [Configuration and Usage](03-configuration-and-usage.md)
