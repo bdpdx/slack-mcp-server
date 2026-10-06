@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/korotovsky/slack-mcp-server/pkg/toolconfig"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
 )
@@ -16,9 +17,7 @@ func uploadRequest(args map[string]any) mcp.CallToolRequest {
 }
 
 func TestUnitParseParamsToolFilesUpload(t *testing.T) {
-	t.Setenv("SLACK_MCP_ENABLED_TOOLS", "")
-	t.Setenv("SLACK_MCP_UPLOAD_FILE_TOOL", "D123")
-	handler := &ConversationsHandler{}
+	handler := newPolicyTestHandler(t, map[string]string{"SLACK_MCP_UPLOAD_FILE_TOOL": "D123"})
 
 	t.Run("accepts text content and applies filename title default", func(t *testing.T) {
 		params, err := handler.parseParamsToolFilesUpload(t.Context(), uploadRequest(map[string]any{
@@ -86,13 +85,21 @@ func TestUnitParseParamsToolFilesUpload(t *testing.T) {
 	})
 
 	t.Run("requires upload configuration unless explicitly enabled", func(t *testing.T) {
-		t.Setenv("SLACK_MCP_UPLOAD_FILE_TOOL", "")
+		handler := newPolicyTestHandler(t, nil)
 		_, err := handler.parseParamsToolFilesUpload(t.Context(), uploadRequest(map[string]any{
 			"channel_id": "D123", "filename": "recap.html", "content": "ok",
 		}))
-		require.ErrorContains(t, err, "disabled by default")
+		require.ErrorContains(t, err, "disabled")
 
-		t.Setenv("SLACK_MCP_ENABLED_TOOLS", "files_upload")
+		handler = newPolicyTestHandler(t, map[string]string{"SLACK_MCP_UPLOAD_FILE_TOOL": "false"})
+		_, err = handler.parseParamsToolFilesUpload(t.Context(), uploadRequest(map[string]any{
+			"channel_id": "D123", "filename": "recap.html", "content": "ok",
+		}))
+		require.ErrorContains(t, err, "disabled")
+
+		cfg, err := toolconfig.FromMap([]string{"files_upload"}, map[string]string{"SLACK_MCP_ALLOW_AS_USER": "true"})
+		require.NoError(t, err)
+		handler.cfg = cfg
 		params, err := handler.parseParamsToolFilesUpload(t.Context(), uploadRequest(map[string]any{
 			"channel_id": "D999", "filename": "recap.html", "content": "ok",
 		}))
@@ -101,7 +108,6 @@ func TestUnitParseParamsToolFilesUpload(t *testing.T) {
 
 		require.False(t, params.asUser)
 
-		t.Setenv("SLACK_MCP_ENABLED_TOOLS", "conversations_history, files_upload")
 		params, err = handler.parseParamsToolFilesUpload(t.Context(), uploadRequest(map[string]any{
 			"channel_id": "D999", "filename": "recap.html", "content": "ok", "as_user": true,
 		}))

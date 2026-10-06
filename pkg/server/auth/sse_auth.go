@@ -21,15 +21,33 @@ func withAuthKey(ctx context.Context, auth string) context.Context {
 	return context.WithValue(ctx, authKey{}, auth)
 }
 
+// APIKey returns the configured API key for the sse/http transports from
+// SLACK_MCP_API_KEY, falling back to the deprecated SLACK_MCP_SSE_API_KEY.
+func APIKey(getenv func(string) string) (key string, deprecated bool) {
+	if key = getenv("SLACK_MCP_API_KEY"); key != "" {
+		return key, false
+	}
+	key = getenv("SLACK_MCP_SSE_API_KEY")
+	return key, key != ""
+}
+
+// CheckAuthorization reports whether an Authorization header value carries
+// key, with or without a "Bearer " prefix, using a constant-time compare.
+func CheckAuthorization(header, key string) bool {
+	if key == "" {
+		return false
+	}
+	header = strings.TrimPrefix(header, "Bearer ")
+	return subtle.ConstantTimeCompare([]byte(key), []byte(header)) == 1
+}
+
 // Authenticate checks if the request is authenticated based on the provided context.
 func validateToken(ctx context.Context, logger *zap.Logger) (bool, error) {
-	// no configured token means no authentication
-	keyA := os.Getenv("SLACK_MCP_API_KEY")
-	if keyA == "" {
-		keyA = os.Getenv("SLACK_MCP_SSE_API_KEY")
-		if keyA != "" {
-			logger.Warn("SLACK_MCP_SSE_API_KEY is deprecated, please use SLACK_MCP_API_KEY")
-		}
+	// no configured token means no authentication; startup refuses that
+	// combination unless explicitly allowed on a loopback bind.
+	keyA, deprecated := APIKey(os.Getenv)
+	if deprecated {
+		logger.Warn("SLACK_MCP_SSE_API_KEY is deprecated, please use SLACK_MCP_API_KEY")
 	}
 
 	if keyA == "" {
@@ -52,11 +70,7 @@ func validateToken(ctx context.Context, logger *zap.Logger) (bool, error) {
 		zap.Bool("has_bearer_prefix", strings.HasPrefix(keyB, "Bearer ")),
 	)
 
-	if strings.HasPrefix(keyB, "Bearer ") {
-		keyB = strings.TrimPrefix(keyB, "Bearer ")
-	}
-
-	if subtle.ConstantTimeCompare([]byte(keyA), []byte(keyB)) != 1 {
+	if !CheckAuthorization(keyB, keyA) {
 		logger.Warn("Invalid auth token provided",
 			zap.String("context", "http"),
 		)
