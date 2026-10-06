@@ -47,3 +47,34 @@ func TestStateNeverHoldsTokens(t *testing.T) {
 	info, _ := os.Stat(p)
 	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 }
+
+func TestReplaceFileSkipsUnchanged(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f.txt")
+	require.NoError(t, os.WriteFile(p, []byte("same"), 0o600))
+	wrote, err := replaceFile(p, []byte("same"), 0o600, testNow)
+	require.NoError(t, err)
+	assert.False(t, wrote)
+	assert.NoFileExists(t, p+".bak-20261005120000")
+}
+
+func TestReplaceFileWritesThroughSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "dotfiles", "settings.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o700))
+	require.NoError(t, os.WriteFile(target, []byte("old"), 0o600))
+	link := filepath.Join(dir, "settings.json")
+	require.NoError(t, os.Symlink(target, link))
+
+	wrote, err := replaceFile(link, []byte("new"), 0o600, testNow)
+	require.NoError(t, err)
+	assert.True(t, wrote)
+
+	info, err := os.Lstat(link)
+	require.NoError(t, err)
+	assert.NotZero(t, info.Mode()&os.ModeSymlink, "link stays a link")
+	data, _ := os.ReadFile(target)
+	assert.Equal(t, "new", string(data))
+	bak, _ := os.ReadFile(target + ".bak-20261005120000")
+	assert.Equal(t, "old", string(bak))
+	assert.NoFileExists(t, link+".bak-20261005120000")
+}

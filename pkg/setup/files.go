@@ -61,7 +61,12 @@ func writeAtomic(path string, data []byte, perm os.FileMode) error {
 
 // replaceFile backs up path (if it exists) and writes data atomically,
 // skipping both when the content is unchanged. It reports whether it wrote.
+// A symlinked path (e.g. managed by a dotfile manager) is written through:
+// the link's final target is backed up and replaced and the link is kept.
 func replaceFile(path string, data []byte, perm os.FileMode, now time.Time) (bool, error) {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
 	if old, err := os.ReadFile(path); err == nil && string(old) == string(data) {
 		return false, nil
 	}
