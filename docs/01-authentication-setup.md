@@ -1,36 +1,8 @@
 ### 1. Authentication Setup
 
-Open up your Slack in your browser and login.
+> **Note**: You need an `xoxp-*` User OAuth token, an `xoxb-*` Bot token, or both. If both are set, the bot token is used by default and the user token for tools that must act as you (channel management, DMs, message deletion, unreads). Browser session tokens (`xoxc`/`xoxd`) are not supported.
 
-> **Note**: You only need one of the following: an `xoxp-*` User OAuth token, an `xoxb-*` Bot token, or both `xoxc-*` and `xoxd-*` session tokens. User/Bot tokens are more secure and do not require a browser session. If multiple are provided, priority is `xoxp` > `xoxb` > `xoxc/xoxd`.
-
-#### Option 1: Using `SLACK_MCP_XOXC_TOKEN`/`SLACK_MCP_XOXD_TOKEN` (Browser session)
-
-##### Lookup `SLACK_MCP_XOXC_TOKEN`
-
-- Open your browser's Developer Console.
-- In Firefox, under `Tools -> Browser Tools -> Web Developer tools` in the menu bar
-- In Chrome, click the "three dots" button to the right of the URL Bar, then select
-  `More Tools -> Developer Tools`
-- Switch to the console tab.
-- Type "allow pasting" and press ENTER.
-- Paste the following snippet and press ENTER to execute:
-  `JSON.parse(localStorage.localConfig_v2).teams[document.location.pathname.match(/^\/client\/([A-Z0-9]+)/)[1]].token`
-
-Token value is printed right after the executed command (it starts with
-`xoxc-`), save it somewhere for now.
-
-##### Lookup `SLACK_MCP_XOXD_TOKEN`
-
-- Switch to "Application" tab and select "Cookies" in the left navigation pane.
-- Find the cookie with the name `d`.  That's right, just the letter `d`.
-- Double-click the Value of this cookie.
-- Press Ctrl+C or Cmd+C to copy it's value to clipboard.
-- Save it for later.
-
-#### Option 2: Using `SLACK_MCP_XOXP_TOKEN` (User OAuth)
-
-Instead of using browser-based tokens (`xoxc`/`xoxd`), you can use a User OAuth token:
+#### Option 1: Using `SLACK_MCP_XOXP_TOKEN` (User OAuth)
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new app
 2. Under "OAuth & Permissions", add the following to the "User Token Scopes":
@@ -96,7 +68,7 @@ To create the app from a manifest with permissions preconfigured, use the follow
 }
 ```
 
-#### Option 3: Using `SLACK_MCP_XOXB_TOKEN` (Bot Token)
+#### Option 2: Using `SLACK_MCP_XOXB_TOKEN` (Bot Token)
 
 You can also use a Bot token instead of a User token:
 

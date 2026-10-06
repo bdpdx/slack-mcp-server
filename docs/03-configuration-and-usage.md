@@ -10,10 +10,9 @@ For [Claude Desktop](https://claude.ai/download) users, you can use the DXT exte
 2. Click on the `Extensions` tab.
 3. Drag and drop the downloaded .dxt file to install it and click "Install".
 5. Fill all required configuration fields
-    - Authentication method: `xoxc/xoxd`, `xoxp`, or `xoxb`.
-    - Value for `SLACK_MCP_XOXC_TOKEN` and `SLACK_MCP_XOXD_TOKEN` in case of `xoxc/xoxd` method, `SLACK_MCP_XOXP_TOKEN` in case of `xoxp`, or `SLACK_MCP_XOXB_TOKEN` in case of `xoxb`.
+    - Authentication method: `xoxp` or `xoxb`.
+    - Value for `SLACK_MCP_XOXP_TOKEN` in case of `xoxp`, or `SLACK_MCP_XOXB_TOKEN` in case of `xoxb`.
     - You may also enable `Add Message Tool` to allow posting messages to channels.
-    - You may also change User-Agent if needed if you have Enterprise Slack.
 6. Enable MCP Server.
 
 > [!IMPORTANT]
@@ -25,7 +24,6 @@ The MCP server can be installed using the Cursor One-Click method.
 
 Below are prepared configurations:
 
- - `npx` and `xoxc/xoxd` method: [![Install MCP Server](https://cursor.com/deeplink/mcp-install-light.svg)](cursor://anysphere.cursor-deeplink/mcp/install?name=slack-mcp-server&config=eyJjb21tYW5kIjogIm5weCAteSBzbGFjay1tY3Atc2VydmVyQGxhdGVzdCAtLXRyYW5zcG9ydCBzdGRpbyIsImVudiI6IHsiU0xBQ0tfTUNQX1hPWENfVE9LRU4iOiAieG94Yy0uLi4iLCAiU0xBQ0tfTUNQX1hPWERfVE9LRU4iOiAieG94ZC0uLi4ifSwiZGlzYWJsZWQiOiBmYWxzZSwiYXV0b0FwcHJvdmUiOiBbXX0%3D)
  - `npx` and `xoxp` method: [![Install MCP Server](https://cursor.com/deeplink/mcp-install-light.svg)](cursor://anysphere.cursor-deeplink/mcp/install?name=slack-mcp-server&config=eyJjb21tYW5kIjogIm5weCAteSBzbGFjay1tY3Atc2VydmVyQGxhdGVzdCAtLXRyYW5zcG9ydCBzdGRpbyIsImVudiI6IHsiU0xBQ0tfTUNQX1hPWFBfVE9LRU4iOiAieG94cC0uLi4ifSwiZGlzYWJsZWQiOiBmYWxzZSwiYXV0b0FwcHJvdmUiOiBbXX0%3D)
  - `npx` and `xoxb` method: [![Install MCP Server](https://cursor.com/deeplink/mcp-install-light.svg)](cursor://anysphere.cursor-deeplink/mcp/install?name=slack-mcp-server&config=eyJjb21tYW5kIjogIm5weCAteSBzbGFjay1tY3Atc2VydmVyQGxhdGVzdCAtLXRyYW5zcG9ydCBzdGRpbyIsImVudiI6IHsiU0xBQ0tfTUNQX1hPWEJfVE9LRU4iOiAieG94Yi0uLi4ifSwiZGlzYWJsZWQiOiBmYWxzZSwiYXV0b0FwcHJvdmUiOiBbXX0%3D)
 
@@ -37,9 +35,6 @@ Below are prepared configurations:
 If you have npm installed, this is the fastest way to get started with `slack-mcp-server` on Claude Desktop.
 
 Open your `claude_desktop_config.json` and add the mcp server to the list of `mcpServers`:
-
-> [!WARNING]  
-> If you are using Enterprise Slack, you may set `SLACK_MCP_USER_AGENT` environment variable to match your browser's User-Agent string from where you extracted `xoxc` and `xoxd` and enable `SLACK_MCP_CUSTOM_TLS` to enable custom TLS-handshakes to start to look like a real browser. This is required for the server to work properly in some environments with higher security policies.
 
 **Option 1: Using XOXP Token**
 ``` json
@@ -81,27 +76,6 @@ Open your `claude_desktop_config.json` and add the mcp server to the list of `mc
 }
 ```
 
-**Option 3: Using XOXC/XOXD Tokens**
-``` json
-{
-  "mcpServers": {
-    "slack": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "slack-mcp-server@latest",
-        "--transport",
-        "stdio"
-      ],
-      "env": {
-        "SLACK_MCP_XOXC_TOKEN": "xoxc-...",
-        "SLACK_MCP_XOXD_TOKEN": "xoxd-..."
-      }
-    }
-  }
-}
-```
-
 <details>
 <summary>Or, stdio transport with docker.</summary>
 
@@ -123,33 +97,6 @@ Open your `claude_desktop_config.json` and add the mcp server to the list of `mc
       ],
       "env": {
         "SLACK_MCP_XOXP_TOKEN": "xoxp-..."
-      }
-    }
-  }
-}
-```
-
-**Option 2: Using XOXC/XOXD Tokens**
-```json
-{
-  "mcpServers": {
-    "slack": {
-      "command": "docker",
-      "args": [
-        "run",
-        "-i",
-        "--rm",
-        "-e",
-        "SLACK_MCP_XOXC_TOKEN",
-        "-e",
-        "SLACK_MCP_XOXD_TOKEN",
-        "ghcr.io/korotovsky/slack-mcp-server",
-        "--transport",
-        "stdio"
-      ],
-      "env": {
-        "SLACK_MCP_XOXC_TOKEN": "xoxc-...",
-        "SLACK_MCP_XOXD_TOKEN": "xoxd-..."
       }
     }
   }
@@ -226,13 +173,11 @@ and then use the endpoint `https://903d-xxx-xxxx-xxxx-10b4.ngrok-free.app` for y
 For detailed information about all environment variables, see [Environment Variables](https://github.com/korotovsky/slack-mcp-server?tab=readme-ov-file#environment-variables).
 
 ```bash
-export SLACK_MCP_XOXC_TOKEN=xoxc-...
-export SLACK_MCP_XOXD_TOKEN=xoxd-...
+export SLACK_MCP_XOXP_TOKEN=xoxp-...
 
 docker pull ghcr.io/korotovsky/slack-mcp-server:latest
 docker run -i --rm \
-  -e SLACK_MCP_XOXC_TOKEN \
-  -e SLACK_MCP_XOXD_TOKEN \
+  -e SLACK_MCP_XOXP_TOKEN \
   ghcr.io/korotovsky/slack-mcp-server:latest --transport stdio
 ```
 
@@ -257,28 +202,25 @@ docker-compose up -d
 
 | Variable                          | Required? | Default                   | Description                                                                                                                                                                                                                                                                               |
 |-----------------------------------|-----------|---------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `SLACK_MCP_XOXC_TOKEN`            | Yes*      | `nil`                     | Slack browser token (`xoxc-...`)                                                                                                                                                                                                                                                          |
-| `SLACK_MCP_XOXD_TOKEN`            | Yes*      | `nil`                     | Slack browser cookie `d` (`xoxd-...`)                                                                                                                                                                                                                                                     |
-| `SLACK_MCP_XOXP_TOKEN`            | Yes*      | `nil`                     | User OAuth token (`xoxp-...`) — alternative to xoxc/xoxd                                                                                                                                                                                                                                  |
+| `SLACK_MCP_XOXP_TOKEN`            | Yes*      | `nil`                     | User OAuth token (`xoxp-...`) |
+| `SLACK_MCP_XOXB_TOKEN`            | Yes*      | `nil`                     | Bot token (`xoxb-...`). If both are set, the bot token is the default and the user token is used for tools that must act as the user |
 | `SLACK_MCP_PORT`                  | No        | `13080`                   | Port for the MCP server to listen on                                                                                                                                                                                                                                                      |
 | `SLACK_MCP_HOST`                  | No        | `127.0.0.1`               | Host for the MCP server to listen on                                                                                                                                                                                                                                                      |
 | `SLACK_MCP_API_KEY`           | No        | `nil`                     | Bearer token for SSE and HTTP transports                                                                                                                                                                                                                                                            |
 | `SLACK_MCP_PROXY`                 | No        | `nil`                     | Proxy URL for outgoing requests                                                                                                                                                                                                                                                           |
-| `SLACK_MCP_USER_AGENT`            | No        | `nil`                     | Custom User-Agent (for Enterprise Slack environments)                                                                                                                                                                                                                                     |
-| `SLACK_MCP_CUSTOM_TLS`            | No        | `nil`                     | Send custom TLS-handshake to Slack servers based on `SLACK_MCP_USER_AGENT` or default User-Agent. (for Enterprise Slack environments)                                                                                                                                                     |
-| `SLACK_MCP_SERVER_CA`             | No        | `nil`                     | Path to CA certificate                                                                                                                                                                                                                                                                    |
-| `SLACK_MCP_SERVER_CA_TOOLKIT`     | No        | `nil`                     | Inject HTTPToolkit CA certificate to root trust-store for MitM debugging                                                                                                                                                                                                                  |
-| `SLACK_MCP_SERVER_CA_INSECURE`    | No        | `false`                   | Trust all insecure requests (NOT RECOMMENDED)                                                                                                                                                                                                                                             |
+| `SLACK_MCP_SERVER_CA`             | No        | `nil`                     | Path to a PEM file of extra CA certificates, added to the system trust store |
 | `SLACK_MCP_ADD_MESSAGE_TOOL`      | No        | `nil`                     | Enable message posting via `conversations_add_message` by setting it to `true` for all channels, a comma-separated list of channel IDs to whitelist specific channels, or use `!` before a channel ID to allow all except specified ones. If empty, the tool is only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
 | `SLACK_MCP_UPLOAD_FILE_TOOL`      | No        | `nil`                     | Enable `files_upload` by setting it to `true` for all conversations or a comma-separated list of channel/DM IDs to allow. The tool is disabled by default. If empty, it is only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
 | `SLACK_MCP_ADD_MESSAGE_MARK`      | No        | `nil`                     | When `conversations_add_message` is enabled (via `SLACK_MCP_ADD_MESSAGE_TOOL` or `SLACK_MCP_ENABLED_TOOLS`), setting this to `true` will automatically mark sent messages as read.                                                                                                        |
 | `SLACK_MCP_ADD_MESSAGE_UNFURLING` | No        | `nil`                     | Enable to let Slack unfurl posted links or set comma-separated list of domains e.g. `github.com,slack.com` to whitelist unfurling only for them. If text contains whitelisted and unknown domain unfurling will be disabled for security reasons.                                         |
-| `SLACK_MCP_USERS_CACHE`           | No        | `.users_cache.json`       | Path to the users cache file. Used to cache Slack user information to avoid repeated API calls on startup.                                                                                                                                                                                |
-| `SLACK_MCP_CHANNELS_CACHE`        | No        | `.channels_cache_v2.json` | Path to the channels cache file. Used to cache Slack channel information to avoid repeated API calls on startup.                                                                                                                                                                          |
+| `SLACK_MCP_USERS_CACHE`           | No        | user cache dir            | Path to the users cache file. Defaults to `<user cache dir>/slack-mcp-server/<team ID>_users_cache.json` (directory mode `0700`). |
+| `SLACK_MCP_CHANNELS_CACHE`        | No        | user cache dir            | Path to the channels cache file. Defaults to `<user cache dir>/slack-mcp-server/<team ID>_channels_cache_v2.json`. |
 | `SLACK_MCP_CACHE_TTL`             | No        | `24h`                     | Cache time-to-live. Supports duration format (`24h`, `30m`) or seconds (`3600`). Set to `0` to disable TTL (cache forever). When the cache expires, stale data is served immediately while a background refresh fetches fresh data.                                                       |
 | `SLACK_MCP_MIN_REFRESH_INTERVAL`  | No        | `30s`                     | Minimum interval between forced cache refreshes. Prevents API abuse from repeated force-refresh requests. Supports duration format (`30s`, `1m`) or seconds (`60`). Set to `0` to disable rate limiting.                                                                                  |
 | `SLACK_MCP_LOG_LEVEL`             | No        | `info`                    | Log-level for stdout or stderr. Valid values are: `debug`, `info`, `warn`, `error`, `panic` and `fatal`                                                                                                                                                                                   |
 | `SLACK_MCP_ENABLED_TOOLS`         | No        | `nil`                     | Comma-separated list of tools to register. If empty, all read-only tools and usergroups tools are registered; write tools (`conversations_add_message`, `files_upload`, `reactions_add`, `reactions_remove`, `attachment_get_data`) require their specific env var to be set OR must be explicitly listed here. When `files_upload` is listed here, it is enabled without channel restrictions. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `files_upload`, `conversations_delete_message`, `conversations_open`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_search_messages`, `conversations_join`, `conversations_leave`, `conversations_unreads`, `conversations_mark`, `conversations_rename`, `conversations_create`, `conversations_invite`, `conversations_invite_shared`, `channels_list`, `channels_me`, `usergroups_list`, `usergroups_me`, `usergroups_create`, `usergroups_update`, `usergroups_users_update`, `users_search`. |
+
+*Set `SLACK_MCP_XOXP_TOKEN`, `SLACK_MCP_XOXB_TOKEN`, or both. Browser session tokens (`xoxc`/`xoxd`) are not supported.
 
 ### Tool Registration and Permissions
 
