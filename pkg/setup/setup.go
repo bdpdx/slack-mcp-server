@@ -480,6 +480,18 @@ func existingBinFor(user, repo string) string {
 	return ExistingBin(DiscoverHomes(user, st))
 }
 
+// binPath makes the --bin value absolute; empty means this executable.
+func binPath(bin string) (string, error) {
+	if bin == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			return "", fmt.Errorf("--bin is required (%v)", err)
+		}
+		bin = exe
+	}
+	return filepath.Abs(bin)
+}
+
 // Main runs `slack-mcp-server setup` and returns the exit code.
 func Main(args []string) int {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
@@ -498,13 +510,10 @@ func Main(args []string) int {
 		fmt.Println(existingBinFor(user, *repo))
 		return 0
 	}
-	if *bin == "" {
-		exe, err := os.Executable()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "setup: --bin is required")
-			return 2
-		}
-		*bin = exe
+	linkPath, err := binPath(*bin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "setup:", err)
+		return 2
 	}
 	user, err := os.UserHomeDir()
 	if err != nil {
@@ -512,7 +521,7 @@ func Main(args []string) int {
 		return 1
 	}
 	results, err := Run(context.Background(), Options{
-		Repo: *repo, Bin: *bin, UserHome: user,
+		Repo: *repo, Bin: linkPath, UserHome: user,
 		P: NewTerminal(os.Stdin, os.Stdout), V: SlackValidator{}, R: ExecRunner{}, Now: time.Now,
 	})
 	printSummary(os.Stdout, results, errors.Is(err, ErrAborted))

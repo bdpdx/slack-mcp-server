@@ -3,6 +3,7 @@
 # link, then the interactive `slack-mcp-server setup`. Safe to re-run.
 set -euo pipefail
 
+start_dir="$PWD"
 repo="$(cd "$(dirname "$0")" && pwd)"
 cd "$repo"
 
@@ -37,7 +38,14 @@ if [ -z "$have_go" ] || ! version_ok "$have_go" "$need_go"; then
 		case "$answer" in
 			[nN]*) die "install Go $need_go or newer (https://go.dev/dl/), then run ./install.sh again." ;;
 		esac
-		if [ -z "$have_go" ]; then brew install go; else brew upgrade go; fi
+		if brew list go >/dev/null 2>&1; then brew upgrade go; else brew install go; fi
+		hash -r
+		have_go="$(go env GOVERSION 2>/dev/null | sed 's/^go//' || true)"
+		if [ -z "$have_go" ] || ! version_ok "$have_go" "$need_go"; then
+			say "Go $need_go or newer is still not the first go on your PATH."
+			say "The go in use is $(command -v go || echo 'not found') (version: ${have_go:-unknown})."
+			die "remove or update that Go, or put Homebrew's bin directory ($(brew --prefix)/bin) first on your PATH, then run ./install.sh again."
+		fi
 	else
 		say "Go $need_go or newer is required (found: ${have_go:-none}), and Homebrew isn't installed."
 		say "Install Homebrew (https://brew.sh) and run ./install.sh again,"
@@ -67,6 +75,10 @@ while true; do
 	link="${link:-$default_link}"
 	case "$link" in
 		"~"/*) link="$HOME/${link#\~/}" ;;
+	esac
+	case "$link" in
+		/*) ;;
+		*) link="$start_dir/$link" ;; # relative to where install.sh was run
 	esac
 	if [ -e "$link" ] && [ ! -L "$link" ]; then
 		say "$link exists and is not a symlink; choose another path or move it"

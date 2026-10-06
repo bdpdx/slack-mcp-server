@@ -272,3 +272,17 @@ func TestPrintSummary(t *testing.T) {
 	printSummary(&b, []Result{{Home: "/u/.codex", Type: TypeCodex, Notes: []string{"Skipped."}}}, false)
 	assert.NotContains(t, b.String(), "Remaining steps:", "no home was set up")
 }
+
+func TestBinPathIsAbsolute(t *testing.T) {
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	got, err := binPath("bin/slack-mcp-server")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(wd, "bin", "slack-mcp-server"), got)
+	got, err = binPath("/opt/slack-mcp-server")
+	require.NoError(t, err)
+	assert.Equal(t, "/opt/slack-mcp-server", got)
+	got, err = binPath("")
+	require.NoError(t, err)
+	assert.True(t, filepath.IsAbs(got), "defaults to this executable")
+}
