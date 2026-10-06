@@ -134,3 +134,19 @@ func TestInstallCodexReplacesStaleRules(t *testing.T) {
 	assert.Equal(t, before, after)
 	assert.NotContains(t, res.Changed, rulesPath)
 }
+
+func TestInstallCodexReplacesRuleForSameBinaryViaOtherLink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real")
+	require.NoError(t, os.WriteFile(target, []byte("x"), 0o700))
+	linkA, linkB := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	require.NoError(t, os.Symlink(target, linkA))
+	require.NoError(t, os.Symlink(target, linkB))
+	home := t.TempDir()
+	_, err := InstallCodex(home, linkA, &fakeRunner{}, &Scripted{}, testNow)
+	require.NoError(t, err)
+	_, err = InstallCodex(home, linkB, &fakeRunner{}, &Scripted{}, testNow)
+	require.NoError(t, err)
+	rules, _ := os.ReadFile(filepath.Join(home, "rules", "default.rules"))
+	assert.Equal(t, `prefix_rule(pattern=["`+linkB+`", "chat"], decision="allow")`+"\n", string(rules))
+}

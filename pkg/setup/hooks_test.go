@@ -76,3 +76,16 @@ func TestMergeHooksReplacesHookWithTrailingArgs(t *testing.T) {
 	assert.Equal(t, 1, countCommands(out, "approval-hook"))
 	assert.False(t, isOurHook("/x/slack-mcp-server serve approval-hook"), "only chat subcommands")
 }
+
+func TestCustomLinkNameHooksAreOurs(t *testing.T) {
+	var events map[string]any
+	require.NoError(t, json.Unmarshal([]byte(`{
+	  "Stop": [{"hooks": [{"type":"command","command":"/x/y chat --env-file /h/slack-mcp-server.env stop-hook"},
+	                       {"type":"command","command":"/x/y chat something-else"}]}]
+	}`), &events))
+	out := MergeHooks(events, ClaudeHookSpecs(), "/new/slack-mcp-server", "/h/slack-mcp-server.env", "")
+	assert.Equal(t, 1, countCommands(out, "stop-hook"), "old custom-name hook replaced, not duplicated")
+	data, _ := json.Marshal(out)
+	assert.NotContains(t, string(data), "/x/y chat --env-file")
+	assert.Contains(t, string(data), "/x/y chat something-else")
+}

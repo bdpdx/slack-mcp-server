@@ -65,7 +65,8 @@ var chatRuleLine = regexp.MustCompile(`^\s*prefix_rule\(\s*pattern\s*=\s*\[\s*("
 // withCodexRule drops every slack-mcp-server "chat" prefix_rule (any path)
 // except one equal to rule, keeps all other lines as they are, and appends
 // rule if it is not already present.
-func withCodexRule(text, rule string) string {
+func withCodexRule(text, rule, bin string) string {
+	binReal, binErr := filepath.EvalSymlinks(bin)
 	var out []string
 	have := false
 	for _, line := range strings.SplitAfter(text, "\n") {
@@ -80,8 +81,13 @@ func withCodexRule(text, rule string) string {
 			have = true
 		} else if m := chatRuleLine.FindStringSubmatch(line); m != nil {
 			var path string
-			if json.Unmarshal([]byte(m[1]), &path) == nil && filepath.Base(path) == "slack-mcp-server" {
-				continue
+			if json.Unmarshal([]byte(m[1]), &path) == nil {
+				if filepath.Base(path) == "slack-mcp-server" {
+					continue
+				}
+				if real, err := filepath.EvalSymlinks(path); err == nil && binErr == nil && real == binReal {
+					continue
+				}
 			}
 		}
 		out = append(out, line)
@@ -133,7 +139,7 @@ func InstallCodex(home, bin string, r Runner, p Prompter, now time.Time) (Result
 
 	rulesPath := filepath.Join(home, "rules", "default.rules")
 	rules, _ := os.ReadFile(rulesPath)
-	if next := withCodexRule(string(rules), codexRule(bin)); next != string(rules) {
+	if next := withCodexRule(string(rules), codexRule(bin), bin); next != string(rules) {
 		if _, err := replaceFile(rulesPath, []byte(next), 0o600, now); err != nil {
 			return res, err
 		}

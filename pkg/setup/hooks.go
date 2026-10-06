@@ -123,6 +123,21 @@ func ourBin(cmd string) (string, bool) {
 	if len(args) >= 2 && filepath.Base(args[0]) == "slack-mcp-server" && args[1] == "chat" {
 		return args[0], true
 	}
+	// A custom link name: recognise it by our env file and one of our hooks.
+	if len(args) >= 2 && args[1] == "chat" {
+		envOK, hookOK := false, false
+		for i, a := range args[2:] {
+			if slices.Contains(ourHooks, a) {
+				hookOK = true
+			}
+			if a == "--env-file" && i+3 < len(args) && filepath.Base(args[i+3]) == "slack-mcp-server.env" {
+				envOK = true
+			}
+		}
+		if envOK && hookOK {
+			return args[0], true
+		}
+	}
 	return "", false
 }
 
