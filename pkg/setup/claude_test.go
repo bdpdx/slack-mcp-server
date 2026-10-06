@@ -122,3 +122,14 @@ func TestInstallClaudeNullSettings(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(home, "settings.json"))
 	assert.Contains(t, string(data), `"hooks"`)
 }
+
+func TestInstallClaudeKeepsShellCharsUnescaped(t *testing.T) {
+	home := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(home, "settings.json"),
+		[]byte(`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"a && b 2>/dev/null <in"}]}]}}`), 0o600))
+	_, err := InstallClaude(home, "/b/slack-mcp-server", &fakeRunner{}, testNow)
+	require.NoError(t, err)
+	data, _ := os.ReadFile(filepath.Join(home, "settings.json"))
+	assert.Contains(t, string(data), `"command": "a && b 2>/dev/null <in"`)
+	assert.NotContains(t, string(data), `\u0026`)
+}

@@ -64,3 +64,15 @@ func countCommands(events map[string]any, hook string) int {
 	}
 	return n
 }
+
+func TestMergeHooksReplacesHookWithTrailingArgs(t *testing.T) {
+	var events map[string]any
+	require.NoError(t, json.Unmarshal([]byte(`{
+	  "PermissionRequest": [{"hooks": [{"type":"command","command":"/old/slack-mcp-server chat --env-file /h/slack-mcp-server.env approval-hook --wait 5m","timeout":400}]}]
+	}`), &events))
+	out := MergeHooks(events, ClaudeHookSpecs(), "/new/slack-mcp-server", "/h/slack-mcp-server.env", "")
+	data, _ := json.Marshal(out)
+	assert.NotContains(t, string(data), "--wait 5m", "the old hook is replaced")
+	assert.Equal(t, 1, countCommands(out, "approval-hook"))
+	assert.False(t, isOurHook("/x/slack-mcp-server serve approval-hook"), "only chat subcommands")
+}

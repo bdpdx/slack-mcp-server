@@ -58,12 +58,13 @@ func HookCommand(bin, envFile, hook string) string {
 	return shellQuote(bin) + " chat --env-file " + shellQuote(envFile) + " " + hook
 }
 
+// isOurHook reports whether cmd runs one of our hooks through a
+// slack-mcp-server binary, with any options (e.g. `approval-hook --wait 5m`).
 func isOurHook(cmd string) bool {
 	if _, ok := ourBin(cmd); !ok {
 		return false
 	}
-	args := splitCommand(cmd)
-	return slices.Contains(ourHooks, args[len(args)-1])
+	return slices.ContainsFunc(splitCommand(cmd)[2:], func(a string) bool { return slices.Contains(ourHooks, a) })
 }
 
 // MergeHooks removes every slack-mcp-server chat hook from events (any

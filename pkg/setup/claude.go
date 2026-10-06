@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -37,11 +38,14 @@ func readJSONObject(path string) (map[string]any, error) {
 }
 
 func writeJSONObject(path string, doc map[string]any, now time.Time) (bool, error) {
-	data, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false) // hook commands keep &&, 2>, < readable
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(doc); err != nil { // Encode ends with a newline
 		return false, err
 	}
-	return replaceFile(path, append(data, '\n'), 0o600, now)
+	return replaceFile(path, buf.Bytes(), 0o600, now)
 }
 
 // InstallClaude installs the skill, hooks and MCP registration in a Claude
