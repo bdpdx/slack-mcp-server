@@ -1,23 +1,26 @@
 services:
   mcp-server:
     build:
-        context: .
-        target: dev
-        dockerfile: Dockerfile
+      context: .
+      target: dev
+      dockerfile: Dockerfile
     command: /dlv debug /app/cmd/slack-mcp-server/main.go --accept-multiclient --headless --listen=:40000 --api-version=2 --log -- --transport sse
     restart: unless-stopped
     networks:
       - app-tier
     ports:
-      - "3001:3001"
-      - "40000:40000"
+      # Published on the host's loopback only; delve gives full control of
+      # the process, so never expose it beyond localhost.
+      - "127.0.0.1:13080:13080"
+      - "127.0.0.1:40000:40000"
     env_file:
       - .env
     environment:
+      # The server must listen on all container interfaces for the published
+      # port to reach it. A non-loopback bind requires SLACK_MCP_API_KEY to be
+      # set (in .env).
       SLACK_MCP_HOST: "0.0.0.0"
-      SLACK_MCP_PORT: "3001"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      SLACK_MCP_PORT: "13080"
 
 networks:
   app-tier:

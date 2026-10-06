@@ -1,23 +1,28 @@
 services:
   mcp-server:
-    image: ghcr.io/korotovsky/slack-mcp-server:latest
+    build:
+      context: .
+      target: production
+      dockerfile: Dockerfile
     restart: unless-stopped
     networks:
       - app-tier
     ports:
-      - "3001:3001"
+      # Published on the host's loopback only.
+      - "127.0.0.1:13080:13080"
     volumes:
-      - users_cache:/app/mcp-server/.users_cache.json
-      - channels_cache:/app/mcp-server/.channels_cache.json
+      - slack_cache:/home/app/.cache/slack-mcp-server
     env_file:
       - .env
     environment:
+      # The server must listen on all container interfaces for the published
+      # port to reach it. A non-loopback bind requires SLACK_MCP_API_KEY to be
+      # set (in .env).
       SLACK_MCP_HOST: "0.0.0.0"
-      SLACK_MCP_PORT: "3001"
+      SLACK_MCP_PORT: "13080"
 
 volumes:
-  users_cache:
-  channels_cache:
+  slack_cache:
 
 networks:
   app-tier:
