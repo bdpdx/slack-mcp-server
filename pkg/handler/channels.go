@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gocarina/gocsv"
+	"github.com/korotovsky/slack-mcp-server/pkg/limiter"
 	"github.com/korotovsky/slack-mcp-server/pkg/provider"
 	"github.com/korotovsky/slack-mcp-server/pkg/server/auth"
 	"github.com/korotovsky/slack-mcp-server/pkg/text"
@@ -271,6 +272,12 @@ func (ch *ChannelsHandler) ChannelsMeHandler(ctx context.Context, request mcp.Ca
 		apiCursor = cursor
 	}
 
+	type page struct {
+		channels   []slack.Channel
+		nextCursor string
+	}
+	rl := limiter.Tier3.Limiter()
+
 	for {
 		params := &slack.GetConversationsForUserParameters{
 			Types:           channelTypes,
@@ -278,7 +285,11 @@ func (ch *ChannelsHandler) ChannelsMeHandler(ctx context.Context, request mcp.Ca
 			Cursor:          apiCursor,
 			ExcludeArchived: true,
 		}
-		channels, nextCursor, err := ch.apiProvider.Slack().GetConversationsForUserContext(ctx, params)
+		pg, err := limiter.CallWithRetry(ctx, rl, 2, slackRetryAfter, func() (page, error) {
+			channels, nextCursor, err := ch.apiProvider.Slack().GetConversationsForUserContext(ctx, params)
+			return page{channels: channels, nextCursor: nextCursor}, err
+		})
+		channels, nextCursor := pg.channels, pg.nextCursor
 		if err != nil {
 			ch.logger.Error("Failed to fetch user conversations", zap.Error(err))
 			return nil, fmt.Errorf("failed to fetch your channels: %v", err)

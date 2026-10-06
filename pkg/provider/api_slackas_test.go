@@ -8,8 +8,8 @@ import (
 )
 
 func TestUnitSlackAs(t *testing.T) {
-	bot := &MCPSlackClient{isOAuth: true, isBotToken: true}
-	user := &MCPSlackClient{isOAuth: true}
+	bot := &MCPSlackClient{isBotToken: true}
+	user := &MCPSlackClient{}
 
 	t.Run("bot and user tokens", func(t *testing.T) {
 		ap := &ApiProvider{client: bot, userClient: user}
