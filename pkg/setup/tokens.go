@@ -9,13 +9,18 @@ import (
 )
 
 // NormalizeToken removes whitespace and wrapping quotes from a pasted token.
-func NormalizeToken(s string) string { return strings.Trim(strings.TrimSpace(s), `"'`) }
+func NormalizeToken(s string) string {
+	return strings.TrimSpace(strings.Trim(strings.TrimSpace(s), `"'`))
+}
 
 var tokenPrefixes = map[string]string{"bot": "xoxb-", "user": "xoxp-", "app": "xapp-"}
 
 // CheckTokenPrefix returns why token is not a kind token, or "".
 func CheckTokenPrefix(kind, token string) string {
-	want := tokenPrefixes[kind]
+	want, ok := tokenPrefixes[kind]
+	if !ok {
+		return fmt.Sprintf("unknown token kind %q", kind)
+	}
 	if strings.HasPrefix(token, want) || strings.HasPrefix(token, "xoxe."+want) {
 		return ""
 	}

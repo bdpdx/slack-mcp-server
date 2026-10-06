@@ -9,7 +9,7 @@ import (
 )
 
 func TestRenderManifest(t *testing.T) {
-	data, err := RenderManifest("mike-claude")
+	data, err := RenderManifest("team-claude")
 	require.NoError(t, err)
 	var m struct {
 		Display  struct{ Name string } `json:"display_information"`
@@ -32,8 +32,8 @@ func TestRenderManifest(t *testing.T) {
 		} `json:"settings"`
 	}
 	require.NoError(t, json.Unmarshal(data, &m))
-	assert.Equal(t, "mike-claude", m.Display.Name)
-	assert.Equal(t, "mike-claude", m.Features.BotUser.DisplayName)
+	assert.Equal(t, "team-claude", m.Display.Name)
+	assert.Equal(t, "team-claude", m.Features.BotUser.DisplayName)
 	assert.Contains(t, m.OAuth.Scopes.User, "groups:write")
 	assert.Contains(t, m.OAuth.Scopes.Bot, "im:write")
 	assert.Contains(t, m.Settings.Events.BotEvents, "member_joined_channel")
