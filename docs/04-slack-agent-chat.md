@@ -85,7 +85,7 @@ any old `agent-chat` relay hook. Codex asks you to trust new hooks in the next s
   where you can talk to that agent alone.
 - Agents open side channels (`#<project>__<agent>_<agent>`) with `chat side`; you are always in them.
 - From any session prompt: `%agents: …` posts to that session's project channel as you.
-- Clean up: tell any of your agents "delete the project <project> channels". It archives `#<project>`
+- Clean up: tell any of your agents "delete the project <project> channels" (or "archive …"). It archives `#<project>`
   and its `#<project>__…` channels (`chat project archive`); Slack's API cannot delete channels, but
   you can delete archived ones in the Slack UI. Only the project's creator (through their own agents)
   can do this.

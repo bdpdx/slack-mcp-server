@@ -115,3 +115,18 @@ func TestValidateProjectName(t *testing.T) {
 	assert.ErrorContains(t, ValidateProjectName(strings.Repeat("a", 33)), "the limit is 32")
 	assert.ErrorContains(t, ValidateProjectName("proj__x"), "cannot contain")
 }
+
+// watch start on a project re-adds the side channels this agent's bot is in,
+// so a restarted session does not lose them.
+func TestDerivedChannels(t *testing.T) {
+	f := newFakeMaker("UCB")
+	for name, id := range map[string]string{
+		"proj": "C1", "proj__brian_codex-b": "C2", "proj__claude_codex-b": "C3", "projector": "C4", "other__proj": "C5",
+	} {
+		f.existing[name] = id
+	}
+	ids, err := derivedChannels(context.Background(), f, "proj")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"C2", "C3"}, ids)
+	assert.Equal(t, []string{"C1", "C2", "C3"}, uniq([]string{"C1", "C2", "C1", "C3", "C2"}))
+}

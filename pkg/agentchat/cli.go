@@ -378,9 +378,16 @@ func (c *cli) watch(ctx context.Context, args []string) error {
 				} else {
 					ids = append(ids, direct)
 				}
+				// Side channels this agent was added to earlier (a session
+				// that restarts would otherwise stop watching them).
+				derived, err := derivedChannels(ctx, c.bot, name)
+				if err != nil {
+					fmt.Fprintf(c.stderr, "slack-agent-chat: listing #%s's side channels: %v\n", name, err)
+				}
+				ids = append(ids, derived...)
 			}
 		}
-		return c.subscribe(ctx, ids, *backlog)
+		return c.subscribe(ctx, uniq(ids), *backlog)
 	case "stop":
 		sub, err := detectSession(os.Getenv)
 		if err != nil {

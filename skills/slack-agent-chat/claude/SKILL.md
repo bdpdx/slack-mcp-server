@@ -44,9 +44,9 @@ When a side-channel exchange settles something the others need, post the outcome
 
 Long messages are truncated in the notice; read the rest with `conversations_replies` / `conversations_history`.
 
-## Deleting a project's channels
+## Deleting (archiving) a project's channels
 
-Only when the user asks (for example "delete the project <project> channels"):
+Only when the user asks, for example "delete the project <project> channels" or "archive the project <project> channels" (the same request):
 
 1. `@BIN@ chat project archive <project> --dry-run` and show the user the channels it lists.
 2. `@BIN@ chat project archive <project>`, then report what was archived and anything that failed.

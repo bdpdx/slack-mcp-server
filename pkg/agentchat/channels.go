@@ -138,6 +138,43 @@ func findChannel(ctx context.Context, api channelLister, name string) (string, e
 	}
 }
 
+// derivedChannels returns the IDs of the unarchived #project__… channels
+// the token's identity belongs to.
+func derivedChannels(ctx context.Context, api channelLister, project string) ([]string, error) {
+	var ids []string
+	cursor := ""
+	for {
+		chans, next, err := api.GetConversationsForUserContext(ctx, &slack.GetConversationsForUserParameters{
+			Types: []string{"private_channel", "public_channel"}, ExcludeArchived: true, Limit: 200, Cursor: cursor,
+		})
+		if err != nil {
+			return ids, err
+		}
+		for _, ch := range chans {
+			if strings.HasPrefix(ch.Name, project+derivedSep) {
+				ids = append(ids, ch.ID)
+			}
+		}
+		if next == "" {
+			return ids, nil
+		}
+		cursor = next
+	}
+}
+
+// uniq drops repeated entries, keeping the first of each in order.
+func uniq(s []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, v := range s {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // inviteEach adds users to a channel one at a time, so one who is already a
 // member does not stop the rest. self, the inviting identity, is skipped.
 func inviteEach(ctx context.Context, api channelInviter, channelID, self string, users []string) error {
