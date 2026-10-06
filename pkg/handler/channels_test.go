@@ -1,212 +1,76 @@
 package handler
 
 import (
-	"context"
-	"encoding/csv"
-	"fmt"
-	"regexp"
-	"strconv"
-	"strings"
 	"testing"
-	"time"
 
-	"github.com/google/uuid"
-	"github.com/korotovsky/slack-mcp-server/pkg/test/util"
-	"github.com/mark3labs/mcp-go/client"
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/korotovsky/slack-mcp-server/pkg/provider"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-type testEnv struct {
-	mcpClient *client.Client
-	ctx       context.Context
-}
-
-type matchingRule struct {
-	csvFieldName    string
-	csvFieldValueRE string
-}
-
-func setupTestEnv(t *testing.T) (*testEnv, func()) {
-	t.Helper()
-
-	sseKey := uuid.New().String()
-	require.NotEmpty(t, sseKey, "sseKey must be generated for integration tests")
-
-	cfg := util.MCPConfig{
-		SSEKey:             sseKey,
-		MessageToolEnabled: true,
-		MessageToolMark:    true,
-	}
-
-	mcpServer, err := util.SetupMCP(cfg)
-	require.NoError(t, err, "Failed to set up MCP server")
-
-	fwd, err := util.SetupForwarding(context.Background(), "http://"+mcpServer.Host+":"+strconv.Itoa(mcpServer.Port))
-	require.NoError(t, err, "Failed to set up ngrok forwarding")
-
-	sseURL := fmt.Sprintf("%s://%s/sse", fwd.URL.Scheme, fwd.URL.Host)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-
-	mcpClient, err := client.NewSSEMCPClient(sseURL,
-		client.WithHeaders(map[string]string{
-			"Authorization": "Bearer " + sseKey,
-		}),
-	)
-	require.NoError(t, err, "Failed to create MCP client")
-
-	err = mcpClient.Start(ctx)
-	require.NoError(t, err, "Failed to start MCP client")
-
-	initReq := mcp.InitializeRequest{}
-	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	initReq.Params.ClientInfo = mcp.Implementation{
-		Name:    "channels-test-client",
-		Version: "1.0.0",
-	}
-	initReq.Params.Capabilities = mcp.ClientCapabilities{}
-
-	_, err = mcpClient.Initialize(ctx, initReq)
-	require.NoError(t, err, "Failed to initialize MCP client")
-
-	cleanup := func() {
-		cancel()
-		mcpClient.Close()
-		fwd.Shutdown()
-		mcpServer.Shutdown()
-	}
-
-	return &testEnv{
-		mcpClient: mcpClient,
-		ctx:       ctx,
-	}, cleanup
-}
-
-func runChannelTest(t *testing.T, env *testEnv, channelType string, expectedChannels []matchingRule) {
-	t.Helper()
-
-	callReq := mcp.CallToolRequest{}
-	callReq.Params.Name = "channels_list"
-	callReq.Params.Arguments = map[string]any{
-		"channel_types": channelType,
-	}
-
-	result, err := env.mcpClient.CallTool(env.ctx, callReq)
-	require.NoError(t, err, "Tool call failed")
-	require.NotNil(t, result, "Tool result is nil")
-	require.False(t, result.IsError, "Tool returned error")
-
-	var toolOutput strings.Builder
-	for _, content := range result.Content {
-		if textContent, ok := content.(mcp.TextContent); ok {
-			toolOutput.WriteString(textContent.Text)
-		}
-	}
-
-	require.NotEmpty(t, toolOutput.String(), "No tool output captured")
-
-	reader := csv.NewReader(strings.NewReader(toolOutput.String()))
-	rows, err := reader.ReadAll()
-	require.NoError(t, err, "Failed to parse CSV")
-	require.GreaterOrEqual(t, len(rows), 1, "CSV must have at least a header row")
-
-	header := rows[0]
-	dataRows := rows[1:]
-	colIndex := map[string]int{}
-	for i, col := range header {
-		colIndex[col] = i
-	}
-
-	for _, rule := range expectedChannels {
-		idx, ok := colIndex[rule.csvFieldName]
-		require.Truef(t, ok, "CSV did not contain column %q, toolOutput: %q", rule.csvFieldName, toolOutput.String())
-
-		re, err := regexp.Compile(rule.csvFieldValueRE)
-		require.NoErrorf(t, err, "Invalid regex %q", rule.csvFieldValueRE)
-
-		found := false
-		for _, row := range dataRows {
-			if idx < len(row) && re.MatchString(row[idx]) {
-				found = true
-				break
-			}
-		}
-		assert.Truef(t, found, "No row in column %q matched %q; full CSV:\n%s",
-			rule.csvFieldName, rule.csvFieldValueRE, toolOutput.String())
+func testChannelsMap() map[string]provider.Channel {
+	return map[string]provider.Channel{
+		"C001": {ID: "C001", Name: "#general"},
+		"C002": {ID: "C002", Name: "#testcase-1", Topic: "first"},
+		"C003": {ID: "C003", Name: "#testcase-2", Purpose: "second"},
+		"C004": {ID: "C004", Name: "#testcase-3"},
+		"G001": {ID: "G001", Name: "#testcase-4", IsPrivate: true},
+		"D001": {ID: "D001", Name: "@alice", IsIM: true, User: "U001"},
+		"G002": {ID: "G002", Name: "@mpdm-a--b", IsMpIM: true},
 	}
 }
 
-func TestIntegrationChannelsListQueryFilter(t *testing.T) {
-	env, cleanup := setupTestEnv(t)
-	defer cleanup()
-
-	callReq := mcp.CallToolRequest{}
-	callReq.Params.Name = "channels_list"
-	callReq.Params.Arguments = map[string]any{
-		"channel_types": "public_channel",
-		"query":         "testcase",
+func channelNames(channels []provider.Channel) []string {
+	names := make([]string, 0, len(channels))
+	for _, c := range channels {
+		names = append(names, c.Name)
 	}
-
-	result, err := env.mcpClient.CallTool(env.ctx, callReq)
-	require.NoError(t, err, "Tool call failed")
-	require.NotNil(t, result, "Tool result is nil")
-	require.False(t, result.IsError, "Tool returned error")
-
-	var toolOutput strings.Builder
-	for _, content := range result.Content {
-		if textContent, ok := content.(mcp.TextContent); ok {
-			toolOutput.WriteString(textContent.Text)
-		}
-	}
-
-	reader := csv.NewReader(strings.NewReader(toolOutput.String()))
-	rows, err := reader.ReadAll()
-	require.NoError(t, err, "Failed to parse CSV")
-	require.GreaterOrEqual(t, len(rows), 1, "CSV must have at least a header row")
-
-	nameIdx := -1
-	for i, col := range rows[0] {
-		if col == "Name" {
-			nameIdx = i
-			break
-		}
-	}
-	require.NotEqualf(t, -1, nameIdx, "CSV did not contain Name column; header: %v", rows[0])
-
-	dataRows := rows[1:]
-	for _, row := range dataRows {
-		require.Less(t, nameIdx, len(row), "row shorter than Name column index")
-		name := strings.ToLower(row[nameIdx])
-		assert.Containsf(t, name, "testcase",
-			"Expected all results to match query 'testcase', got: %s", row[nameIdx])
-		assert.NotContainsf(t, name, "general",
-			"Expected #general to be filtered out, but found: %s", row[nameIdx])
-	}
-	assert.GreaterOrEqual(t, len(dataRows), 3, "Expected at least testcase-1, testcase-2, testcase-3")
+	return names
 }
 
-func TestIntegrationPublicChannelsList(t *testing.T) {
-	env, cleanup := setupTestEnv(t)
-	defer cleanup()
+func TestUnitFilterChannelsByTypes(t *testing.T) {
+	public := filterChannelsByTypes(testChannelsMap(), []string{"public_channel"})
+	assert.ElementsMatch(t, []string{"#general", "#testcase-1", "#testcase-2", "#testcase-3"}, channelNames(public))
 
-	expectedChannels := []matchingRule{
-		{csvFieldName: "Name", csvFieldValueRE: `^#general$`},
-		{csvFieldName: "Name", csvFieldValueRE: `^#testcase-1$`},
-		{csvFieldName: "Name", csvFieldValueRE: `^#testcase-2$`},
-		{csvFieldName: "Name", csvFieldValueRE: `^#testcase-3$`},
-	}
+	private := filterChannelsByTypes(testChannelsMap(), []string{"private_channel"})
+	assert.ElementsMatch(t, []string{"#testcase-4"}, channelNames(private))
 
-	runChannelTest(t, env, "public_channel", expectedChannels)
+	dms := filterChannelsByTypes(testChannelsMap(), []string{"im", "mpim"})
+	assert.ElementsMatch(t, []string{"@alice", "@mpdm-a--b"}, channelNames(dms))
 }
 
-func TestIntegrationPrivateChannelsList(t *testing.T) {
-	env, cleanup := setupTestEnv(t)
-	defer cleanup()
+func TestUnitFilterChannelsByQuery(t *testing.T) {
+	public := filterChannelsByTypes(testChannelsMap(), []string{"public_channel"})
 
-	expectedChannels := []matchingRule{
-		{csvFieldName: "Name", csvFieldValueRE: `^#testcase-4$`},
+	byName := filterChannelsByQuery(public, "TESTCASE", map[string]bool{"name": true})
+	assert.ElementsMatch(t, []string{"#testcase-1", "#testcase-2", "#testcase-3"}, channelNames(byName))
+
+	byTopic := filterChannelsByQuery(public, "first", map[string]bool{"topic": true})
+	assert.Equal(t, []string{"#testcase-1"}, channelNames(byTopic))
+
+	byPurpose := filterChannelsByQuery(public, "second", map[string]bool{"name": true, "purpose": true})
+	assert.Equal(t, []string{"#testcase-2"}, channelNames(byPurpose))
+}
+
+func TestUnitPaginateChannels(t *testing.T) {
+	all := filterChannelsByTypes(testChannelsMap(), []string{"public_channel", "private_channel", "im", "mpim"})
+	require.Len(t, all, 7)
+
+	page1, cursor := paginateChannels(all, "", 3)
+	require.Len(t, page1, 3)
+	require.NotEmpty(t, cursor)
+
+	page2, cursor := paginateChannels(all, cursor, 3)
+	require.Len(t, page2, 3)
+	require.NotEmpty(t, cursor)
+
+	page3, cursor := paginateChannels(all, cursor, 3)
+	require.Len(t, page3, 1)
+	require.Empty(t, cursor)
+
+	seen := map[string]bool{}
+	for _, c := range append(append(page1, page2...), page3...) {
+		require.False(t, seen[c.ID], "duplicate channel %s across pages", c.ID)
+		seen[c.ID] = true
 	}
-
-	runChannelTest(t, env, "private_channel", expectedChannels)
 }
