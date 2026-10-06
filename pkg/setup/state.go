@@ -52,6 +52,22 @@ func (s *State) Home(path string) *HomeState {
 	return nil
 }
 
+// ForgetMissing drops saved homes whose folder no longer exists and returns
+// their paths.
+func (s *State) ForgetMissing() []string {
+	var gone []string
+	kept := s.Homes[:0]
+	for _, h := range s.Homes {
+		if _, err := os.Stat(h.Path); os.IsNotExist(err) {
+			gone = append(gone, h.Path)
+			continue
+		}
+		kept = append(kept, h)
+	}
+	s.Homes = kept
+	return gone
+}
+
 // SetHome adds or replaces the home with h.Path.
 func (s *State) SetHome(h HomeState) {
 	if old := s.Home(h.Path); old != nil {

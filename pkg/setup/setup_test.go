@@ -324,3 +324,23 @@ func TestBinPathIsAbsolute(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, filepath.IsAbs(got), "defaults to this executable")
 }
+
+// A saved home whose folder was deleted is announced and dropped from the
+// saved answers, not silently hidden.
+func TestRunForgetsDeletedHomes(t *testing.T) {
+	user, repo := t.TempDir(), t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(user, ".claude"), 0o700))
+	require.NoError(t, os.WriteFile(EnvPath(filepath.Join(user, ".claude")), []byte("SLACK_MCP_XOXB_TOKEN=x\n"), 0o600))
+	gone := filepath.Join(user, ".claude-test")
+	statePath := filepath.Join(repo, ".install-state.json")
+	st := &State{Homes: []HomeState{{Path: gone, Type: TypeClaude, Bot: "claude2"}}}
+	require.NoError(t, st.Save(statePath))
+
+	p := &Scripted{Answers: []string{"1", "3"}} // set up; skip ~/.claude
+	_, err := Run(context.Background(), opts(user, repo, p))
+	require.NoError(t, err)
+	assert.Contains(t, p.Out.String(), "Forgetting "+gone+": the folder no longer exists")
+	again, err := LoadState(statePath)
+	require.NoError(t, err)
+	assert.Nil(t, again.Home(gone), "dropped from the saved answers")
+}

@@ -82,6 +82,9 @@ func Run(ctx context.Context, o Options) ([]Result, error) {
 }
 
 func chooseHomes(o Options, st *State) ([]Home, error) {
+	for _, path := range st.ForgetMissing() {
+		o.P.Say("Forgetting %s: the folder no longer exists", path)
+	}
 	homes := DiscoverHomes(o.UserHome, st)
 	for {
 		o.P.Say("Agent homes found:")
