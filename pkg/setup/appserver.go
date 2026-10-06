@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // appServerLabel is the launchd label for a Codex home's app-server agent:
@@ -18,16 +17,12 @@ func appServerLabel(home string) string {
 	return "com.openai." + strings.TrimPrefix(filepath.Base(filepath.Clean(home)), ".") + ".app-server"
 }
 
-func xmlEscape(s string) string {
-	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
-}
-
 // renderAppServerPlist renders the launchd plist that runs the supervisor
 // for one Codex home.
 func renderAppServerPlist(home, userHome, supervisor, username string) []byte {
 	path := userHome + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 	logs := filepath.Join(home, "app-server-daemon")
-	s := func(v string) string { return "<string>" + xmlEscape(v) + "</string>" }
+	s := func(v string) string { return "<string>" + html.EscapeString(v) + "</string>" }
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -126,7 +121,7 @@ func currentUsername() string {
 // ensureAppServer sets up (or verifies) the launchd agent that runs the
 // Codex app-server for one home. A missing plist is created and started; an
 // existing one is verified and never rewritten.
-func ensureAppServer(home, userHome string, r Runner, p Prompter, now time.Time) (changed, notes []string, err error) {
+func ensureAppServer(home, userHome string, r Runner, p Prompter) (changed, notes []string, err error) {
 	label := appServerLabel(home)
 	plist := filepath.Join(userHome, "Library", "LaunchAgents", label+".plist")
 	domain := "gui/" + strconv.Itoa(os.Getuid())
@@ -163,14 +158,19 @@ func ensureAppServer(home, userHome string, r Runner, p Prompter, now time.Time)
 		return append(changed, "app-server launch agent "+label+" created and started"), nil, nil
 	}
 
-	if problems := verifyAppServerPlist(string(existing), home, userHome, label); len(problems) > 0 {
-		for _, pr := range problems {
-			notes = append(notes, fmt.Sprintf("app-server plist %s: %s (left unchanged)", plist, pr))
-		}
+	problems := verifyAppServerPlist(string(existing), home, userHome, label)
+	for _, pr := range problems {
+		notes = append(notes, fmt.Sprintf("app-server plist %s: %s (left unchanged)", plist, pr))
 	}
 	out, printErr := r.Run(nil, "launchctl", "print", target)
 	if printErr == nil && stateRunningRe.MatchString(out) {
+		if len(problems) > 0 {
+			return nil, append(notes, "app-server "+label+" is running, but its plist differs (see above)"), nil
+		}
 		return nil, append(notes, "app-server "+label+" verified and running"), nil
+	}
+	if len(problems) > 0 {
+		return nil, append(notes, "app-server "+label+" was not started; fix or remove the plist above and run ./install.sh again"), nil
 	}
 	yes, err := p.Confirm("The Codex app-server for "+home+" is not running. Enable and start it?", true)
 	if err != nil {

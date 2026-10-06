@@ -19,20 +19,20 @@ func TestAppServerLabel(t *testing.T) {
 }
 
 func TestRenderAppServerPlist(t *testing.T) {
-	got := string(renderAppServerPlist("/Users/brian/.codex-rezilient", "/Users/brian", "/Users/brian/.local/libexec/codex-app-server-supervisor", "brian"))
+	got := string(renderAppServerPlist("/Users/alice/.codex-work", "/Users/alice", "/Users/alice/.local/libexec/codex-app-server-supervisor", "alice"))
 	for _, want := range []string{
-		"<key>CODEX_HOME</key>\n\t\t<string>/Users/brian/.codex-rezilient</string>",
-		"<key>HOME</key>\n\t\t<string>/Users/brian</string>",
-		"<key>LOGNAME</key>\n\t\t<string>brian</string>",
-		"<string>/Users/brian/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>",
-		"<key>USER</key>\n\t\t<string>brian</string>",
+		"<key>CODEX_HOME</key>\n\t\t<string>/Users/alice/.codex-work</string>",
+		"<key>HOME</key>\n\t\t<string>/Users/alice</string>",
+		"<key>LOGNAME</key>\n\t\t<string>alice</string>",
+		"<string>/Users/alice/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>",
+		"<key>USER</key>\n\t\t<string>alice</string>",
 		"<key>SuccessfulExit</key>\n\t\t<false/>",
-		"<key>Label</key>\n\t<string>com.openai.codex-rezilient.app-server</string>",
+		"<key>Label</key>\n\t<string>com.openai.codex-work.app-server</string>",
 		"<key>ProcessType</key>\n\t<string>Background</string>",
-		"<array>\n\t\t<string>/Users/brian/.local/libexec/codex-app-server-supervisor</string>\n\t</array>",
+		"<array>\n\t\t<string>/Users/alice/.local/libexec/codex-app-server-supervisor</string>\n\t</array>",
 		"<key>RunAtLoad</key>\n\t<true/>",
-		"<string>/Users/brian/.codex-rezilient/app-server-daemon/launchagent.stderr.log</string>",
-		"<string>/Users/brian/.codex-rezilient/app-server-daemon/launchagent.stdout.log</string>",
+		"<string>/Users/alice/.codex-work/app-server-daemon/launchagent.stderr.log</string>",
+		"<string>/Users/alice/.codex-work/app-server-daemon/launchagent.stdout.log</string>",
 		"<key>ThrottleInterval</key>\n\t<integer>10</integer>",
 	} {
 		assert.Contains(t, got, want)
@@ -71,7 +71,7 @@ func (e asEnv) writePlist(t *testing.T, home string) {
 func TestEnsureAppServerCreatesAgentAndSupervisor(t *testing.T) {
 	e := newAsEnv(t, ".codex-test")
 	r := &fakeRunner{}
-	changed, notes, err := ensureAppServer(e.home, e.user, r, &Scripted{}, testNow)
+	changed, notes, err := ensureAppServer(e.home, e.user, r, &Scripted{})
 	require.NoError(t, err)
 	assert.Empty(t, notes)
 	assert.Contains(t, changed, "app-server launch agent "+e.label+" created and started")
@@ -96,7 +96,7 @@ func TestEnsureAppServerReusesSupervisor(t *testing.T) {
 	e := newAsEnv(t, ".codex")
 	e.writeSupervisor(t)
 	r := &fakeRunner{missing: map[string]bool{"codex": true}}
-	_, _, err := ensureAppServer(e.home, e.user, r, &Scripted{}, testNow)
+	_, _, err := ensureAppServer(e.home, e.user, r, &Scripted{})
 	require.NoError(t, err)
 	sup, _ := os.ReadFile(e.supervisor)
 	assert.Equal(t, "#!/bin/sh\n", string(sup), "existing supervisor untouched")
@@ -107,7 +107,7 @@ func TestEnsureAppServerReusesSupervisor(t *testing.T) {
 func TestEnsureAppServerSkippedWithoutCodex(t *testing.T) {
 	e := newAsEnv(t, ".codex")
 	r := &fakeRunner{missing: map[string]bool{"codex": true}}
-	changed, notes, err := ensureAppServer(e.home, e.user, r, &Scripted{}, testNow)
+	changed, notes, err := ensureAppServer(e.home, e.user, r, &Scripted{})
 	require.NoError(t, err)
 	assert.Empty(t, changed)
 	assert.Equal(t, []string{"Codex CLI not found; install Codex, then run ./install.sh again to set up its app-server"}, notes)
@@ -118,7 +118,7 @@ func TestEnsureAppServerSkippedWithoutCodex(t *testing.T) {
 func TestEnsureAppServerBootstrapFailure(t *testing.T) {
 	e := newAsEnv(t, ".codex")
 	r := &fakeRunner{scripts: map[string]fakeResult{"launchctl bootstrap": {"boom", errors.New("exit 5")}}}
-	_, _, err := ensureAppServer(e.home, e.user, r, &Scripted{}, testNow)
+	_, _, err := ensureAppServer(e.home, e.user, r, &Scripted{})
 	assert.ErrorContains(t, err, "launchctl bootstrap")
 }
 
@@ -127,7 +127,7 @@ func TestEnsureAppServerExistingRunning(t *testing.T) {
 	e.writePlist(t, e.home)
 	before, _ := os.ReadFile(e.plist)
 	r := &fakeRunner{scripts: map[string]fakeResult{"launchctl print " + e.target: {"foo = bar\n\tstate = running\n", nil}}}
-	changed, notes, err := ensureAppServer(e.home, e.user, r, &Scripted{}, testNow)
+	changed, notes, err := ensureAppServer(e.home, e.user, r, &Scripted{})
 	require.NoError(t, err)
 	assert.Empty(t, changed)
 	assert.Equal(t, []string{"app-server " + e.label + " verified and running"}, notes)
@@ -141,7 +141,7 @@ func TestEnsureAppServerNotRunningYesKickstartsLoaded(t *testing.T) {
 	e.writePlist(t, e.home)
 	r := &fakeRunner{scripts: map[string]fakeResult{"launchctl print": {"state = waiting\n", nil}}}
 	p := &Scripted{Answers: []string{"y"}}
-	changed, _, err := ensureAppServer(e.home, e.user, r, p, testNow)
+	changed, _, err := ensureAppServer(e.home, e.user, r, p)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"app-server " + e.label + " started"}, changed)
 	assert.Equal(t, []string{"launchctl print " + e.target, "launchctl enable " + e.target, "launchctl kickstart -k " + e.target}, r.calls)
@@ -152,7 +152,7 @@ func TestEnsureAppServerNotRunningYesBootstrapsUnloaded(t *testing.T) {
 	e.writePlist(t, e.home)
 	r := &fakeRunner{scripts: map[string]fakeResult{"launchctl print": {"not found", errors.New("exit 113")}}}
 	p := &Scripted{Answers: []string{"y"}}
-	_, _, err := ensureAppServer(e.home, e.user, r, p, testNow)
+	_, _, err := ensureAppServer(e.home, e.user, r, p)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"launchctl print " + e.target, "launchctl enable " + e.target, "launchctl bootstrap " + e.domain + " " + e.plist}, r.calls)
 }
@@ -161,7 +161,7 @@ func TestEnsureAppServerNotRunningNo(t *testing.T) {
 	e := newAsEnv(t, ".codex-test")
 	e.writePlist(t, e.home)
 	r := &fakeRunner{scripts: map[string]fakeResult{"launchctl print": {"", errors.New("exit 113")}}}
-	changed, notes, err := ensureAppServer(e.home, e.user, r, &Scripted{Answers: []string{"n"}}, testNow)
+	changed, notes, err := ensureAppServer(e.home, e.user, r, &Scripted{Answers: []string{"n"}})
 	require.NoError(t, err)
 	assert.Empty(t, changed)
 	require.Len(t, notes, 1)
@@ -174,12 +174,14 @@ func TestEnsureAppServerMismatchLeavesPlist(t *testing.T) {
 	e.writePlist(t, "/somewhere/else")
 	before, _ := os.ReadFile(e.plist)
 	r := &fakeRunner{scripts: map[string]fakeResult{"launchctl print": {"state = running\n", nil}}}
-	_, notes, err := ensureAppServer(e.home, e.user, r, &Scripted{}, testNow)
+	_, notes, err := ensureAppServer(e.home, e.user, r, &Scripted{})
 	require.NoError(t, err)
 	require.NotEmpty(t, notes)
 	all := strings.Join(notes, "\n")
 	assert.Contains(t, all, "app-server plist "+e.plist+": CODEX_HOME is \"/somewhere/else\", expected")
 	assert.Contains(t, all, "(left unchanged)")
+	assert.Contains(t, all, "is running, but its plist differs (see above)")
+	assert.NotContains(t, all, "verified and running")
 	after, _ := os.ReadFile(e.plist)
 	assert.Equal(t, before, after)
 }
@@ -192,4 +194,17 @@ func TestVerifyAppServerPlistDefaultHomeWithoutCodexHome(t *testing.T) {
 	assert.NotEmpty(t, verifyAppServerPlist(plist, filepath.Join(e.user, ".codex-x"), e.user, appServerLabel(filepath.Join(e.user, ".codex-x"))))
 	assert.NotEmpty(t, verifyAppServerPlist(plist, e.home, e.user, "other.label"))
 	assert.NotEmpty(t, verifyAppServerPlist(strings.ReplaceAll(plist, e.supervisor, "/no/such"), e.home, e.user, e.label))
+}
+
+func TestEnsureAppServerMismatchNotRunningDoesNotOffer(t *testing.T) {
+	e := newAsEnv(t, ".codex-test")
+	e.writePlist(t, "/somewhere/else")
+	r := &fakeRunner{scripts: map[string]fakeResult{"launchctl print": {"", errors.New("exit 113")}}}
+	p := &Scripted{} // no answers: a prompt would abort
+	changed, notes, err := ensureAppServer(e.home, e.user, r, p)
+	require.NoError(t, err)
+	assert.Empty(t, changed)
+	assert.Contains(t, strings.Join(notes, "\n"), "fix or remove the plist above and run ./install.sh again")
+	assert.Equal(t, []string{"launchctl print " + e.target}, r.calls)
+	assert.Empty(t, p.Out.String())
 }

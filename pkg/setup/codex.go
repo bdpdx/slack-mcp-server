@@ -179,7 +179,7 @@ func InstallCodex(home, userHome, bin string, r Runner, p Prompter, now time.Tim
 		res.Changed = append(res.Changed, "MCP server registered with codex")
 	}
 
-	asChanged, asNotes, err := ensureAppServer(home, userHome, r, p, now)
+	asChanged, asNotes, err := ensureAppServer(home, userHome, r, p)
 	res.Changed = append(res.Changed, asChanged...)
 	res.Notes = append(res.Notes, asNotes...)
 	if err != nil {
