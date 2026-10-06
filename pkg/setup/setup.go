@@ -56,9 +56,14 @@ func Run(ctx context.Context, o Options) ([]Result, error) {
 			return results, err
 		}
 		if err != nil {
-			res.Home = h.Path
-			res.Notes = append(res.Notes, "FAILED: "+err.Error())
+			redo := "choose Update for this home"
+			var se *stepError
+			if errors.As(err, &se) {
+				redo = se.redo
+			}
+			res.Notes = append(res.Notes, fmt.Sprintf("FAILED: %s. Fix this, then run ./install.sh again and %s.", strings.TrimRight(err.Error(), "."), redo))
 		}
+		res.Type, res.Installed = h.Type, done
 		if done {
 			if serr := st.Save(statePath); serr != nil {
 				return results, serr
@@ -211,7 +216,14 @@ func processHome(ctx context.Context, o Options, st *State, h Home) (Result, boo
 	if action != actUpdate {
 		name, n, err := configureEnv(ctx, o, h, bot)
 		if err != nil {
-			return Result{Home: h.Path}, false, err
+			if errors.Is(err, ErrAborted) {
+				return Result{Home: h.Path}, false, err
+			}
+			redo := "set up this home again"
+			if h.HasEnv {
+				redo = "choose Reinstall for this home"
+			}
+			return Result{Home: h.Path}, false, &stepError{err: err, redo: redo}
 		}
 		if name == "" { // declined to overwrite
 			return Result{Home: h.Path, Notes: []string{"Skipped."}}, false, nil
@@ -226,6 +238,15 @@ func processHome(ctx context.Context, o Options, st *State, h Home) (Result, boo
 	st.SetHome(HomeState{Path: h.Path, Type: h.Type, Bot: bot})
 	return res, true, nil
 }
+
+// stepError is a home's failure and the setup choice that redoes it.
+type stepError struct {
+	err  error
+	redo string
+}
+
+func (e *stepError) Error() string { return e.err.Error() }
+func (e *stepError) Unwrap() error { return e.err }
 
 func installHome(o Options, h Home) (Result, error) {
 	if h.Type == TypeCodex {
@@ -494,7 +515,7 @@ func Main(args []string) int {
 		Repo: *repo, Bin: *bin, UserHome: user,
 		P: NewTerminal(os.Stdin, os.Stdout), V: SlackValidator{}, R: ExecRunner{}, Now: time.Now,
 	})
-	printSummary(os.Stdout, results)
+	printSummary(os.Stdout, results, errors.Is(err, ErrAborted))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "setup:", err)
 		return 1
@@ -502,8 +523,11 @@ func Main(args []string) int {
 	return 0
 }
 
-func printSummary(w io.Writer, results []Result) {
+// printSummary reports each home, then the remaining manual steps when at
+// least one home was set up and setup was not aborted.
+func printSummary(w io.Writer, results []Result, aborted bool) {
 	fmt.Fprintln(w, "\nSummary")
+	installed, codex, icon := false, false, false
 	for _, r := range results {
 		fmt.Fprintf(w, "\n%s\n", r.Home)
 		for _, c := range r.Changed {
@@ -514,11 +538,29 @@ func printSummary(w io.Writer, results []Result) {
 		}
 		for _, n := range r.Notes {
 			fmt.Fprintf(w, "  %s\n", n)
+			icon = icon || (r.Installed && strings.HasPrefix(n, "Set an icon for "))
 		}
+		installed = installed || r.Installed
+		codex = codex || (r.Installed && r.Type == TypeCodex)
 	}
+	if aborted {
+		fmt.Fprintln(w, "\nSetup stopped before it finished. Run ./install.sh again to set up the remaining homes.")
+		return
+	}
+	if !installed {
+		return
+	}
+	var steps []string
+	if icon {
+		steps = append(steps, "Set the bot icon (see the icon notes above).")
+	}
+	steps = append(steps, "Restart your agent sessions.")
+	if codex {
+		steps = append(steps, "Trust the hooks when Codex asks.")
+	}
+	steps = append(steps, "Tell the agent: start a project chat called <name>.")
 	fmt.Fprintln(w, "\nRemaining steps:")
-	fmt.Fprintln(w, "  1. Set the bot icon (see the icon notes above).")
-	fmt.Fprintln(w, "  2. Restart your agent sessions.")
-	fmt.Fprintln(w, "  3. Trust the hooks when Codex asks.")
-	fmt.Fprintln(w, "  4. Tell the agent: start a project chat called <name>.")
+	for i, s := range steps {
+		fmt.Fprintf(w, "  %d. %s\n", i+1, s)
+	}
 }

@@ -11,10 +11,12 @@ import (
 
 // Result reports what setup did in one home.
 type Result struct {
-	Home    string
-	Changed []string // files written or registrations made
-	Manual  []string // commands the user must run
-	Notes   []string // anything else to tell the user
+	Home      string
+	Type      string   // TypeClaude or TypeCodex
+	Installed bool     // the home was set up completely
+	Changed   []string // files written or registrations made
+	Manual    []string // commands the user must run
+	Notes     []string // anything else to tell the user
 }
 
 // readJSONObject reads a JSON object file; a missing file is empty. Invalid

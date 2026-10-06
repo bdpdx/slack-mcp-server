@@ -1,10 +1,13 @@
 package setup
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +59,8 @@ func TestRunNewCodexHome(t *testing.T) {
 	res, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
 	require.Len(t, res, 1)
+	assert.True(t, res[0].Installed)
+	assert.Equal(t, TypeCodex, res[0].Type)
 	assert.Contains(t, p.Out.String(), "separators in channel names")
 	assert.Contains(t, p.Out.String(), "unique in this Slack workspace")
 	assert.Contains(t, p.Out.String(), "Display Information")
@@ -122,6 +127,8 @@ func TestRunDottedUsernameFailsHomeOnly(t *testing.T) {
 	require.NotEmpty(t, res[0].Notes)
 	assert.Contains(t, res[0].Notes[0], "FAILED")
 	assert.Contains(t, res[0].Notes[0], "pat.d")
+	assert.Contains(t, res[0].Notes[0], "Fix this, then run ./install.sh again and set up this home again.")
+	assert.False(t, res[0].Installed)
 	assert.NoFileExists(t, EnvPath(codex))
 }
 
@@ -221,4 +228,47 @@ func TestRunReinstallKeepsCustomToolValues(t *testing.T) {
 	assert.Equal(t, "C123,#general", env["SLACK_MCP_ADD_MESSAGE_TOOL"])
 	assert.Equal(t, "!C123 #x", env["SLACK_MCP_DELETE_MESSAGE_TOOL"])
 	assert.Equal(t, "xoxb-good", env["SLACK_MCP_XOXB_TOKEN"])
+}
+
+func TestRunFailedUpdateSaysChooseUpdate(t *testing.T) {
+	user, repo := t.TempDir(), t.TempDir()
+	claude := filepath.Join(user, ".claude")
+	require.NoError(t, os.MkdirAll(claude, 0o700))
+	require.NoError(t, os.WriteFile(EnvPath(claude), []byte("SLACK_MCP_XOXB_TOKEN=x\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(claude, "settings.json"), []byte("{"), 0o600))
+	res, err := Run(context.Background(), opts(user, repo, &Scripted{Answers: []string{"1", "1"}}))
+	require.NoError(t, err)
+	require.Len(t, res, 1)
+	assert.Contains(t, strings.Join(res[0].Notes, "\n"), "Fix this, then run ./install.sh again and choose Update for this home.")
+}
+
+func TestPrintSummary(t *testing.T) {
+	icon := fmt.Sprintf(iconMsgFmt, "pat-codex", "pat-codex")
+	both := []Result{
+		{Home: "/u/.claude", Type: TypeClaude, Installed: true},
+		{Home: "/u/.codex", Type: TypeCodex, Installed: true, Notes: []string{icon}},
+	}
+	var b bytes.Buffer
+	printSummary(&b, both, false)
+	out := b.String()
+	assert.Contains(t, out, "Remaining steps:")
+	assert.Contains(t, out, "1. Set the bot icon")
+	assert.Contains(t, out, "Trust the hooks when Codex asks.")
+
+	b.Reset()
+	printSummary(&b, both[:1], false)
+	out = b.String()
+	assert.Contains(t, out, "Remaining steps:")
+	assert.NotContains(t, out, "Codex", "no Codex home was set up")
+	assert.NotContains(t, out, "bot icon", "no icon note was given")
+	assert.Contains(t, out, "1. Restart your agent sessions.")
+
+	b.Reset()
+	printSummary(&b, both, true)
+	assert.NotContains(t, b.String(), "Remaining steps:", "not after an abort")
+	assert.Contains(t, b.String(), "Setup stopped before it finished")
+
+	b.Reset()
+	printSummary(&b, []Result{{Home: "/u/.codex", Type: TypeCodex, Notes: []string{"Skipped."}}}, false)
+	assert.NotContains(t, b.String(), "Remaining steps:", "no home was set up")
 }
