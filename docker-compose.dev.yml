@@ -1,26 +1,32 @@
+# Debug build under delve. See docker-compose.yml for the env file setup:
+#
+#   DOCKER_UID=$(id -u) DOCKER_GID=$(id -g) docker compose -f docker-compose.dev.yml up --build
 services:
   mcp-server:
     build:
       context: .
       target: dev
       dockerfile: Dockerfile
-    command: /dlv debug /app/cmd/slack-mcp-server/main.go --accept-multiclient --headless --listen=:40000 --api-version=2 --log -- --transport sse
+    command: /dlv debug /app/cmd/slack-mcp-server --output /tmp/__debug_bin --accept-multiclient --headless --listen=:40000 --api-version=2 --log -- --transport sse --env-file /config/slack-mcp-server.env
+    user: "${DOCKER_UID:-10001}:${DOCKER_GID:-10001}"
     restart: unless-stopped
     networks:
       - app-tier
     ports:
       # Published on the host's loopback only; delve gives full control of
-      # the process, so never expose it beyond localhost.
+      # the process, so never expose it beyond localhost. The env file must
+      # set SLACK_MCP_HOST=0.0.0.0, and a non-loopback bind requires
+      # SLACK_MCP_API_KEY.
       - "127.0.0.1:13080:13080"
       - "127.0.0.1:40000:40000"
-    env_file:
-      - .env
     environment:
-      # The server must listen on all container interfaces for the published
-      # port to reach it. A non-loopback bind requires SLACK_MCP_API_KEY to be
-      # set (in .env).
-      SLACK_MCP_HOST: "0.0.0.0"
-      SLACK_MCP_PORT: "13080"
+      # Writable Go caches for the non-root user (delve compiles at start).
+      GOCACHE: /tmp/go-build
+      GOMODCACHE: /tmp/go-mod
+      XDG_CACHE_HOME: /tmp/cache
+      HOME: /tmp
+    volumes:
+      - ./slack-mcp-server.env:/config/slack-mcp-server.env:ro
 
 networks:
   app-tier:

@@ -1,5 +1,6 @@
 .idea
 .env
+slack-mcp-server.env
 .users_cache.json
 .channels_cache.json
 .channels_cache_v2.json

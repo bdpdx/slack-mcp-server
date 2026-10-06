@@ -35,7 +35,13 @@ FROM alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9
 RUN apk add --no-cache ca-certificates \
   && addgroup -S -g 10001 app \
   && adduser -S -D -u 10001 -G app -h /home/app app \
-  && install -d -m 0700 -o app -g app /home/app/.cache /home/app/.cache/slack-mcp-server
+  && install -d -m 1777 /cache
+
+# The cache lives in /cache (a volume in docker-compose.yml). It is
+# world-writable with the sticky bit so the container can run as any uid
+# (compose runs it as the host user so the bind-mounted env file's ownership
+# check passes); the server creates its own 0700 subdirectory inside.
+ENV XDG_CACHE_HOME=/cache
 
 COPY --from=build /go/bin/mcp-server /usr/local/bin/mcp-server
 
