@@ -1,0 +1,134 @@
+package setup
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+)
+
+var (
+	autoReviewLine = regexp.MustCompile(`(?m)^\s*approvals_reviewer\s*=\s*"auto_review"\s*(#.*)?$`)
+	notifyAssign   = regexp.MustCompile(`(?m)^(\s*notify\s*=\s*)(\[.*\])\s*$`)
+)
+
+// usesAutoReview reports whether a Codex config.toml routes approvals
+// through auto_review (which runs after PermissionRequest hooks).
+func usesAutoReview(cfg string) bool { return autoReviewLine.MatchString(cfg) }
+
+// fixNotify drops a `--previous-notify <command>` pair from notify when the
+// command is codex-push.py, which Slack turn-end DMs replace.
+func fixNotify(cfg string) (string, bool, error) {
+	m := notifyAssign.FindStringSubmatchIndex(cfg)
+	if m == nil {
+		return cfg, false, nil
+	}
+	var arr []string
+	if json.Unmarshal([]byte(cfg[m[4]:m[5]]), &arr) != nil {
+		return cfg, false, nil // not a simple array; leave it alone
+	}
+	var out []string
+	changed := false
+	for i := 0; i < len(arr); i++ {
+		if arr[i] == "--previous-notify" && i+1 < len(arr) && strings.Contains(arr[i+1], "codex-push.py") {
+			i++
+			changed = true
+			continue
+		}
+		out = append(out, arr[i])
+	}
+	if !changed {
+		return cfg, false, nil
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(out); err != nil {
+		return cfg, false, err
+	}
+	val := strings.ReplaceAll(strings.TrimSpace(buf.String()), `","`, `", "`)
+	return cfg[:m[4]] + val + cfg[m[5]:], true, nil
+}
+
+// codexRule lets Codex run `<bin> chat …` without asking.
+func codexRule(bin string) string {
+	q, _ := json.Marshal(bin)
+	return `prefix_rule(pattern=[` + string(q) + `, "chat"], decision="allow")`
+}
+
+// InstallCodex installs the skill, hooks, rule, notify cleanup (asked) and
+// MCP registration in a Codex home. The env file is written separately.
+func InstallCodex(home, bin string, r Runner, p Prompter, now time.Time) (Result, error) {
+	res := Result{Home: home}
+	cfgPath := filepath.Join(home, "config.toml")
+	cfgData, _ := os.ReadFile(cfgPath)
+	cfg := string(cfgData)
+	autoReview := usesAutoReview(cfg)
+
+	hooksPath := filepath.Join(home, "hooks.json")
+	doc, err := readJSONObject(hooksPath)
+	if err != nil {
+		return res, err
+	}
+	var events map[string]any
+	if raw, ok := doc["hooks"]; ok && raw != nil {
+		if events, ok = raw.(map[string]any); !ok {
+			return res, fmt.Errorf("%s: \"hooks\" is not a JSON object; fix it and run setup again", hooksPath)
+		}
+	}
+	changed, err := InstallSkill(home, TypeCodex, bin, now)
+	res.Changed = append(res.Changed, changed...)
+	if err != nil {
+		return res, err
+	}
+	doc["hooks"] = MergeHooks(events, CodexHookSpecs(!autoReview), bin, EnvPath(home), "SlackAgentChat")
+	if wrote, err := writeJSONObject(hooksPath, doc, now); err != nil {
+		return res, err
+	} else if wrote {
+		res.Changed = append(res.Changed, hooksPath)
+	}
+	if autoReview {
+		res.Notes = append(res.Notes, "approval requests stay with Codex's auto_review (no Slack approval hook)")
+	}
+
+	rulesPath := filepath.Join(home, "rules", "default.rules")
+	rules, _ := os.ReadFile(rulesPath)
+	if rule := codexRule(bin); !strings.Contains(string(rules), rule) {
+		text := string(rules)
+		if text != "" && !strings.HasSuffix(text, "\n") {
+			text += "\n"
+		}
+		if _, err := replaceFile(rulesPath, []byte(text+rule+"\n"), 0o600, now); err != nil {
+			return res, err
+		}
+		res.Changed = append(res.Changed, rulesPath)
+	}
+
+	if fixed, ok, err := fixNotify(cfg); err == nil && ok {
+		yes, err := p.Confirm("Codex's notify runs codex-push.py; Slack turn-end DMs replace it. Remove it from notify?", true)
+		if err != nil {
+			return res, err
+		}
+		if yes {
+			if _, err := replaceFile(cfgPath, []byte(fixed), 0o600, now); err != nil {
+				return res, err
+			}
+			res.Changed = append(res.Changed, cfgPath)
+		}
+	}
+
+	manual, err := RegisterMCP(r, TypeCodex, home, bin)
+	if err != nil {
+		return res, err
+	}
+	if manual != "" {
+		res.Manual = append(res.Manual, manual)
+	} else {
+		res.Changed = append(res.Changed, "MCP server registered with codex")
+	}
+	return res, nil
+}
