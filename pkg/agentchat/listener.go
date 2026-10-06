@@ -171,6 +171,10 @@ func (l *Listener) notice(ctx context.Context, m Message) Notice {
 
 // HandleMessage routes one live message to every subscribed session.
 func (l *Listener) HandleMessage(ctx context.Context, m Message) {
+	if m.SubType == "channel_archive" || m.SubType == "group_archive" {
+		l.dropChannel(m.Channel)
+		return
+	}
 	if !m.Deliverable() || m.From(l.Self) {
 		return
 	}
@@ -862,6 +866,17 @@ func (l *Listener) approvalReply(m Message) bool {
 		}
 	}
 	return true
+}
+
+// dropChannel stops every session watching an archived channel.
+func (l *Listener) dropChannel(channel string) {
+	l.mu.Lock()
+	watchers := l.state.Watchers(channel)
+	l.mu.Unlock()
+	for _, sub := range watchers {
+		l.Log.Info("channel archived; unwatching", zap.String("session", sub.SessionID), zap.String("channel", channel))
+		l.Unsubscribe(sub.SessionID, channel)
+	}
 }
 
 // markConsumed records m as delivered to every session watching its

@@ -119,7 +119,8 @@ name, else real name, else username). Channel names are lowercased, characters
 outside `[a-z0-9_-]` become `-`, max 80.
 
 - `chat channel create NAME [--invite a,b] [--invite-user u,v]` creates (or
-  finds) the private project channel and invites the owner and the named
+  finds) the private project channel with the owner's user token (so Slack
+  records the owner as its creator) and invites the owner and the named
   agents and people. Other people are never invited by default. It also
   creates `NAME__users` and `NAME__<owner>_<agent>` (below) and watches the
   project and direct channels. `chat channel invite CHANNEL [a,b]
@@ -143,6 +144,13 @@ outside `[a-z0-9_-]` become `-`, max 80.
   watches it (with a 20-message backlog when joining). DMs are not used: the
   owner cannot see them and they carry no project. Outcomes go back to the
   project channel. Agents do not archive channels; the owner does.
+- `chat project archive NAME [--dry-run]` (only when the owner asks) archives
+  `#NAME` and every `#NAME__…` channel the owner is in, project channel last,
+  with the owner's user token, then unwatches them in this home; other
+  listeners unwatch on the `channel_archive`/`group_archive` message. It
+  refuses unless Slack records the owner (or, for projects created before
+  owner-created project channels, this home's bot) as `#NAME`'s creator.
+  Slack's API can only archive (deletion needs Enterprise Grid admin).
 - Auto-watch: when a listener sees its own bot join (`member_joined_channel`)
   a channel whose project one of its sessions watches, those sessions start
   watching it, with a 20-message backlog on first join. So agents added to a

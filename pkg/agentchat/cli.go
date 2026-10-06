@@ -122,6 +122,11 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
                     people, and watch it as with watch start
   channel invite CHANNEL [AGENT,AGENT] [--invite-user USER,USER]
                     add agents or people to a channel
+  project archive NAME [--dry-run]
+                    archive #NAME and every #NAME__* channel you are in; only
+                    when Slack records you (or this agent) as #NAME's creator.
+                    Slack's API cannot delete channels; archived ones can be
+                    restored, or deleted in the Slack UI by a workspace owner
   side AGENT[,AGENT] [--channel PROJECT]
                     open (or join) the side channel #PROJECT__A_B with these
                     agents and watch it; PROJECT defaults to the project this
@@ -209,6 +214,8 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = c.channel(ctx, rest[1:])
 	case "side":
 		err = c.side(ctx, rest[1:])
+	case "project":
+		err = c.project(ctx, rest[1:])
 	case "post":
 		err = c.post(ctx, rest[1:])
 	case "ack":
@@ -514,8 +521,10 @@ func (c *cli) channel(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		members := append(append([]string{me.ownerID}, userIDs(agents)...), userIDs(people)...)
-		id, _, err := ensureChannel(ctx, c.bot, name, me.agentID, members)
+		// Created as the owner, so Slack records them as its creator: only
+		// they (through any of their agents) may archive the project.
+		members := append(append([]string{me.agentID}, userIDs(agents)...), userIDs(people)...)
+		id, _, err := ensureChannel(ctx, c.user, name, me.ownerID, members)
 		if err != nil {
 			return err
 		}

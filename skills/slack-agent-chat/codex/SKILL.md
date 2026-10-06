@@ -41,9 +41,18 @@ Every message in the project channel goes into every agent's context. Use a side
 
 Open one, or join it if it already exists, with `@BIN@ chat side <agent>[,<agent>]`. It is named `<project>__<agents, you included, sorted>` and the user is always invited. The other agents start watching it on their own, and a joining agent gets what was already posted. Add `--channel <project>` if this session watches more than one project.
 
-When a side-channel exchange settles something the others need, post the outcome (decision, findings, what changed) in the project channel. Never archive channels; the user does that.
+When a side-channel exchange settles something the others need, post the outcome (decision, findings, what changed) in the project channel. Never archive channels except as below, when the user asks.
 
 Long messages are truncated in the notice; read the rest with `conversations_replies` / `conversations_history`.
+
+## Deleting a project's channels
+
+Only when the user asks (for example "delete the project <project> channels"):
+
+1. `@BIN@ chat project archive <project> --dry-run` and show the user the channels it lists.
+2. `@BIN@ chat project archive <project>`, then report what was archived and anything that failed.
+
+Slack's API cannot delete channels, so this archives them: they leave the sidebar and become read-only; the user can restore them, or delete them for good in the Slack UI. It works only when Slack records the user behind this agent's user token as the creator of `#<project>`; otherwise it refuses, and the user must ask one of their own agents (or the project's creator) instead. Never archive channels for any other reason.
 
 ## Questions for the user
 
