@@ -249,14 +249,15 @@ func TestPrintSummary(t *testing.T) {
 		{Home: "/u/.codex", Type: TypeCodex, Installed: true, Notes: []string{icon}},
 	}
 	var b bytes.Buffer
-	printSummary(&b, both, false)
+	printSummary(&b, "/b/slack-mcp-server", both, false)
 	out := b.String()
+	assert.Contains(t, out, "slack-mcp-server is installed at /b/slack-mcp-server\n", "an unresolvable link is named alone")
 	assert.Contains(t, out, "Remaining steps:")
 	assert.Contains(t, out, "1. Set the bot icon")
 	assert.Contains(t, out, "Trust the hooks when Codex asks.")
 
 	b.Reset()
-	printSummary(&b, both[:1], false)
+	printSummary(&b, "/b/slack-mcp-server", both[:1], false)
 	out = b.String()
 	assert.Contains(t, out, "Remaining steps:")
 	assert.NotContains(t, out, "Codex", "no Codex home was set up")
@@ -264,13 +265,29 @@ func TestPrintSummary(t *testing.T) {
 	assert.Contains(t, out, "1. Restart your agent sessions.")
 
 	b.Reset()
-	printSummary(&b, both, true)
+	printSummary(&b, "/b/slack-mcp-server", both, true)
 	assert.NotContains(t, b.String(), "Remaining steps:", "not after an abort")
 	assert.Contains(t, b.String(), "Setup stopped before it finished")
 
 	b.Reset()
-	printSummary(&b, []Result{{Home: "/u/.codex", Type: TypeCodex, Notes: []string{"Skipped."}}}, false)
+	printSummary(&b, "/b/slack-mcp-server", []Result{{Home: "/u/.codex", Type: TypeCodex, Notes: []string{"Skipped."}}}, false)
 	assert.NotContains(t, b.String(), "Remaining steps:", "no home was set up")
+}
+
+// The summary says where the binary was linked and what the link points to.
+func TestPrintSummaryNamesTheInstalledBinary(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "build", "slack-mcp-server")
+	require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o700))
+	require.NoError(t, os.WriteFile(target, []byte("bin"), 0o700))
+	link := filepath.Join(dir, "bin", "slack-mcp-server")
+	require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o700))
+	require.NoError(t, os.Symlink(target, link))
+	var b bytes.Buffer
+	printSummary(&b, link, []Result{{Home: "/u/.claude", Type: TypeClaude, Installed: true}}, false)
+	real, err := filepath.EvalSymlinks(target)
+	require.NoError(t, err)
+	assert.Contains(t, b.String(), "slack-mcp-server is installed at "+link+" (a link to "+real+")")
 }
 
 func TestBinPathIsAbsolute(t *testing.T) {

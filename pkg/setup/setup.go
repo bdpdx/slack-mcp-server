@@ -524,7 +524,7 @@ func Main(args []string) int {
 		Repo: *repo, Bin: linkPath, UserHome: user,
 		P: NewTerminal(os.Stdin, os.Stdout), V: SlackValidator{}, R: ExecRunner{}, Now: time.Now,
 	})
-	printSummary(os.Stdout, results, errors.Is(err, ErrAborted))
+	printSummary(os.Stdout, linkPath, results, errors.Is(err, ErrAborted))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "setup:", err)
 		return 1
@@ -534,8 +534,13 @@ func Main(args []string) int {
 
 // printSummary reports each home, then the remaining manual steps when at
 // least one home was set up and setup was not aborted.
-func printSummary(w io.Writer, results []Result, aborted bool) {
+func printSummary(w io.Writer, bin string, results []Result, aborted bool) {
 	fmt.Fprintln(w, "\nSummary")
+	if real, err := filepath.EvalSymlinks(bin); err == nil && real != bin {
+		fmt.Fprintf(w, "\nslack-mcp-server is installed at %s (a link to %s)\n", bin, real)
+	} else {
+		fmt.Fprintf(w, "\nslack-mcp-server is installed at %s\n", bin)
+	}
 	installed, codex, icon := false, false, false
 	for _, r := range results {
 		fmt.Fprintf(w, "\n%s\n", r.Home)

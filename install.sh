@@ -70,7 +70,7 @@ if [ -z "$default_link" ]; then
 	default_link="$HOME/.local/bin/slack-mcp-server"
 fi
 while true; do
-	printf 'Where should the slack-mcp-server binary be linked? Press Enter for %s: ' "$default_link"
+	printf '\nWhere should the slack-mcp-server binary be linked?\nPress Enter for %s: ' "$default_link"
 	read -r link
 	case "$link" in
 		"") link="$default_link" ;;
