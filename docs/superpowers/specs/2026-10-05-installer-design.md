@@ -136,6 +136,10 @@ unrelated settings alone.
   keep all other hooks.
 - **Hook timeout:** approval-hook's timeout must exceed its `--wait`
   (default 10m) by about a minute: 660s.
+- **Codex Slack tool approvals:** after `codex mcp add`, `config.toml`'s `[mcp_servers.slack]`
+  gets `default_tools_approval_mode = "approve"` (Codex: run the server's tools without asking),
+  unless the user set a value; without it, a home not using `auto_review` would ask (via Slack)
+  for every Slack MCP call.
 - **Codex start script:** each Codex home gets `start-<home dir without leading dot>` beside the
   linked binary (0755): exports `CODEX_HOME` and `PROJECT_ROOT` (blank by default; a value the user
   sets is kept on re-runs), takes `-m|--model` (`daybreak` → `gpt-daybreak-blue-latest`; no `-m` →

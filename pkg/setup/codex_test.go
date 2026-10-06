@@ -154,3 +154,41 @@ func TestInstallCodexReplacesRuleForSameBinaryViaOtherLink(t *testing.T) {
 	rules, _ := os.ReadFile(filepath.Join(home, "rules", "default.rules"))
 	assert.Equal(t, `prefix_rule(pattern=["`+linkB+`", "chat"], decision="allow")`+"\n", string(rules))
 }
+
+// Slack MCP tools run without a prompt in every Codex home: the slack table
+// in config.toml gets default_tools_approval_mode = "approve" (Codex's
+// "run automatically"), unless the user set a value of their own.
+func TestApproveSlackTools(t *testing.T) {
+	cfg := "model = \"x\"\n\n[mcp_servers.slack]\ncommand = \"/b/slack-mcp-server\"\nargs = [\"--transport\", \"stdio\"]\n\n[mcp_servers.other]\ncommand = \"o\"\n"
+	out, changed := approveSlackTools(cfg)
+	assert.True(t, changed)
+	assert.Equal(t, "model = \"x\"\n\n[mcp_servers.slack]\ncommand = \"/b/slack-mcp-server\"\nargs = [\"--transport\", \"stdio\"]\ndefault_tools_approval_mode = \"approve\"\n\n[mcp_servers.other]\ncommand = \"o\"\n", out)
+
+	again, changed := approveSlackTools(out)
+	assert.False(t, changed, "already set")
+	assert.Equal(t, out, again)
+
+	mine := strings.Replace(cfg, "args =", "default_tools_approval_mode = \"prompt\"\nargs =", 1)
+	kept, changed := approveSlackTools(mine)
+	assert.False(t, changed, "a user's own value is kept")
+	assert.Equal(t, mine, kept)
+
+	last := "[mcp_servers.slack]\ncommand = \"c\""
+	out, changed = approveSlackTools(last)
+	assert.True(t, changed, "table at the end of the file without a trailing newline")
+	assert.Equal(t, "[mcp_servers.slack]\ncommand = \"c\"\ndefault_tools_approval_mode = \"approve\"\n", out)
+
+	_, changed = approveSlackTools("[mcp_servers.other]\ncommand = \"o\"\n")
+	assert.False(t, changed, "no slack table, nothing to do")
+}
+
+func TestInstallCodexApprovesSlackTools(t *testing.T) {
+	home := t.TempDir()
+	cfg := filepath.Join(home, "config.toml")
+	require.NoError(t, os.WriteFile(cfg, []byte("[mcp_servers.slack]\ncommand = \"x\"\n"), 0o600))
+	res, err := InstallCodex(home, t.TempDir(), testBin, &fakeRunner{}, &Scripted{}, testNow)
+	require.NoError(t, err)
+	data, _ := os.ReadFile(cfg)
+	assert.Contains(t, string(data), "default_tools_approval_mode = \"approve\"")
+	assert.Contains(t, strings.Join(res.Changed, "\n"), "Slack MCP tools run without asking")
+}

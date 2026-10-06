@@ -54,6 +54,43 @@ func fixNotify(cfg string) (string, bool, error) {
 	return cfg[:m[4]] + val + cfg[m[5]:], true, nil
 }
 
+// approveSlackTools sets default_tools_approval_mode = "approve" (Codex's
+// "run tools automatically") in config.toml's [mcp_servers.slack] table, so
+// Slack MCP calls don't each need approval. A value the user set is kept;
+// without a slack table nothing changes. Only that table is touched.
+func approveSlackTools(cfg string) (string, bool) {
+	lines := strings.SplitAfter(cfg, "\n")
+	start := -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) == "[mcp_servers.slack]" {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return cfg, false
+	}
+	last := start // the table's last key line
+	for i := start + 1; i < len(lines); i++ {
+		t := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(t, "[") {
+			break
+		}
+		if strings.HasPrefix(t, "default_tools_approval_mode") {
+			return cfg, false
+		}
+		if t != "" && !strings.HasPrefix(t, "#") {
+			last = i
+		}
+	}
+	if !strings.HasSuffix(lines[last], "\n") {
+		lines[last] += "\n"
+	}
+	insert := "default_tools_approval_mode = \"approve\"\n"
+	out := strings.Join(lines[:last+1], "") + insert + strings.Join(lines[last+1:], "")
+	return out, true
+}
+
 // codexRule lets Codex run `<bin> chat …` without asking.
 func codexRule(bin string) string {
 	q, _ := json.Marshal(bin)
@@ -177,6 +214,17 @@ func InstallCodex(home, userHome, bin string, r Runner, p Prompter, now time.Tim
 		res.Manual = append(res.Manual, manual)
 	} else {
 		res.Changed = append(res.Changed, "MCP server registered with codex")
+		// codex mcp add rewrites the slack table, so this comes after it.
+		data, err := os.ReadFile(cfgPath)
+		if err != nil && !os.IsNotExist(err) {
+			return res, err
+		}
+		if updated, ok := approveSlackTools(string(data)); ok {
+			if _, err := replaceFile(cfgPath, []byte(updated), 0o600, now); err != nil {
+				return res, err
+			}
+			res.Changed = append(res.Changed, cfgPath+": Slack MCP tools run without asking (default_tools_approval_mode = \"approve\")")
+		}
 	}
 
 	asChanged, asNotes, err := ensureAppServer(home, userHome, r, p)
