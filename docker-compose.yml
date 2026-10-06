@@ -1,23 +1,32 @@
+# The server reads its settings only from the file given by --env-file
+# (inherited SLACK_MCP_* variables are discarded), so compose `environment:`
+# and `env_file:` entries have no effect. Copy .env.dist to
+# slack-mcp-server.env, fill it in, chmod 600 it, and run as your own uid so
+# the server accepts the file's ownership:
+#
+#   DOCKER_UID=$(id -u) DOCKER_GID=$(id -g) docker compose up -d --build
 services:
   mcp-server:
-    image: ghcr.io/korotovsky/slack-mcp-server:latest
+    build:
+      context: .
+      target: production
+      dockerfile: Dockerfile
+    command: ["--transport", "sse", "--env-file", "/config/slack-mcp-server.env"]
+    user: "${DOCKER_UID:-10001}:${DOCKER_GID:-10001}"
     restart: unless-stopped
     networks:
       - app-tier
     ports:
-      - "3001:3001"
+      # Published on the host's loopback only. Inside the container the env
+      # file must set SLACK_MCP_HOST=0.0.0.0 for the published port to reach
+      # the server; a non-loopback bind requires SLACK_MCP_API_KEY.
+      - "127.0.0.1:13080:13080"
     volumes:
-      - users_cache:/app/mcp-server/.users_cache.json
-      - channels_cache:/app/mcp-server/.channels_cache.json
-    env_file:
-      - .env
-    environment:
-      SLACK_MCP_HOST: "0.0.0.0"
-      SLACK_MCP_PORT: "3001"
+      - ./slack-mcp-server.env:/config/slack-mcp-server.env:ro
+      - slack_cache:/cache
 
 volumes:
-  users_cache:
-  channels_cache:
+  slack_cache:
 
 networks:
   app-tier:

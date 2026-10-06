@@ -1,20 +1,11 @@
 .idea
 .env
+slack-mcp-server.env
 .users_cache.json
 .channels_cache.json
 .channels_cache_v2.json
-/extension.dxt/server/slack-mcp-server-*
-/extension.dxt/server/index.js
-/build/slack-mcp-server-*
-/build/slack-mcp-server.dxt
 /build/slack-mcp-server
 /slack-mcp-server
-/npm/slack-mcp-server-*/bin/slack-mcp-server-*
-/npm/slack-mcp-server-*/.npmrc
-/npm/slack-mcp-server/.npmrc
-/npm/slack-mcp-server/LICENSE
-/npm/slack-mcp-server/README.md
-docker-compose.release.yml
 
 # Claude Code agent worktrees
 .claude/worktrees/
