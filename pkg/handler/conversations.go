@@ -29,7 +29,28 @@ const (
 	defaultConversationsNumericLimit    = 50
 	defaultConversationsExpressionLimit = "1d"
 	maxFileSizeBytes                    = 5 * 1024 * 1024 // 5MB limit
+
+	// Upper bounds for numeric tool inputs.
+	maxConversationsNumericLimit = 999
+	maxExpressionUnits           = 3650 // e.g. 3650d, ten years
+	maxSearchLimit               = 100
+	maxSearchPage                = 100
+	maxUnreadsChannels           = 500
+	maxUnreadsMessagesPerChannel = 100
+	maxUsersSearchLimit          = 100
+	maxChannelsLimit             = 999
 )
+
+// clampInt bounds v to [lo, hi].
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
 
 var validFilterKeys = map[string]struct{}{
 	"is":     {},
@@ -1392,7 +1413,7 @@ func (ch *ConversationsHandler) getChannelDisplayName(info *slack.Channel, chann
 func (ch *ConversationsHandler) ConversationsMarkHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ch.logger.Debug("ConversationsMarkHandler called", zap.Any("params", request.Params))
 
-	params, err := ch.parseParamsToolMark(request)
+	params, err := ch.parseParamsToolMark(ctx, request)
 	if err != nil {
 		ch.logger.Error("Failed to parse mark params", zap.Error(err))
 		return nil, err
@@ -1407,7 +1428,7 @@ func (ch *ConversationsHandler) ConversationsMarkHandler(ctx context.Context, re
 			ChannelID: channel,
 			Limit:     1,
 		}
-		history, err := ch.apiProvider.Slack().GetConversationHistoryContext(ctx, &historyParams)
+		history, err := ch.apiProvider.UserSlack().GetConversationHistoryContext(ctx, &historyParams)
 		if err != nil {
 			ch.logger.Error("Failed to get latest message", zap.Error(err))
 			return nil, fmt.Errorf("failed to get latest message: %v", err)
@@ -1420,8 +1441,9 @@ func (ch *ConversationsHandler) ConversationsMarkHandler(ctx context.Context, re
 		}
 	}
 
-	// Mark the conversation as read
-	err = ch.apiProvider.Slack().MarkConversationContext(ctx, channel, ts)
+	// Mark the conversation as read. Read state belongs to the user, so this
+	// always uses the user token.
+	err = ch.apiProvider.UserSlack().MarkConversationContext(ctx, channel, ts)
 	if err != nil {
 		ch.logger.Error("Failed to mark conversation", zap.Error(err))
 		return nil, fmt.Errorf("failed to mark conversation as read: %v", err)
@@ -2149,12 +2171,10 @@ func (ch *ConversationsHandler) parseParamsToolUsersSearch(request mcp.CallToolR
 	}
 
 	limit := request.GetInt("limit", 10)
-	if limit <= 0 {
+	if limit == 0 {
 		limit = 10
 	}
-	if limit > 100 {
-		limit = 100
-	}
+	limit = clampInt(limit, 1, maxUsersSearchLimit)
 
 	return &usersSearchParams{
 		query: query,
@@ -2166,32 +2186,28 @@ func (ch *ConversationsHandler) parseParamsToolUnreads(request mcp.CallToolReque
 	return &unreadsParams{
 		includeMessages:       request.GetBool("include_messages", true),
 		channelTypes:          request.GetString("channel_types", "all"),
-		maxChannels:           request.GetInt("max_channels", 50),
-		maxMessagesPerChannel: request.GetInt("max_messages_per_channel", 10),
+		maxChannels:           clampInt(request.GetInt("max_channels", 50), 1, maxUnreadsChannels),
+		maxMessagesPerChannel: clampInt(request.GetInt("max_messages_per_channel", 10), 1, maxUnreadsMessagesPerChannel),
 		mentionsOnly:          request.GetBool("mentions_only", false),
 	}
 }
 
-func (ch *ConversationsHandler) parseParamsToolMark(request mcp.CallToolRequest) (*markParams, error) {
+func (ch *ConversationsHandler) parseParamsToolMark(ctx context.Context, request mcp.CallToolRequest) (*markParams, error) {
 	if err := ch.checkToolEnabled(toolconfig.ConversationsMark); err != nil {
 		return nil, err
 	}
 
-	channel := request.GetString("channel_id", "")
+	channel := strings.TrimSpace(request.GetString("channel_id", ""))
 	if channel == "" {
 		ch.logger.Error("channel_id missing in mark params")
 		return nil, errors.New("channel_id is required")
 	}
 
-	// Resolve channel name to ID if needed
-	if strings.HasPrefix(channel, "#") || strings.HasPrefix(channel, "@") {
-		channelsMaps := ch.apiProvider.ProvideChannelsMaps()
-		chn, ok := channelsMaps.ChannelsInv[channel]
-		if !ok {
-			ch.logger.Error("Channel not found", zap.String("channel", channel))
-			return nil, fmt.Errorf("channel %q not found", channel)
-		}
-		channel = channelsMaps.Channels[chn].ID
+	// Resolve channel name to ID with the same refresh-and-retry as the
+	// other tools.
+	channel, err := ch.resolveChannelID(ctx, channel)
+	if err != nil {
+		return nil, err
 	}
 
 	ts := request.GetString("ts", "")
@@ -2255,7 +2271,7 @@ func (ch *ConversationsHandler) parseParamsToolSearch(ctx context.Context, req m
 	}
 
 	finalQuery := buildQuery(freeText, filters)
-	limit := req.GetInt("limit", 100)
+	limit := clampInt(req.GetInt("limit", 20), 1, maxSearchLimit)
 	cursor := req.GetString("cursor", "")
 
 	var (
@@ -2274,7 +2290,7 @@ func (ch *ConversationsHandler) parseParamsToolSearch(ctx context.Context, req m
 			return nil, fmt.Errorf("invalid cursor: %v", cursor)
 		}
 		page, err = strconv.Atoi(parts[1])
-		if err != nil || page < 1 {
+		if err != nil || page < 1 || page > maxSearchPage {
 			ch.logger.Error("Invalid cursor page", zap.String("cursor", cursor), zap.Error(err))
 			return nil, fmt.Errorf("invalid cursor page: %v", err)
 		}
@@ -2419,11 +2435,11 @@ func limitByNumeric(limit string, defaultLimit int) (int, error) {
 	if limit == "" {
 		return defaultLimit, nil
 	}
-	n, err := strconv.Atoi(limit)
+	n, err := strconv.Atoi(strings.TrimSpace(limit))
 	if err != nil {
 		return 0, fmt.Errorf("invalid numeric limit: %q", limit)
 	}
-	return n, nil
+	return clampInt(n, 1, maxConversationsNumericLimit), nil
 }
 
 func limitByExpression(limit, defaultLimit string) (slackLimit int, oldest, latest string, err error) {
@@ -2436,7 +2452,7 @@ func limitByExpression(limit, defaultLimit string) (slackLimit int, oldest, late
 	suffix := limit[len(limit)-1]
 	numStr := limit[:len(limit)-1]
 	n, err := strconv.Atoi(numStr)
-	if err != nil || n <= 0 {
+	if err != nil || n <= 0 || n > maxExpressionUnits {
 		return 0, "", "", fmt.Errorf("invalid duration limit %q: must be a positive integer followed by 'd', 'w', or 'm'", limit)
 	}
 	now := time.Now()

@@ -152,10 +152,7 @@ func (ch *ChannelsHandler) ChannelsHandler(ctx context.Context, request mcp.Call
 		limit = 100
 		ch.logger.Debug("Limit not provided, using default", zap.Int("limit", limit))
 	}
-	if limit > 999 {
-		ch.logger.Warn("Limit exceeds maximum, capping to 999", zap.Int("requested", limit))
-		limit = 999
-	}
+	limit = clampInt(limit, 1, maxChannelsLimit)
 
 	var (
 		nextcur     string
@@ -245,9 +242,7 @@ func (ch *ChannelsHandler) ChannelsMeHandler(ctx context.Context, request mcp.Ca
 	if limit == 0 {
 		limit = 100
 	}
-	if limit > 999 {
-		limit = 999
-	}
+	limit = clampInt(limit, 1, maxChannelsLimit)
 
 	channelTypes := []string{}
 	for _, t := range strings.Split(types, ",") {
@@ -408,9 +403,15 @@ func paginateChannels(channels []provider.Channel, cursor string, limit int) ([]
 	})
 
 	startIndex := 0
+	if limit < 1 {
+		limit = 1
+	}
 	if cursor != "" {
 		if decoded, err := base64.StdEncoding.DecodeString(cursor); err == nil {
 			lastID := string(decoded)
+			// A cursor past the last channel yields an empty page rather
+			// than starting over.
+			startIndex = len(channels)
 			for i, ch := range channels {
 				if ch.ID > lastID {
 					startIndex = i
