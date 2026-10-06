@@ -92,7 +92,7 @@ func startScriptName(home string) string {
 }
 
 // renderStartScript writes the script for home. projectRoot is the raw
-// shell text after `export PROJECT_ROOT=` ('' for none).
+// shell text after `export PROJECT_ROOT=`; an empty quoted string means none.
 func renderStartScript(home, projectRoot string) []byte {
 	s := strings.NewReplacer(
 		"CODEX_HOME_VALUE", home,
