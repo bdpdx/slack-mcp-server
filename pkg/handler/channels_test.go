@@ -3,7 +3,7 @@ package handler
 import (
 	"testing"
 
-	"github.com/korotovsky/slack-mcp-server/pkg/provider"
+	"github.com/bdpdx/slack-mcp-server/pkg/provider"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

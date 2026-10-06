@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/korotovsky/slack-mcp-server/pkg/agentchat"
+	"github.com/bdpdx/slack-mcp-server/pkg/agentchat"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

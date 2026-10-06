@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/korotovsky/slack-mcp-server/pkg/provider"
-	"github.com/korotovsky/slack-mcp-server/pkg/toolconfig"
+	"github.com/bdpdx/slack-mcp-server/pkg/provider"
+	"github.com/bdpdx/slack-mcp-server/pkg/toolconfig"
 	"go.uber.org/zap"
 )
 

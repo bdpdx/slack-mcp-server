@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/korotovsky/slack-mcp-server/pkg/version"
+	"github.com/bdpdx/slack-mcp-server/pkg/version"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"

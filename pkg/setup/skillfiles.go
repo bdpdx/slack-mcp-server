@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/korotovsky/slack-mcp-server/skills"
+	"github.com/bdpdx/slack-mcp-server/skills"
 )
 
 // InstallSkill writes the slack-agent-chat skill files for kind into home,

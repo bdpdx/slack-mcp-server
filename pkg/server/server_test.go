@@ -7,7 +7,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/korotovsky/slack-mcp-server/pkg/toolconfig"
+	"github.com/bdpdx/slack-mcp-server/pkg/toolconfig"
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/korotovsky/slack-mcp-server/pkg/toolconfig"
+	"github.com/bdpdx/slack-mcp-server/pkg/toolconfig"
 	"github.com/slack-go/slack"
 	"go.uber.org/zap"
 	"golang.org/x/net/publicsuffix"

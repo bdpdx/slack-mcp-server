@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/korotovsky/slack-mcp-server/pkg/server/auth"
-	"github.com/korotovsky/slack-mcp-server/pkg/toolconfig"
+	"github.com/bdpdx/slack-mcp-server/pkg/server/auth"
+	"github.com/bdpdx/slack-mcp-server/pkg/toolconfig"
 	"go.uber.org/zap"
 )
 

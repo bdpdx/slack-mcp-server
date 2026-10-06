@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bdpdx/slack-mcp-server/pkg/toolconfig"
 	"github.com/joho/godotenv"
-	"github.com/korotovsky/slack-mcp-server/pkg/toolconfig"
 )
 
 // DefaultOnTools are enabled unless the user turns them off.

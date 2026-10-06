@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/korotovsky/slack-mcp-server/pkg/agentchat"
+	"github.com/bdpdx/slack-mcp-server/pkg/agentchat"
 )
 
 const (
