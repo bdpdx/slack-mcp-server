@@ -67,3 +67,17 @@ func TestNewHome(t *testing.T) {
 	assert.Equal(t, "/h/.codex/slack-agent-chat/listener.log", h.LogFile)
 	assert.Equal(t, "/h/.codex/app-server-control/app-server-control.sock", h.CodexSocket)
 }
+
+// The env file holds tokens and configures a long-lived process: it must be
+// private to this user and may set only SLACK_MCP_* settings.
+func TestLoadEnvFileRefusesUnsafeFiles(t *testing.T) {
+	dir := t.TempDir()
+	open := filepath.Join(dir, "open.env")
+	require.NoError(t, os.WriteFile(open, []byte("SLACK_MCP_XOXB_TOKEN=x\n"), 0o600))
+	require.NoError(t, os.Chmod(open, 0o644))
+	assert.ErrorContains(t, LoadEnvFile(open), "accessible to other users (mode 0644)")
+
+	other := filepath.Join(dir, "other.env")
+	require.NoError(t, os.WriteFile(other, []byte("SLACK_MCP_XOXB_TOKEN=x\nPATH=/tmp/evil\n"), 0o600))
+	assert.ErrorContains(t, LoadEnvFile(other), "sets PATH; only SLACK_MCP_* settings are allowed")
+}

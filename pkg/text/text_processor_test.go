@@ -1,6 +1,7 @@
 package text
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/slack-go/slack"
@@ -136,7 +137,7 @@ func TestBlocksToText(t *testing.T) {
 					},
 				},
 			},
-			want: "Click here",
+			want: "Click https://example.com - here",
 		},
 		{
 			name: "rich text link without display text falls back to URL",
@@ -580,6 +581,42 @@ func TestIsUnfurlingEnabled(t *testing.T) {
 			text: "YOLO mode, any link works http://anydomain.com",
 			want: true,
 		},
+		{
+			name: "enable for all - case-insensitive",
+			opt:  " ON ",
+			text: "http://anydomain.com",
+			want: true,
+		},
+		{
+			name: "explicit off",
+			opt:  "Off",
+			text: "http://example.com",
+			want: false,
+		},
+		{
+			name: "slack link syntax with disallowed target",
+			opt:  "example.com",
+			text: "see <https://bad.com|example.com>",
+			want: false,
+		},
+		{
+			name: "slack link syntax with allowed target",
+			opt:  "example.com",
+			text: "see <https://example.com/x|docs>",
+			want: true,
+		},
+		{
+			name: "userinfo trick resolves to real host",
+			opt:  "example.com",
+			text: "https://example.com@bad.com/path",
+			want: false,
+		},
+		{
+			name: "unparseable URL is not allowed",
+			opt:  "example.com",
+			text: "https://exa%zzmple.com/",
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -633,6 +670,16 @@ func TestProcessText_LinkNormalization(t *testing.T) {
 			name:     "Markdown link in middle",
 			input:    "Check this [Google](https://google.com) out",
 			expected: "Check this https://google.com - Google, out",
+		},
+		{
+			name:     "Slack-style link whose text repeats the URL",
+			input:    "see <https://google.com|https://google.com>",
+			expected: "see https://google.com",
+		},
+		{
+			name:     "Slack-style link whose text is a different URL shows the real target",
+			input:    "see <https://evil.example|https://google.com>",
+			expected: "see https://evil.example - https://google.com",
 		},
 		{
 			name:     "HTML anchor at end",
@@ -916,5 +963,58 @@ func TestFilesToTextProcessTextPipeline(t *testing.T) {
 				t.Errorf("ProcessText(FilesToText()) = %q, want %q\n  raw = %q", got, tt.want, raw)
 			}
 		})
+	}
+}
+
+func TestBlocksUnfurlAllowed(t *testing.T) {
+	blocks := []slack.Block{
+		slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn", "hello <https://bad.com|example.com>", false, false), nil, nil),
+	}
+	if BlocksUnfurlAllowed(blocks, "example.com", nil) {
+		t.Fatal("expected URL inside blocks to be checked against the allow-list")
+	}
+	allowed := []slack.Block{
+		slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn", "hello <https://example.com/a|docs>", false, false), nil, nil),
+		slack.NewImageBlock("https://example.com/i.png", "alt", "", nil),
+	}
+	if !BlocksUnfurlAllowed(allowed, "example.com", nil) {
+		t.Fatal("expected allowed URLs inside blocks to pass")
+	}
+	image := []slack.Block{slack.NewImageBlock("https://tracker.bad.com/i.png", "alt", "", nil)}
+	if BlocksUnfurlAllowed(image, "example.com", nil) {
+		t.Fatal("expected image URL inside blocks to be checked")
+	}
+	if !BlocksUnfurlAllowed(image, "true", nil) || !BlocksUnfurlAllowed(nil, "example.com", nil) {
+		t.Fatal("boolean settings and empty blocks defer to IsUnfurlingEnabled")
+	}
+}
+
+func TestStripUnsafeRunesInvisible(t *testing.T) {
+	in := "a\u202Eb\u2066c\u2069d\U000E0041\U000E007Fe\u2060f\u2064g\u180Eh\u200Bi\u200Dj"
+	got := stripUnsafeRunes(in)
+	want := "abcdefghi\u200Dj"
+	if got != want {
+		t.Fatalf("stripUnsafeRunes() = %q, want %q", got, want)
+	}
+}
+
+func TestSanitizeInline(t *testing.T) {
+	got := SanitizeInline("  Alice\n(CEO)\t\u202Eadmin\U000E0041  ")
+	if got != "Alice (CEO) admin" {
+		t.Fatalf("SanitizeInline() = %q", got)
+	}
+}
+
+func TestRichTextLinkShowsTarget(t *testing.T) {
+	blocks := slack.Blocks{BlockSet: []slack.Block{
+		&slack.RichTextBlock{Type: slack.MBTRichText, Elements: []slack.RichTextElement{
+			&slack.RichTextSection{Type: slack.RTESection, Elements: []slack.RichTextSectionElement{
+				&slack.RichTextSectionLinkElement{Type: slack.RTSELink, URL: "https://evil.example", Text: "https://bank.example"},
+			}},
+		}},
+	}}
+	got := BlocksToText(blocks)
+	if !strings.Contains(got, "https://evil.example") {
+		t.Fatalf("BlocksToText() = %q, real target hidden", got)
 	}
 }

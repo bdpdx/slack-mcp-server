@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -310,17 +311,80 @@ func TestRefreshOnErrorPattern(t *testing.T) {
 	})
 }
 
+// isolateUserCacheDir points os.UserCacheDir at a temp dir for the test.
+func isolateUserCacheDir(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	return home
+}
+
 // TestGetCacheDir verifies the cache directory is created correctly.
 func TestGetCacheDir(t *testing.T) {
-	dir := getCacheDir()
+	home := isolateUserCacheDir(t)
+
+	dir, err := getCacheDir()
+	require.NoError(t, err)
 
 	assert.NotEmpty(t, dir, "cache dir should not be empty")
 	assert.Contains(t, dir, "slack-mcp-server", "cache dir should contain app name")
+	assert.True(t, strings.HasPrefix(dir, home), "cache dir should live under the user cache dir")
 
 	// Directory should exist after getCacheDir() creates it
 	info, err := os.Stat(dir)
 	require.NoError(t, err, "cache directory should exist")
 	assert.True(t, info.IsDir(), "cache path should be a directory")
+	assert.Equal(t, os.FileMode(0700), info.Mode().Perm(), "cache dir should be owner-only")
+}
+
+// TestGetCacheDirTightensExistingPermissions verifies a pre-existing,
+// world-readable cache dir is chmodded to 0700.
+func TestGetCacheDirTightensExistingPermissions(t *testing.T) {
+	isolateUserCacheDir(t)
+	base, err := os.UserCacheDir()
+	require.NoError(t, err)
+	existing := filepath.Join(base, "slack-mcp-server")
+	require.NoError(t, os.MkdirAll(existing, 0755))
+	require.NoError(t, os.Chmod(existing, 0755))
+
+	dir, err := getCacheDir()
+	require.NoError(t, err)
+	info, err := os.Stat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0700), info.Mode().Perm())
+}
+
+// TestGetCacheDirNoWorkingDirFallback verifies that an unusable user cache
+// dir is an error rather than a silent fallback to ".".
+func TestGetCacheDirNoWorkingDirFallback(t *testing.T) {
+	isolateUserCacheDir(t)
+	base, err := os.UserCacheDir()
+	require.NoError(t, err)
+	// Make the parent a regular file so MkdirAll fails.
+	require.NoError(t, os.MkdirAll(filepath.Dir(base), 0700))
+	require.NoError(t, os.WriteFile(base, []byte("x"), 0600))
+
+	dir, err := getCacheDir()
+	assert.Error(t, err)
+	assert.Empty(t, dir)
+}
+
+// TestGetCachePathWithTeamIDValidation verifies team IDs are validated before
+// being used in a file name.
+func TestGetCachePathWithTeamIDValidation(t *testing.T) {
+	isolateUserCacheDir(t)
+
+	for _, good := range []string{"T0123ABCD", "E12345", "TAB"} {
+		path, err := getCachePathWithTeamID(good, "users_cache.json")
+		require.NoError(t, err, good)
+		assert.Equal(t, good+"_users_cache.json", filepath.Base(path))
+	}
+
+	for _, bad := range []string{"", "T", "T1", "../T123", "T123/../../x", "t123abc", "U123ABC", "T12 3", "T123\\x"} {
+		_, err := getCachePathWithTeamID(bad, "users_cache.json")
+		assert.Error(t, err, "team ID %q should be rejected", bad)
+	}
 }
 
 // TestDefaultCacheTTLIs24Hours verifies that the default cache TTL is 24 hours.

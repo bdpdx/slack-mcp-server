@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -11,8 +12,10 @@ import (
 	"time"
 
 	"github.com/korotovsky/slack-mcp-server/pkg/agentchat"
+	"github.com/korotovsky/slack-mcp-server/pkg/filesdir"
 	"github.com/korotovsky/slack-mcp-server/pkg/provider"
 	"github.com/korotovsky/slack-mcp-server/pkg/server"
+	"github.com/korotovsky/slack-mcp-server/pkg/toolconfig"
 	"github.com/mattn/go-isatty"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -32,8 +35,8 @@ func main() {
 	var envFile string
 	flag.StringVar(&transport, "t", "stdio", "Transport type (stdio, sse or http)")
 	flag.StringVar(&transport, "transport", "stdio", "Transport type (stdio, sse or http)")
-	flag.StringVar(&enabledToolsFlag, "e", "", "Comma-separated list of enabled tools (empty = all tools)")
-	flag.StringVar(&enabledToolsFlag, "enabled-tools", "", "Comma-separated list of enabled tools (empty = all tools)")
+	flag.StringVar(&enabledToolsFlag, "e", "", "Comma-separated list of enabled tools (empty = every read tool, plus write tools enabled by their SLACK_MCP_*_TOOL settings)")
+	flag.StringVar(&enabledToolsFlag, "enabled-tools", "", "Comma-separated list of enabled tools (empty = every read tool, plus write tools enabled by their SLACK_MCP_*_TOOL settings)")
 	flag.BoolVar(&noCache, "no-cache", false, "Skip user/channel cache loading on startup for faster initialization. Lookups by #channel-name or @username will not work; use channel/user IDs instead.")
 	flag.StringVar(&envFile, "env-file", "", "Path to the slack-mcp-server.env file (default: detected from the Codex or Claude Code session)")
 	flag.Usage = func() {
@@ -72,23 +75,6 @@ func main() {
 	}
 	defer logger.Sync()
 
-	addMessageToolEnv := os.Getenv("SLACK_MCP_ADD_MESSAGE_TOOL")
-	err = validateToolConfig(addMessageToolEnv)
-	if err != nil {
-		logger.Fatal("error in SLACK_MCP_ADD_MESSAGE_TOOL",
-			zap.String("context", "console"),
-			zap.Error(err),
-		)
-	}
-
-	err = validateToolConfig(os.Getenv("SLACK_MCP_UPLOAD_FILE_TOOL"))
-	if err != nil {
-		logger.Fatal("error in SLACK_MCP_UPLOAD_FILE_TOOL",
-			zap.String("context", "console"),
-			zap.Error(err),
-		)
-	}
-
 	err = server.ValidateEnabledTools(enabledTools)
 	if err != nil {
 		logger.Fatal("error in SLACK_MCP_ENABLED_TOOLS",
@@ -97,8 +83,63 @@ func main() {
 		)
 	}
 
+	toolCfg, err := toolconfig.Load(enabledTools, os.Getenv)
+	if err != nil {
+		logger.Fatal("invalid tool configuration",
+			zap.String("context", "console"),
+			zap.Error(err),
+		)
+	}
+
+	// The one folder files move through between Slack and this machine.
+	// Without it the server still runs; saving downloads and uploading from
+	// a path are unavailable.
+	filesDir, err := filesdir.Path(os.Getenv)
+	if err == nil {
+		err = filesdir.Ensure(filesDir)
+	}
+	if err != nil {
+		logger.Warn("files folder unavailable; attachment saving and path uploads are disabled",
+			zap.String("context", "console"),
+			zap.Error(err),
+		)
+	} else {
+		toolCfg.FilesDir = filesDir
+	}
+
+	// Validate the network transport before contacting Slack: sse/http
+	// refuse to start without an API key unless explicitly allowed on a
+	// loopback address.
+	var host, port string
+	var httpSecurity *server.HTTPSecurity
+	switch transport {
+	case "stdio":
+	case "sse", "http":
+		host = os.Getenv("SLACK_MCP_HOST")
+		if host == "" {
+			host = defaultSseHost
+		}
+		port = os.Getenv("SLACK_MCP_PORT")
+		if port == "" {
+			port = strconv.Itoa(defaultSsePort)
+		}
+		httpSecurity, err = server.NewHTTPSecurity(host, port, os.Getenv, logger)
+		if err != nil {
+			logger.Fatal("Insecure transport configuration",
+				zap.String("context", "console"),
+				zap.Error(err),
+			)
+		}
+	default:
+		logger.Fatal("Invalid transport type",
+			zap.String("context", "console"),
+			zap.String("transport", transport),
+			zap.String("allowed", "stdio, sse, http"),
+		)
+	}
+
 	p := provider.New(transport, logger)
-	s := server.NewMCPServer(p, logger, enabledTools)
+	s := server.NewMCPServer(p, logger, toolCfg)
 
 	if noCache {
 		p.SkipCache()
@@ -131,19 +172,15 @@ func main() {
 				zap.Error(err),
 			)
 		}
-	case "sse":
-		host := os.Getenv("SLACK_MCP_HOST")
-		if host == "" {
-			host = defaultSseHost
+	case "sse", "http":
+		endpoint := net.JoinHostPort(host, port)
+		if transport == "sse" {
+			endpoint += "/sse"
+		} else {
+			endpoint += "/mcp"
 		}
-		port := os.Getenv("SLACK_MCP_PORT")
-		if port == "" {
-			port = strconv.Itoa(defaultSsePort)
-		}
-
-		sseServer := s.ServeSSE(":" + port)
 		logger.Info(
-			fmt.Sprintf("SSE server listening on %s", fmt.Sprintf("%s:%s/sse", host, port)),
+			fmt.Sprintf("%s server listening on %s", strings.ToUpper(transport), endpoint),
 			zap.String("context", "console"),
 			zap.String("host", host),
 			zap.String("port", port),
@@ -155,37 +192,13 @@ func main() {
 			)
 		}
 
-		if err := sseServer.Start(host + ":" + port); err != nil {
-			logger.Fatal("Server error",
-				zap.String("context", "console"),
-				zap.Error(err),
-			)
+		var err error
+		if transport == "sse" {
+			err = s.ListenAndServeSSE(host, port, httpSecurity)
+		} else {
+			err = s.ListenAndServeHTTP(host, port, httpSecurity)
 		}
-	case "http":
-		host := os.Getenv("SLACK_MCP_HOST")
-		if host == "" {
-			host = defaultSseHost
-		}
-		port := os.Getenv("SLACK_MCP_PORT")
-		if port == "" {
-			port = strconv.Itoa(defaultSsePort)
-		}
-
-		httpServer := s.ServeHTTP(":" + port)
-		logger.Info(
-			fmt.Sprintf("HTTP server listening on %s", fmt.Sprintf("%s:%s", host, port)),
-			zap.String("context", "console"),
-			zap.String("host", host),
-			zap.String("port", port),
-		)
-
-		if ready, _ := p.IsReady(); !ready {
-			logger.Info("Slack MCP Server is still warming up caches",
-				zap.String("context", "console"),
-			)
-		}
-
-		if err := httpServer.Start(host + ":" + port); err != nil {
+		if err != nil {
 			logger.Fatal("Server error",
 				zap.String("context", "console"),
 				zap.Error(err),
@@ -205,30 +218,8 @@ func newUsersWatcher(p *provider.ApiProvider, once *sync.Once, logger *zap.Logge
 		logger.Info("Caching users collection...",
 			zap.String("context", "console"),
 		)
-
-		if os.Getenv("SLACK_MCP_XOXP_TOKEN") == "demo" || (os.Getenv("SLACK_MCP_XOXC_TOKEN") == "demo" && os.Getenv("SLACK_MCP_XOXD_TOKEN") == "demo") {
-			logger.Info("Demo credentials are set, skip",
-				zap.String("context", "console"),
-			)
-			return
-		}
-
-		err := p.RefreshUsers(context.Background())
-		if err != nil {
-			logger.Fatal("Error booting provider",
-				zap.String("context", "console"),
-				zap.Error(err),
-			)
-		}
-
-		ready, _ := p.IsReady()
-		if ready {
-			once.Do(func() {
-				logger.Info("Slack MCP Server is fully ready",
-					zap.String("context", "console"),
-				)
-			})
-		}
+		refreshWithRetry("users", p.RefreshUsers, logger)
+		announceReady(p, once, logger)
 	}
 }
 
@@ -237,66 +228,54 @@ func newChannelsWatcher(p *provider.ApiProvider, once *sync.Once, logger *zap.Lo
 		logger.Info("Caching channels collection...",
 			zap.String("context", "console"),
 		)
-
-		if os.Getenv("SLACK_MCP_XOXP_TOKEN") == "demo" || (os.Getenv("SLACK_MCP_XOXC_TOKEN") == "demo" && os.Getenv("SLACK_MCP_XOXD_TOKEN") == "demo") {
-			logger.Info("Demo credentials are set, skip.",
-				zap.String("context", "console"),
-			)
-			return
-		}
-
-		err := p.RefreshChannels(context.Background())
-		if err != nil {
-			logger.Fatal("Error booting provider",
-				zap.String("context", "console"),
-				zap.Error(err),
-			)
-		}
-
-		ready, _ := p.IsReady()
-		if ready {
-			once.Do(func() {
-				logger.Info("Slack MCP Server is fully ready.",
-					zap.String("context", "console"),
-				)
-			})
-		}
+		refreshWithRetry("channels", p.RefreshChannels, logger)
+		announceReady(p, once, logger)
 	}
 }
 
-func validateToolConfig(config string) error {
-	if config == "" || config == "true" || config == "1" {
-		return nil
+func announceReady(p *provider.ApiProvider, once *sync.Once, logger *zap.Logger) {
+	if ready, _ := p.IsReady(); ready {
+		once.Do(func() {
+			logger.Info("Slack MCP Server is fully ready",
+				zap.String("context", "console"),
+			)
+		})
 	}
+}
 
-	items := strings.Split(config, ",")
-	hasNegated := false
-	hasPositive := false
+var (
+	cacheRetryInitialDelay = 5 * time.Second
+	cacheRetryMaxDelay     = 5 * time.Minute
+)
 
-	for _, item := range items {
-		item = strings.TrimSpace(item)
-		if item == "" {
-			continue
+// refreshWithRetry runs a cache refresh until it succeeds, logging failures
+// and backing off exponentially. It runs in a background goroutine, so it
+// must never exit the process.
+func refreshWithRetry(name string, refresh func(context.Context) error, logger *zap.Logger) {
+	delay := cacheRetryInitialDelay
+	for attempt := 1; ; attempt++ {
+		err := refresh(context.Background())
+		if err == nil {
+			return
 		}
-		if strings.HasPrefix(item, "!") {
-			hasNegated = true
-		} else {
-			hasPositive = true
-		}
+		logger.Error("Failed to load Slack cache, will retry",
+			zap.String("context", "console"),
+			zap.String("cache", name),
+			zap.Int("attempt", attempt),
+			zap.Duration("retry_in", delay),
+			zap.Error(err),
+		)
+		time.Sleep(delay)
+		delay = min(delay*2, cacheRetryMaxDelay)
 	}
-
-	if hasNegated && hasPositive {
-		return fmt.Errorf("cannot mix allowed and disallowed (! prefixed) channels")
-	}
-
-	return nil
 }
 
 func newLogger(transport string) (*zap.Logger, error) {
 	atomicLevel := zap.NewAtomicLevelAt(zap.InfoLevel)
 	if envLevel := os.Getenv("SLACK_MCP_LOG_LEVEL"); envLevel != "" {
 		if err := atomicLevel.UnmarshalText([]byte(envLevel)); err != nil {
-			fmt.Printf("Invalid log level '%s': %v, using 'info'\n", envLevel, err)
+			// stdout carries the JSON-RPC stream on stdio; never write to it.
+			fmt.Fprintf(os.Stderr, "Invalid log level '%s': %v, using 'info'\n", envLevel, err)
 		}
 	}
 

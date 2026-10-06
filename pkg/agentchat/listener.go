@@ -2,6 +2,7 @@ package agentchat
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -20,19 +21,27 @@ const (
 	reactionDelivered = "eyes"
 	reactionAcked     = "white_check_mark"
 	repeatWindow      = 10 * time.Minute
-	memberRefresh     = 5 * time.Minute
 	relayExpiry       = 2 * time.Minute
+	// autoBacklog is what a session gets from a channel it starts watching
+	// because its bot was added, so it sees what was posted before.
+	autoBacklog = 20
 )
 
 // SlackAPI is the part of *slack.Client the listener uses.
 type SlackAPI interface {
 	AuthTestContext(ctx context.Context) (*slack.AuthTestResponse, error)
 	GetUserInfoContext(ctx context.Context, user string) (*slack.User, error)
-	GetUsersInConversationContext(ctx context.Context, params *slack.GetUsersInConversationParameters) ([]string, string, error)
 	GetConversationInfoContext(ctx context.Context, input *slack.GetConversationInfoInput) (*slack.Channel, error)
 	GetConversationHistoryContext(ctx context.Context, params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error)
 	GetConversationRepliesContext(ctx context.Context, params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error)
 	AddReactionContext(ctx context.Context, name string, item slack.ItemRef) error
+}
+
+// UserAPI is the part of the owner's *slack.Client (user token) the listener
+// uses to keep the project's people-only channel up to date.
+type UserAPI interface {
+	GetConversationsForUserContext(ctx context.Context, params *slack.GetConversationsForUserParameters) ([]slack.Channel, string, error)
+	InviteUsersToConversationContext(ctx context.Context, channelID string, users ...string) (*slack.Channel, error)
 }
 
 // Listener routes one home's Slack messages into its subscribed sessions.
@@ -47,16 +56,18 @@ type Listener struct {
 	// Async hands each session's deliveries to its own worker so a slow
 	// session never holds up the caller. The daemon enables it.
 	Async bool
+	// Users acts as the owner; nil leaves <project>__users alone.
+	Users UserAPI
 
-	mu       sync.Mutex
-	state    *State
-	repeats  *RepeatFilter
-	users    map[string]*slack.User
-	loadedAt map[string]time.Time
-	chNames  map[string]string
-	relays   map[string]time.Time      // expected %agents echoes: session|channel|text → expiry
-	sessLock map[string]*sync.Mutex    // serializes deliveries per session
-	queues   map[string]chan []pending // per-session delivery queues (Async)
+	mu        sync.Mutex
+	state     *State
+	repeats   *RepeatFilter
+	users     map[string]*slack.User
+	chNames   map[string]string
+	relays    map[string]time.Time      // expected %agents echoes: session|channel|text → expiry
+	sessLock  map[string]*sync.Mutex    // serializes deliveries per session
+	queues    map[string]chan []pending // per-session delivery queues (Async)
+	approvals map[string]*approval      // approval-hook requests by approval ID
 }
 
 // queueDepth bounds each session's pending deliveries. Overflow is dropped;
@@ -77,8 +88,9 @@ func NewListener(api SlackAPI, d Deliverer, self Identity, ownerID, stateFile st
 	l := &Listener{
 		API: api, Deliverer: d, Self: self, OwnerID: ownerID, StateFile: stateFile,
 		Now: time.Now, Log: log, state: st,
-		users: map[string]*slack.User{}, loadedAt: map[string]time.Time{}, chNames: map[string]string{},
+		users: map[string]*slack.User{}, chNames: map[string]string{},
 		relays: map[string]time.Time{}, sessLock: map[string]*sync.Mutex{}, queues: map[string]chan []pending{},
+		approvals: map[string]*approval{},
 	}
 	l.repeats = NewRepeatFilter(repeatWindow, func() time.Time { return l.Now() })
 	return l, nil
@@ -113,63 +125,10 @@ func (l *Listener) isAgent(ctx context.Context, id string) bool {
 }
 
 func (l *Listener) name(ctx context.Context, id string) string {
-	u := l.user(ctx, id)
-	switch {
-	case u == nil:
-		return ""
-	case u.Profile.DisplayName != "":
-		return u.Profile.DisplayName
-	case u.RealName != "":
-		// What Slack shows for users (and bots) without a display name.
-		return u.RealName
+	if u := l.user(ctx, id); u != nil {
+		return shownName(u)
 	}
-	return u.Name
-}
-
-// loadMembers caches the channel's members so plain @names resolve.
-func (l *Listener) loadMembers(ctx context.Context, channel string) {
-	l.mu.Lock()
-	at, loaded := l.loadedAt[channel]
-	fresh := loaded && l.Now().Sub(at) < memberRefresh
-	l.mu.Unlock()
-	if fresh {
-		return
-	}
-	cursor := ""
-	for {
-		ids, next, err := l.API.GetUsersInConversationContext(ctx, &slack.GetUsersInConversationParameters{ChannelID: channel, Cursor: cursor, Limit: 200})
-		if err != nil {
-			l.Log.Warn("conversations.members failed", zap.String("channel", channel), zap.Error(err))
-			return
-		}
-		for _, id := range ids {
-			l.user(ctx, id)
-		}
-		if next == "" {
-			break
-		}
-		cursor = next
-	}
-	l.mu.Lock()
-	l.loadedAt[channel] = l.Now()
-	l.mu.Unlock()
-}
-
-// resolve maps a plain @name to a known user, preferring an agent when an
-// agent and a person share the name.
-func (l *Listener) resolve(name string) string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	person := ""
-	for id, u := range l.users {
-		if strings.EqualFold(u.Name, name) || strings.EqualFold(u.Profile.DisplayName, name) || strings.EqualFold(u.RealName, name) {
-			if u.IsBot {
-				return id
-			}
-			person = id
-		}
-	}
-	return person
+	return ""
 }
 
 func (l *Listener) channelName(ctx context.Context, channel string) string {
@@ -191,13 +150,9 @@ func (l *Listener) channelName(ctx context.Context, channel string) string {
 
 // --- routing and delivery ---
 
-// prepare applies the routing rule and builds m's notice.
-func (l *Listener) prepare(ctx context.Context, m Message) (Notice, bool) {
-	l.loadMembers(ctx, m.Channel)
-	mentions, addressed := LeadingMentions(m.Text, l.resolve)
-	if !ShouldDeliver(m, l.Self, addressed, mentions) {
-		return Notice{}, false
-	}
+// notice builds m's notice. Every agent watching the channel gets every
+// message except its own, as a person in the channel would see it.
+func (l *Listener) notice(ctx context.Context, m Message) Notice {
 	sender := l.name(ctx, m.User)
 	if sender == "" {
 		sender = "bot " + m.BotID
@@ -211,12 +166,20 @@ func (l *Listener) prepare(ctx context.Context, m Message) (Notice, bool) {
 		ThreadTS:    m.ThreadTS,
 		Text:        RenderMentions(m.Text, func(id string) string { return l.name(ctx, id) }),
 		Files:       m.Files,
-	}, true
+	}
 }
 
 // HandleMessage routes one live message to every subscribed session.
 func (l *Listener) HandleMessage(ctx context.Context, m Message) {
+	if m.SubType == "channel_archive" || m.SubType == "group_archive" {
+		l.dropChannel(m.Channel)
+		return
+	}
 	if !m.Deliverable() || m.From(l.Self) {
+		return
+	}
+	if l.approvalReply(m) {
+		l.markConsumed(m)
 		return
 	}
 	l.mu.Lock()
@@ -229,16 +192,82 @@ func (l *Listener) HandleMessage(ctx context.Context, m Message) {
 		l.Log.Info("dropped repeated agent message", zap.String("channel", m.Channel), zap.String("ts", m.TS), zap.String("user", m.User))
 		return
 	}
-	n, ok := l.prepare(ctx, m)
-	if !ok {
-		return
-	}
+	n := l.notice(ctx, m)
 	for _, sub := range watchers {
 		if m.User != "" && m.User == l.OwnerID && l.consumeRelay(sub.SessionID, m) {
 			continue
 		}
 		l.dispatch(ctx, sub, []pending{{m, n}})
 	}
+}
+
+// HandleMemberJoined reacts to someone joining a channel this bot is in. When
+// the bot itself is added to a channel derived from a project its sessions
+// watch (a side channel another agent opened), those sessions start watching
+// it. When a person joins a watched project channel, the owner adds them to
+// <project>__users.
+func (l *Listener) HandleMemberJoined(ctx context.Context, channel, user string) {
+	if user == l.Self.UserID {
+		l.autoWatch(ctx, channel)
+		return
+	}
+	if !l.isAgent(ctx, user) {
+		l.addToUsersChannel(ctx, channel, user)
+	}
+}
+
+func (l *Listener) autoWatch(ctx context.Context, channel string) {
+	project, derived := ProjectOf(l.channelName(ctx, channel))
+	if !derived {
+		return
+	}
+	l.mu.Lock()
+	var subs []Subscription
+	for _, sub := range l.state.Subscriptions {
+		if !sub.Watches(channel) {
+			cp := *sub
+			cp.Channels = slices.Clone(sub.Channels) // Unsubscribe edits the stored slice in place
+			subs = append(subs, cp)
+		}
+	}
+	l.mu.Unlock()
+	for _, sub := range subs {
+		if !slices.ContainsFunc(sub.Channels, func(ch string) bool { return l.channelName(ctx, ch) == project }) {
+			continue
+		}
+		sub.Channels = []string{channel}
+		merged, first, err := l.register(&sub)
+		if err != nil {
+			l.Log.Warn("auto-watch failed", zap.String("session", sub.SessionID), zap.String("channel", channel), zap.Error(err))
+			continue
+		}
+		l.Log.Info("auto-watching", zap.String("session", sub.SessionID), zap.String("channel", channel))
+		l.recover(ctx, merged, sub.Channels, first, autoBacklog)
+	}
+}
+
+func (l *Listener) addToUsersChannel(ctx context.Context, channel, user string) {
+	if l.Users == nil {
+		return
+	}
+	l.mu.Lock()
+	watched := len(l.state.Watchers(channel)) > 0
+	l.mu.Unlock()
+	name := l.channelName(ctx, channel)
+	if _, derived := ProjectOf(name); !watched || derived {
+		return
+	}
+	target := UsersChannelName(name)
+	id, err := findChannel(ctx, l.Users, target)
+	if err != nil {
+		l.Log.Info("not adding to people channel", zap.String("channel", target), zap.String("user", user), zap.Error(err))
+		return
+	}
+	if err := inviteEach(ctx, l.Users, id, "", []string{user}); err != nil {
+		l.Log.Warn("adding to people channel failed", zap.String("channel", target), zap.String("user", user), zap.Error(err))
+		return
+	}
+	l.Log.Info("added to people channel", zap.String("channel", target), zap.String("user", user))
 }
 
 // dispatch delivers now, or with Async queues the delivery on the session's
@@ -458,9 +487,7 @@ func (l *Listener) recover(ctx context.Context, sub *Subscription, channels []st
 			if !m.Deliverable() || m.From(l.Self) {
 				continue
 			}
-			if n, ok := l.prepare(ctx, m); ok {
-				items = append(items, pending{m, n})
-			}
+			items = append(items, pending{m, l.notice(ctx, m)})
 		}
 	}
 	sort.SliceStable(items, func(i, j int) bool { return TSLess(items[i].msg.TS, items[j].msg.TS) })
@@ -498,11 +525,9 @@ func (l *Listener) routedBacklog(ctx context.Context, channel string, n int) ([]
 			if !m.Deliverable() || m.From(l.Self) {
 				continue
 			}
-			if notice, ok := l.prepare(ctx, m); ok {
-				found = append(found, pending{m, notice})
-				if len(found) == n {
-					break
-				}
+			found = append(found, pending{m, l.notice(ctx, m)})
+			if len(found) == n {
+				break
 			}
 		}
 		if !resp.HasMore || resp.ResponseMetaData.NextCursor == "" {
@@ -663,11 +688,230 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 		l.Skip(req.SessionID, req.Channel, req.TS)
 	case "expect":
 		l.ExpectRelay(req.SessionID, req.Channel, req.Text)
+	case "approval-watch":
+		l.WatchApproval(req.Approval, req.Channel, req.TS)
+	case "approval":
+		decision, reason := l.TakeApproval(req.Approval)
+		return ControlResponse{OK: true, Decision: decision, Text: reason}
 	case "status":
+		// Names save each hook a conversations.info call per channel.
+		sessions := l.Status()
+		for i := range sessions {
+			sessions[i].Names = map[string]string{}
+			for _, ch := range sessions[i].Channels {
+				if name := l.channelName(ctx, ch); name != "" && name != ch {
+					sessions[i].Names[ch] = name
+				}
+			}
+		}
+		return ControlResponse{OK: true, Sessions: sessions}
 	default:
 		return ControlResponse{Error: "unknown op " + req.Op}
 	}
 	return ControlResponse{OK: true, Sessions: l.Status()}
+}
+
+// approval is one approval-hook request the listener answers for.
+type approval struct {
+	channel, ts      string // the request message, once the hook registers it
+	decision, reason string // "" until answered
+	hint             bool   // the owner typed an allow word, which cannot approve
+	early            *click // a click that arrived before the hook registered
+	at               time.Time
+}
+
+// click is an owner's button click on a message posted by this bot.
+type click struct {
+	channel, ts, decision string
+}
+
+// approvalEntry returns the request with id, creating it, and forgets
+// requests older than an hour. Call with l.mu held.
+func (l *Listener) approvalEntry(id string) *approval {
+	for k, a := range l.approvals {
+		if l.Now().Sub(a.at) > time.Hour {
+			delete(l.approvals, k)
+		}
+	}
+	a := l.approvals[id]
+	if a == nil {
+		a = &approval{at: l.Now()}
+		l.approvals[id] = a
+	}
+	return a
+}
+
+// WatchApproval registers the message approval-hook posted for request id,
+// so replies in its thread are read as answers instead of delivered.
+func (l *Listener) WatchApproval(id, channel, ts string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	a := l.approvalEntry(id)
+	a.channel, a.ts = channel, ts
+	if c := a.early; c != nil && a.decision == "" && c.channel == channel && c.ts == ts {
+		a.decision = c.decision
+	}
+	a.early = nil
+}
+
+// HandleInteraction records a click on an approval button. Slack vouches
+// for who clicked, so a click is the only way to allow: agents can post as
+// the owner, but cannot click as them. A click counts only when the owner
+// made it, on the message this bot posted for that approval, with a known
+// decision; the first such click wins.
+func (l *Listener) HandleInteraction(payload []byte) {
+	var in struct {
+		Type string `json:"type"`
+		User struct {
+			ID string `json:"id"`
+		} `json:"user"`
+		Container struct {
+			ChannelID string `json:"channel_id"`
+			MessageTS string `json:"message_ts"`
+		} `json:"container"`
+		Message struct {
+			BotID string `json:"bot_id"`
+		} `json:"message"`
+		Actions []struct {
+			ActionID string `json:"action_id"`
+			Value    string `json:"value"`
+		} `json:"actions"`
+	}
+	if json.Unmarshal(payload, &in) != nil || in.Type != "block_actions" {
+		return
+	}
+	for _, act := range in.Actions {
+		decision, ok := strings.CutPrefix(act.ActionID, approvalActionPrefix)
+		if !ok || act.Value == "" {
+			continue
+		}
+		switch {
+		case in.User.ID != l.OwnerID:
+			l.Log.Warn("ignoring approval click from someone other than the owner", zap.String("user", in.User.ID), zap.String("approval", act.Value))
+			continue
+		case in.Message.BotID != l.Self.BotID:
+			l.Log.Warn("ignoring approval click on a message this bot did not post", zap.String("bot", in.Message.BotID), zap.String("approval", act.Value))
+			continue
+		case decision != decisionAllow && decision != decisionDeny && decision != decisionTerminal:
+			l.Log.Warn("ignoring approval click with an unknown decision", zap.String("decision", decision))
+			continue
+		}
+		c := click{in.Container.ChannelID, in.Container.MessageTS, decision}
+		l.mu.Lock()
+		a := l.approvalEntry(act.Value)
+		switch {
+		case a.decision != "":
+		case a.channel == "":
+			if a.early == nil {
+				a.early = &c // checked when the hook registers its message
+			}
+		case a.channel == c.channel && a.ts == c.ts:
+			a.decision = decision
+		default:
+			l.Log.Warn("ignoring approval click on a different message", zap.String("approval", act.Value), zap.String("channel", c.channel), zap.String("ts", c.ts))
+		}
+		l.mu.Unlock()
+		l.Log.Info("approval clicked", zap.String("approval", act.Value), zap.String("decision", decision))
+	}
+}
+
+// approvalReply consumes the owner's answer to a waiting approval request,
+// so it is never also delivered as a notice:
+//   - any reply in the request's thread (from anyone; only the owner's first
+//     one that denies or picks the terminal answers it);
+//   - a message in the channel itself, from the owner, that opens with a deny
+//     word, "terminal" or an allow word, while a request there is unanswered
+//     (the newest one, if several). Other messages are delivered as usual.
+//
+// A reply never allows: anything posting with the owner's token, an agent
+// included, could have written it. An allow word earns a hint to click.
+func (l *Listener) approvalReply(m Message) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var target *approval
+	explicit := true
+	decision, reason := "", ""
+	if m.ThreadTS != "" {
+		for _, a := range l.approvals {
+			if a.channel == m.Channel && a.ts == m.ThreadTS {
+				target = a
+				break
+			}
+		}
+		if target == nil {
+			return false
+		}
+		decision, reason = ParseApprovalReply(m.Text)
+	} else {
+		if m.User != l.OwnerID {
+			return false
+		}
+		for _, a := range l.approvals {
+			if a.channel == m.Channel && a.decision == "" && (target == nil || TSLess(target.ts, a.ts)) {
+				target = a
+			}
+		}
+		if target == nil {
+			return false
+		}
+		if decision, reason, explicit = classifyApprovalReply(m.Text); !explicit {
+			return false
+		}
+	}
+	if m.User == l.OwnerID && target.decision == "" && explicit {
+		if decision == decisionAllow {
+			target.hint = true
+		} else {
+			target.decision, target.reason = decision, reason
+		}
+	}
+	return true
+}
+
+// dropChannel stops every session watching an archived channel.
+func (l *Listener) dropChannel(channel string) {
+	l.mu.Lock()
+	watchers := l.state.Watchers(channel)
+	l.mu.Unlock()
+	for _, sub := range watchers {
+		l.Log.Info("channel archived; unwatching", zap.String("session", sub.SessionID), zap.String("channel", channel))
+		l.Unsubscribe(sub.SessionID, channel)
+	}
+}
+
+// markConsumed records m as delivered to every session watching its
+// channel, so recovery after a listener restart never pushes an approval
+// answer the listener kept out of the sessions.
+func (l *Listener) markConsumed(m Message) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, sub := range l.state.Watchers(m.Channel) {
+		l.state.MarkDelivered(sub.SessionID, m.Channel, m.TS, l.Now())
+	}
+	if err := l.state.Save(l.StateFile); err != nil {
+		l.Log.Error("saving state failed", zap.Error(err))
+	}
+}
+
+// TakeApproval returns request id's answer for the waiting hook: a decision
+// with its reason, decisionHint once after the owner typed an allow word, or
+// "" while unanswered.
+func (l *Listener) TakeApproval(id string) (decision, reason string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	a := l.approvals[id]
+	switch {
+	case a == nil || a.decision == decisionTaken:
+		return "", ""
+	case a.decision != "":
+		decision, reason = a.decision, a.reason
+		a.decision = decisionTaken // keep the entry so later replies stay out of the session
+		return decision, reason
+	case a.hint:
+		a.hint = false
+		return decisionHint, ""
+	}
+	return "", ""
 }
 
 // RecoverAll catches every restored session up on messages that arrived while

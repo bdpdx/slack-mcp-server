@@ -19,7 +19,6 @@ import (
 type fakeSlack struct {
 	mu        sync.Mutex
 	users     map[string]*slack.User
-	members   map[string][]string
 	names     map[string]string
 	history   map[string][]slack.Message
 	replies   map[string][]slack.Message // key channel|thread_ts
@@ -36,7 +35,6 @@ func newFakeSlack() *fakeSlack {
 			"UCL": u("UCL", "claude", true), "UCB": u("UCB", "codex-b", true),
 			"UCR": u("UCR", "codex-r", true), "UBR": u("UBR", "brian", false),
 		},
-		members: map[string][]string{"C1": {"UCL", "UCB", "UCR", "UBR"}},
 		names:   map[string]string{"C1": "proj"},
 		history: map[string][]slack.Message{},
 		replies: map[string][]slack.Message{},
@@ -51,9 +49,6 @@ func (f *fakeSlack) GetUserInfoContext(_ context.Context, id string) (*slack.Use
 		return u, nil
 	}
 	return nil, errors.New("user_not_found")
-}
-func (f *fakeSlack) GetUsersInConversationContext(_ context.Context, p *slack.GetUsersInConversationParameters) ([]string, string, error) {
-	return f.members[p.ChannelID], "", nil
 }
 func (f *fakeSlack) GetConversationInfoContext(_ context.Context, in *slack.GetConversationInfoInput) (*slack.Channel, error) {
 	ch := &slack.Channel{}
@@ -138,32 +133,28 @@ func msg(ts, user, text string) slack.Message {
 	return m
 }
 
-func TestListenerBroadcastDelivered(t *testing.T) {
+// Every agent sees every message, wherever in it an @mention falls.
+func TestListenerDeliversEveryMessage(t *testing.T) {
 	api, d := newFakeSlack(), &fakeDeliverer{}
 	l := newTestListener(t, api, d)
 	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
 
-	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.000001", User: "UCB", Text: "<@UCR> just hi"})
-	require.Len(t, d.got, 0, "opens with codex-r only")
-	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.000003", User: "UCB", Text: "@nobody-known just hi"})
-	require.Len(t, d.got, 0, "opens with an unknown name")
-
-	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.000002", User: "UBR", Text: "status please; <@UCR> rerun the tests"})
-	require.Len(t, d.got, 1, "a later mention does not narrow delivery")
-	assert.Contains(t, d.got[0].text, "#proj (C1) from brian (the console user")
-	assert.Contains(t, d.got[0].text, "@codex-r rerun the tests")
-	assert.Equal(t, clientMessageID("s1", "C1", "2001.000002"), d.got[0].clientID)
-	assert.Contains(t, api.reactions, "eyes|C1|2001.000002")
-}
-
-func TestListenerPlainNameMention(t *testing.T) {
-	api, d := newFakeSlack(), &fakeDeliverer{}
-	l := newTestListener(t, api, d)
-	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
-	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.1", User: "UCB", Text: "@claude please review"})
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.000001", User: "UBR", Text: "status please; <@UCR> rerun the tests"})
 	require.Len(t, d.got, 1)
-	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.2", User: "UCB", Text: "@codex-r please review"})
-	assert.Len(t, d.got, 1)
+	assert.Contains(t, d.got[0].text, "[slack-agent-chat] [console user] #proj (C1) from brian,")
+	assert.Contains(t, d.got[0].text, "@codex-r rerun the tests")
+	assert.Equal(t, clientMessageID("s1", "C1", "2001.000001"), d.got[0].clientID)
+	assert.Contains(t, api.reactions, "eyes|C1|2001.000001")
+
+	for i, text := range []string{
+		"<@UCR> just hi",
+		"@codex-b blah @codex-r blah",
+		"@nobody-known just hi",
+		"@brian done, tests pass",
+	} {
+		l.HandleMessage(context.Background(), Message{Channel: "C1", TS: fmt.Sprintf("2001.00001%d", i), User: "UCB", Text: text})
+	}
+	assert.Len(t, d.got, 5, "messages addressed to others still reach this agent")
 }
 
 // Bots usually have no display name; Slack shows their real name, so notices must too.
@@ -175,18 +166,6 @@ func TestListenerSenderNamePrefersRealNameOverUsername(t *testing.T) {
 	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.1", User: "UCB", Text: "hi"})
 	require.Len(t, d.got, 1)
 	assert.Contains(t, d.got[0].text, "from codex-b,")
-}
-
-// SAC-11: an agent's reply addressed only to a person must not wake other agents.
-func TestListenerReplyToPersonOnlyReachesNoAgents(t *testing.T) {
-	api, d := newFakeSlack(), &fakeDeliverer{}
-	l := newTestListener(t, api, d)
-	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
-	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.1", User: "UCB", Text: "@brian done, tests pass"})
-	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.2", User: "UCB", Text: "<@UBR> done"})
-	assert.Empty(t, d.got)
-	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.3", User: "UCB", Text: "@brian @claude FYI"})
-	assert.Len(t, d.got, 1, "a person plus this agent still reaches this agent")
 }
 
 func TestListenerIgnoresOwnAndEditsAndUnwatched(t *testing.T) {
@@ -374,22 +353,22 @@ func TestListenerBacklogOnFirstJoin(t *testing.T) {
 
 // SAC-8: --backlog N means N messages this agent would have received, not
 // the last N raw messages.
-func TestListenerBacklogCountsRoutedMessages(t *testing.T) {
+func TestListenerBacklogCountsDeliveredMessages(t *testing.T) {
 	api, d := newFakeSlack(), &fakeDeliverer{}
 	api.history["C1"] = []slack.Message{ // newest first
-		msg("1999.5", "UBR", "@codex-r a"),
-		msg("1999.4", "UBR", "@codex-r b"),
-		msg("1999.3", "UBR", "mine-one"),
-		msg("1999.2", "UBR", "@codex-r c"),
-		msg("1999.1", "UBR", "mine-two"),
+		msg("1999.4", "UCB", "one"),
+		msg("1999.3", "UCL", "mine-own"),
+		msg("1999.2", "UBR", "two"),
+		msg("1999.1", "UBR", "too-old"),
 	}
 	l := newTestListener(t, api, d)
 	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 2))
 	require.Len(t, d.got, 1)
 	assert.Contains(t, d.got[0].text, "2 pending messages")
-	assert.Contains(t, d.got[0].text, "mine-one")
-	assert.Contains(t, d.got[0].text, "mine-two")
-	assert.NotContains(t, d.got[0].text, "@codex-r")
+	assert.Contains(t, d.got[0].text, "one")
+	assert.Contains(t, d.got[0].text, "two")
+	assert.NotContains(t, d.got[0].text, "mine-own")
+	assert.NotContains(t, d.got[0].text, "too-old")
 }
 
 func TestListenerRecoveryOnRejoin(t *testing.T) {
@@ -500,4 +479,66 @@ func TestListenerSubscribeValidates(t *testing.T) {
 	assert.Error(t, l.Subscribe(context.Background(), &Subscription{SessionID: "x", Kind: KindCodex, Channels: []string{"C1"}}, 0))
 	assert.Error(t, l.Subscribe(context.Background(), &Subscription{SessionID: "x", Kind: KindClaude, Socket: "/s", Channels: []string{"C1"}}, 0))
 	assert.Error(t, l.Subscribe(context.Background(), &Subscription{SessionID: "x", Kind: KindClaude, Socket: "/s", Token: "t"}, 0))
+}
+
+// When another agent adds this bot to a side channel of a watched project,
+// the sessions watching that project start watching it and get its backlog.
+func TestListenerAutoWatchesDerivedChannels(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	api.names["C2"] = "proj__claude_codex-b"
+	api.names["C3"] = "other__claude_codex-b"
+	api.history["C2"] = []slack.Message{msg("2000.5", "UCB", "side hello")}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+	other := claudeSub("s2")
+	other.Channels = []string{"C9"}
+	require.NoError(t, l.Subscribe(context.Background(), other, 0))
+
+	l.HandleMemberJoined(context.Background(), "C2", "UCL")
+	l.HandleMemberJoined(context.Background(), "C3", "UCL")
+	l.HandleMemberJoined(context.Background(), "C2", "UCB") // another agent joining is not this bot
+
+	got := map[string][]string{}
+	for _, s := range l.Status() {
+		got[s.SessionID] = s.Channels
+	}
+	assert.Equal(t, []string{"C1", "C2"}, got["s1"])
+	assert.Equal(t, []string{"C9"}, got["s2"])
+	require.Len(t, d.got, 1)
+	assert.Contains(t, d.got[0].text, "side hello")
+}
+
+// A person joining a watched project channel is added to <project>__users
+// as the owner; agents and derived channels are left alone.
+func TestListenerAddsPeopleToUsersChannel(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	api.users["UMI"] = &slack.User{ID: "UMI", Name: "mike"}
+	api.names["C2"] = "proj__claude_codex-b"
+	l := newTestListener(t, api, d)
+	owner := newFakeMaker("UBR")
+	owner.existing["proj__users"] = "GUSERS"
+	owner.members["GUSERS"] = []string{"UBR"}
+	l.Users = owner
+	sub := claudeSub("s1")
+	sub.Channels = []string{"C1", "C2"}
+	require.NoError(t, l.Subscribe(context.Background(), sub, 0))
+
+	l.HandleMemberJoined(context.Background(), "C1", "UMI")
+	l.HandleMemberJoined(context.Background(), "C1", "UMI") // a second listener's event: already in
+	l.HandleMemberJoined(context.Background(), "C1", "UCB")
+	l.HandleMemberJoined(context.Background(), "C2", "UBR")
+	l.HandleMemberJoined(context.Background(), "C9", "UBR")
+	assert.Equal(t, []string{"UBR", "UMI"}, owner.members["GUSERS"])
+}
+
+func TestListenerStatusReportsChannelNames(t *testing.T) {
+	api := newFakeSlack()
+	api.names["C2"] = "proj__brian_claude"
+	l := newTestListener(t, api, &fakeDeliverer{})
+	sub := claudeSub("s1")
+	sub.Channels = []string{"C1", "C2", "C9"}
+	require.NoError(t, l.Subscribe(context.Background(), sub, 0))
+	resp := l.Control(context.Background(), ControlRequest{Op: "status"})
+	require.Len(t, resp.Sessions, 1)
+	assert.Equal(t, map[string]string{"C1": "proj", "C2": "proj__brian_claude"}, resp.Sessions[0].Names, "unknown names are left out")
 }

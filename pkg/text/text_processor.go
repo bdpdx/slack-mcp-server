@@ -1,7 +1,7 @@
 package text
 
 import (
-	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/korotovsky/slack-mcp-server/pkg/toolconfig"
 	"github.com/slack-go/slack"
 	"go.uber.org/zap"
 	"golang.org/x/net/publicsuffix"
@@ -204,10 +205,12 @@ func richTextSectionToText(section *slack.RichTextSection) string {
 				parts = append(parts, e.Text)
 			}
 		case *slack.RichTextSectionLinkElement:
-			if e.Text != "" {
+			// Always show the real target: display text alone could
+			// disguise where the link goes.
+			if e.URL != "" {
+				parts = append(parts, renderLink(e.URL, e.Text))
+			} else if e.Text != "" {
 				parts = append(parts, e.Text)
-			} else if e.URL != "" {
-				parts = append(parts, e.URL)
 			}
 		case *slack.RichTextSectionBroadcastElement:
 			if e.Range != "" {
@@ -240,16 +243,47 @@ func AttachmentsTo2CSV(msgText string, attachments []slack.Attachment) string {
 	return prefix + strings.Join(descriptions, ", ")
 }
 
-func IsUnfurlingEnabled(text string, opt string, logger *zap.Logger) bool {
-	if opt == "" || opt == "no" || opt == "false" || opt == "0" {
-		return false
-	}
+var (
+	// unfurlURLRegex stops at characters that delimit a URL in Slack mrkdwn
+	// (<url|text>) and in JSON-encoded blocks.
+	unfurlURLRegex    = regexp.MustCompile(`https?://[^\s<>|"\\]+`)
+	unfurlDomainRegex = regexp.MustCompile(`\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}\b`)
+)
 
-	if opt == "yes" || opt == "true" || opt == "1" {
+// IsUnfurlingEnabled reports whether link unfurling may be enabled for a
+// message. opt is SLACK_MCP_ADD_MESSAGE_UNFURLING: a boolean turns unfurling
+// off or on for every link; otherwise it is a comma-separated domain
+// allow-list and every URL and bare domain in text must be on it. A URL that
+// cannot be parsed is treated as not allowed.
+func IsUnfurlingEnabled(text string, opt string, logger *zap.Logger) bool {
+	if v, ok := toolconfig.ParseBool(opt); ok {
+		return v
+	}
+	return unfurlTextAllowed(text, parseUnfurlAllowList(opt), opt, logger)
+}
+
+// BlocksUnfurlAllowed applies the same domain allow-list to every URL that
+// appears anywhere in a message's Block Kit blocks (link elements, image and
+// button URLs, mrkdwn text). It returns true when there are no blocks or when
+// opt is a boolean, in which case IsUnfurlingEnabled alone decides.
+func BlocksUnfurlAllowed(blocks []slack.Block, opt string, logger *zap.Logger) bool {
+	if len(blocks) == 0 {
 		return true
 	}
+	if _, ok := toolconfig.ParseBool(opt); ok {
+		return true
+	}
+	raw, err := json.Marshal(blocks)
+	if err != nil {
+		return false
+	}
+	// Undo JSON's HTML escaping so < > & do not hide URL boundaries.
+	encoded := strings.NewReplacer(`\u003c`, "<", `\u003e`, ">", `\u0026`, "&").Replace(string(raw))
+	return unfurlTextAllowed(encoded, parseUnfurlAllowList(opt), opt, logger)
+}
 
-	allowed := make(map[string]struct{}, 0)
+func parseUnfurlAllowList(opt string) map[string]struct{} {
+	allowed := make(map[string]struct{})
 	for _, d := range strings.Split(opt, ",") {
 		d = strings.ToLower(strings.TrimSpace(d))
 		if d == "" {
@@ -257,36 +291,33 @@ func IsUnfurlingEnabled(text string, opt string, logger *zap.Logger) bool {
 		}
 		allowed[d] = struct{}{}
 	}
+	return allowed
+}
 
-	urlRe := regexp.MustCompile(`https?://[^\s]+`)
-	urls := urlRe.FindAllString(text, -1)
-	for _, rawURL := range urls {
+func unfurlTextAllowed(text string, allowed map[string]struct{}, opt string, logger *zap.Logger) bool {
+	deny := func(host string) bool {
+		if logger != nil {
+			logger.Warn("Security: attempt to unfurl non-whitelisted host",
+				zap.String("host", host),
+				zap.String("allowed", opt),
+			)
+		}
+		return false
+	}
+
+	for _, rawURL := range unfurlURLRegex.FindAllString(text, -1) {
 		u, err := url.Parse(rawURL)
-		if err != nil || u.Host == "" {
-			continue
+		if err != nil || u.Hostname() == "" {
+			return deny(rawURL)
 		}
-		host := strings.ToLower(u.Host)
-		if idx := strings.Index(host, ":"); idx != -1 {
-			host = host[:idx]
-		}
-		host = strings.TrimPrefix(host, "www.")
+		host := strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
 		if _, ok := allowed[host]; !ok {
-			if logger != nil {
-				logger.Warn("Security: attempt to unfurl non-whitelisted host",
-					zap.String("host", host),
-					zap.String("allowed", opt),
-				)
-			}
-			return false
+			return deny(host)
 		}
 	}
 
-	txtNoURLs := urlRe.ReplaceAllString(text, " ")
-
-	domRe := regexp.MustCompile(`\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}\b`)
-	doms := domRe.FindAllString(txtNoURLs, -1)
-
-	for _, d := range doms {
+	txtNoURLs := unfurlURLRegex.ReplaceAllString(text, " ")
+	for _, d := range unfurlDomainRegex.FindAllString(txtNoURLs, -1) {
 		d = strings.ToLower(d)
 
 		if _, icann := publicsuffix.PublicSuffix(d); !icann {
@@ -294,13 +325,7 @@ func IsUnfurlingEnabled(text string, opt string, logger *zap.Logger) bool {
 		}
 
 		if _, ok := allowed[d]; !ok {
-			if logger != nil {
-				logger.Warn("Security: attempt to unfurl non-whitelisted host",
-					zap.String("host", d),
-					zap.String("allowed", opt),
-				)
-			}
-			return false
+			return deny(d)
 		}
 	}
 
@@ -349,19 +374,6 @@ func ProcessText(s string) string {
 	return strings.TrimSpace(s)
 }
 
-func HumanizeCertificates(certs []*x509.Certificate) string {
-	var descriptions []string
-	for _, cert := range certs {
-		subjectCN := cert.Subject.CommonName
-		issuerCN := cert.Issuer.CommonName
-		expiry := cert.NotAfter.Format("2006-01-02")
-
-		description := fmt.Sprintf("CN=%s (Issuer CN=%s, expires %s)", subjectCN, issuerCN, expiry)
-		descriptions = append(descriptions, description)
-	}
-	return strings.Join(descriptions, ", ")
-}
-
 var (
 	slackLinkRegex    = regexp.MustCompile(`<(https?://[^>|]+)\|([^>]+)>`)
 	markdownLinkRegex = regexp.MustCompile(`\[([^\]]+)\]\((https?://[^)]+)\)`)
@@ -380,7 +392,7 @@ func normalizeLinks(text string) string {
 	}
 
 	render := func(url, linkText string, isLast bool) string {
-		out := url + " - " + linkText
+		out := renderLink(url, linkText)
 		if !isLast {
 			out += ","
 		}
@@ -405,10 +417,31 @@ func normalizeLinks(text string) string {
 	return text
 }
 
+// renderLink renders a link so that its real target is always visible. When
+// the display text is just the URL again it is not repeated.
+func renderLink(target, linkText string) string {
+	linkText = strings.TrimSpace(linkText)
+	if linkText == "" || linkText == target || strings.TrimRight(linkText, "/") == strings.TrimRight(target, "/") {
+		return target
+	}
+	return target + " - " + linkText
+}
+
+// SanitizeInline makes an untrusted short string (a username or bot name)
+// safe to show on one line: unsafe runes are stripped and line breaks and
+// tabs become spaces.
+func SanitizeInline(s string) string {
+	s = stripUnsafeRunes(s)
+	s = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "\t", " ", "\u2028", " ", "\u2029", " ").Replace(s)
+	return strings.TrimSpace(collapseInlineSpaces(s))
+}
+
 // stripUnsafeRunes removes runes that are display-corrupting or carry no
 // semantic content: C0/C1 controls (except \t \n \r), DEL, BOM, ZWSP,
-// LRM/RLM, bidi overrides, and bidi isolates. Bidi overrides are a known
-// prompt-injection vector in chat corpora. U+200C (ZWNJ) and U+200D (ZWJ)
+// LRM/RLM, bidi overrides and isolates, invisible operators (U+2060-U+2064),
+// the Mongolian vowel separator (U+180E), and Unicode tag characters
+// (U+E0000-U+E007F). Bidi overrides and tag characters are known
+// prompt-injection vectors: they hide or reorder text a reader cannot see. U+200C (ZWNJ) and U+200D (ZWJ)
 // are preserved: they are required for Persian and Arabic letter joining
 // and for emoji ZWJ sequences such as family and flag emoji.
 func stripUnsafeRunes(s string) string {
@@ -429,6 +462,12 @@ func stripUnsafeRunes(s string) string {
 		case r >= 0x202A && r <= 0x202E:
 			continue
 		case r >= 0x2066 && r <= 0x2069:
+			continue
+		case r >= 0x2060 && r <= 0x2064: // word joiner and invisible operators
+			continue
+		case r == 0x180E: // Mongolian vowel separator
+			continue
+		case r >= 0xE0000 && r <= 0xE007F: // tag characters
 			continue
 		default:
 			b.WriteRune(r)

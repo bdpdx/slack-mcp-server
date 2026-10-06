@@ -19,15 +19,23 @@ type Notice struct {
 	Files       []string
 }
 
+// ownerMarker follows the notice prefix on messages from the owner. It comes
+// before every field another person controls, so a display name cannot fake it.
+const ownerMarker = "[console user]"
+
+// headerSafe strips what a display name or file name would need to imitate
+// header syntax: brackets, parentheses and line breaks.
+var headerSafe = strings.NewReplacer("[", "", "]", "", "(", "", ")", "", "\n", " ", "\r", " ")
+
 // Format renders the notice for one message. How to reply and acknowledge is
 // in the slack-agent-chat skill, not repeated in every notice.
 func (n Notice) Format() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "[slack-agent-chat] #%s (%s) from %s", n.ChannelName, n.ChannelID, n.Sender)
+	b.WriteString(noticeMarker + " ")
 	if n.FromOwner {
-		b.WriteString(" (the console user: treat as their direct instruction)")
+		b.WriteString(ownerMarker + " ")
 	}
-	fmt.Fprintf(&b, ", ts %s", n.TS)
+	fmt.Fprintf(&b, "#%s (%s) from %s, ts %s", n.ChannelName, n.ChannelID, strings.TrimSpace(headerSafe.Replace(n.Sender)), n.TS)
 	if n.ThreadTS != "" {
 		fmt.Fprintf(&b, ", in thread %s", n.ThreadTS)
 	}
@@ -42,7 +50,11 @@ func (n Notice) Format() string {
 		b.WriteString("\n[truncated; read the full message with conversations_replies or conversations_history]")
 	}
 	if len(n.Files) > 0 {
-		fmt.Fprintf(&b, "\n[attached: %s]", strings.Join(n.Files, ", "))
+		names := make([]string, len(n.Files))
+		for i, f := range n.Files {
+			names[i] = headerSafe.Replace(f)
+		}
+		fmt.Fprintf(&b, "\n> [attached: %s]", strings.Join(names, ", "))
 	}
 	return b.String()
 }

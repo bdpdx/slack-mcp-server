@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -110,19 +111,38 @@ const chatUsage = `usage: slack-mcp-server chat [--env-file FILE] COMMAND
 
 Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
   watch start --channel CHANNEL [--channel CHANNEL] [--backlog N]
-                    push this session the channel's messages
+                    push this session the channel's messages; for a project
+                    channel, also set up and watch #PROJECT__USER_AGENT
   watch stop [--channel CHANNEL]
                     stop pushing one channel, or all of them
   watch status      list the sessions this home's listener serves
-  channel create NAME [--invite AGENT,AGENT]
-                    create a private channel, invite the user and the named
-                    agents, and watch it
-  channel invite CHANNEL AGENT[,AGENT]
-                    add agents to a channel
+  channel create NAME [--invite AGENT,AGENT] [--invite-user USER,USER]
+                    create a private project channel, invite the user and the
+                    named agents and people, create #NAME__users for the
+                    people, and watch it as with watch start
+  channel invite CHANNEL [AGENT,AGENT] [--invite-user USER,USER]
+                    add agents or people to a channel
+  project archive NAME [--dry-run]
+                    archive #NAME and every #NAME__* channel you are in; only
+                    when Slack records you (or this agent) as #NAME's creator.
+                    Slack's API cannot delete channels; archived ones can be
+                    restored, or deleted in the Slack UI by a workspace owner
+  side AGENT[,AGENT] [--channel PROJECT]
+                    open (or join) the side channel #PROJECT__A_B with these
+                    agents and watch it; PROJECT defaults to the project this
+                    session watches
   post --channel CHANNEL --text TEXT [--thread TS]
                     post as the user (agents reply with conversations_add_message)
   ack CHANNEL TS    mark a message processed (adds a check-mark reaction)
   relay-hook        UserPromptSubmit hook for %agents prompts (reads stdin)
+  ask-hook          Claude PreToolUse hook for AskUserQuestion: ask in Slack
+                    instead of the terminal while watching a project
+  approval-hook [--wait 10m]
+                    PermissionRequest hook: ask the user in Slack (buttons or
+                    a thread reply) and answer the prompt; after --wait with
+                    no answer, the terminal asks
+  stop-hook         Stop hook: DM the user the final response of a turn they
+                    started at the terminal (relay-hook marks those turns)
   listen            run the listener in the foreground (started automatically)
 `
 
@@ -154,9 +174,14 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if json.NewDecoder(stdin).Decode(&event) != nil {
 			return 0
 		}
+		markTurn(*envFile, event, stderr)
 		if _, _, ok := ParseRelayPrompt(event.Prompt); !ok {
 			return 0
 		}
+	}
+	var hook hookEvent
+	if isQuietHook(rest[0]) && json.NewDecoder(stdin).Decode(&hook) != nil {
+		return 0
 	}
 	path, err := ResolveEnvFile(*envFile, os.Getenv)
 	if err == nil {
@@ -164,7 +189,14 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if err != nil {
 		if rest[0] == "relay-hook" {
+			if path != "" {
+				ClearTurn(NewHome(path), sessionOf(event.SessionID))
+			}
 			return emitBlock(stdout, err)
+		}
+		if isQuietHook(rest[0]) {
+			fmt.Fprintf(stderr, "slack-agent-chat: %v\n", err)
+			return 0
 		}
 		fmt.Fprintf(stderr, "slack-mcp-server chat: %v\n", err)
 		return 1
@@ -180,6 +212,10 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = c.watch(ctx, rest[1:])
 	case "channel":
 		err = c.channel(ctx, rest[1:])
+	case "side":
+		err = c.side(ctx, rest[1:])
+	case "project":
+		err = c.project(ctx, rest[1:])
 	case "post":
 		err = c.post(ctx, rest[1:])
 	case "ack":
@@ -188,6 +224,22 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		ctx, cancel := context.WithTimeout(ctx, relayTimeout)
 		defer cancel()
 		return c.relayHook(ctx, event)
+	case "ask-hook", "approval-hook", "stop-hook":
+		ctx, cancel := context.WithTimeout(ctx, relayTimeout)
+		defer cancel()
+		switch rest[0] {
+		case "ask-hook":
+			return c.askHook(ctx, hook)
+		case "approval-hook":
+			fs := flag.NewFlagSet("approval-hook", flag.ContinueOnError)
+			fs.SetOutput(stderr)
+			wait := fs.Duration("wait", defaultApprovalWait, "how long to wait for an answer in Slack before the terminal asks")
+			if fs.Parse(rest[1:]) != nil {
+				return 0
+			}
+			return c.approvalHook(context.Background(), hook, *wait)
+		}
+		return c.stopHook(ctx, hook)
 	default:
 		err = fmt.Errorf("unknown command %q", rest[0])
 	}
@@ -263,24 +315,11 @@ func (c *cli) resolveChannel(ctx context.Context, arg string) (string, string, e
 		return ch.ID, ch.Name, nil
 	}
 	name := strings.TrimPrefix(arg, "#")
-	cursor := ""
-	for {
-		chans, next, err := c.bot.GetConversationsForUserContext(ctx, &slack.GetConversationsForUserParameters{
-			Types: []string{"private_channel", "public_channel"}, ExcludeArchived: true, Limit: 200, Cursor: cursor,
-		})
-		if err != nil {
-			return "", "", err
-		}
-		for _, ch := range chans {
-			if ch.Name == name {
-				return ch.ID, ch.Name, nil
-			}
-		}
-		if next == "" {
-			return "", "", fmt.Errorf("this agent's bot is not in a channel named %q", name)
-		}
-		cursor = next
+	id, err := findChannel(ctx, c.bot, name)
+	if err != nil {
+		return "", "", fmt.Errorf("this agent's bot is %w", err)
 	}
+	return id, name, nil
 }
 
 func (c *cli) subscribe(ctx context.Context, channelIDs []string, backlog int) error {
@@ -321,15 +360,34 @@ func (c *cli) watch(ctx context.Context, args []string) error {
 		if len(channels) == 0 {
 			return errors.New("watch start needs --channel")
 		}
+		me, err := c.identity(ctx)
+		if err != nil {
+			return err
+		}
 		var ids []string
 		for _, ch := range channels {
-			id, _, err := c.resolveChannel(ctx, ch)
+			id, name, err := c.resolveChannel(ctx, ch)
 			if err != nil {
 				return err
 			}
 			ids = append(ids, id)
+			if _, derived := ProjectOf(name); !derived {
+				// The project watch must not depend on the direct channel.
+				if direct, err := c.ensureDirect(ctx, me, name); err != nil {
+					fmt.Fprintf(c.stderr, "slack-agent-chat: no direct channel for #%s: %v\n", name, err)
+				} else {
+					ids = append(ids, direct)
+				}
+				// Side channels this agent was added to earlier (a session
+				// that restarts would otherwise stop watching them).
+				derived, err := derivedChannels(ctx, c.bot, name)
+				if err != nil {
+					fmt.Fprintf(c.stderr, "slack-agent-chat: listing #%s's side channels: %v\n", name, err)
+				}
+				ids = append(ids, derived...)
+			}
 		}
-		return c.subscribe(ctx, ids, *backlog)
+		return c.subscribe(ctx, uniq(ids), *backlog)
 	case "stop":
 		sub, err := detectSession(os.Getenv)
 		if err != nil {
@@ -359,10 +417,11 @@ func (c *cli) watch(ctx context.Context, args []string) error {
 	return fmt.Errorf("unknown watch command %q", args[0])
 }
 
-// lookupAgents maps agent names to bot user IDs.
-func (c *cli) lookupAgents(ctx context.Context, names []string) ([]string, error) {
+// lookupUsers maps names to users: agents (bots) when bots is true, else
+// people, matched by username, display name or real name.
+func (c *cli) lookupUsers(ctx context.Context, list string, bots bool) ([]slack.User, error) {
 	var wanted []string
-	for _, name := range names {
+	for _, name := range strings.Split(list, ",") {
 		if name = strings.TrimPrefix(strings.TrimSpace(name), "@"); name != "" {
 			wanted = append(wanted, name)
 		}
@@ -374,21 +433,63 @@ func (c *cli) lookupAgents(ctx context.Context, names []string) ([]string, error
 	if err != nil {
 		return nil, err
 	}
-	var ids []string
-	for _, name := range wanted {
-		found := ""
-		for _, u := range users {
-			if u.IsBot && !u.Deleted && (strings.EqualFold(u.Name, name) || strings.EqualFold(u.Profile.DisplayName, name) || strings.EqualFold(u.RealName, name)) {
-				found = u.ID
-				break
-			}
-		}
-		if found == "" {
-			return nil, fmt.Errorf("no agent named %q", name)
-		}
-		ids = append(ids, found)
+	kind := "person"
+	if bots {
+		kind = "agent"
 	}
-	return ids, nil
+	var found []slack.User
+	for _, name := range wanted {
+		i := slices.IndexFunc(users, func(u slack.User) bool {
+			return u.IsBot == bots && !u.Deleted &&
+				(strings.EqualFold(u.Name, name) || strings.EqualFold(u.Profile.DisplayName, name) || strings.EqualFold(u.RealName, name))
+		})
+		if i < 0 {
+			return nil, fmt.Errorf("no %s named %q", kind, name)
+		}
+		found = append(found, users[i])
+	}
+	return found, nil
+}
+
+func userIDs(users []slack.User) []string {
+	ids := make([]string, len(users))
+	for i, u := range users {
+		ids[i] = u.ID
+	}
+	return ids
+}
+
+// identity is this home's owner (user token) and agent (bot token).
+type identity struct {
+	ownerID, ownerName string // the owner's username, used in channel names
+	agentID, agentName string // the name Slack shows for the bot
+}
+
+func (c *cli) identity(ctx context.Context) (identity, error) {
+	owner, err := c.user.AuthTestContext(ctx)
+	if err != nil {
+		return identity{}, fmt.Errorf("user auth.test: %w", err)
+	}
+	bot, err := c.bot.AuthTestContext(ctx)
+	if err != nil {
+		return identity{}, fmt.Errorf("bot auth.test: %w", err)
+	}
+	u, err := c.bot.GetUserInfoContext(ctx, bot.UserID)
+	if err != nil {
+		return identity{}, fmt.Errorf("users.info %s: %w", bot.UserID, err)
+	}
+	return identity{ownerID: owner.UserID, ownerName: owner.User, agentID: bot.UserID, agentName: shownName(u)}, nil
+}
+
+// ensureDirect makes sure #PROJECT__OWNER_AGENT exists with the owner in it
+// and returns its ID.
+func (c *cli) ensureDirect(ctx context.Context, me identity, project string) (string, error) {
+	name, err := DirectChannelName(project, me.ownerName, me.agentName)
+	if err != nil {
+		return "", err
+	}
+	id, _, err := ensureChannel(ctx, c.bot, name, me.agentID, []string{me.ownerID})
+	return id, err
 }
 
 func (c *cli) channel(ctx context.Context, args []string) error {
@@ -398,6 +499,7 @@ func (c *cli) channel(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("channel", flag.ContinueOnError)
 	fs.SetOutput(c.stderr)
 	invite := fs.String("invite", "", "comma-separated agent names to invite")
+	inviteUser := fs.String("invite-user", "", "comma-separated people to invite")
 	pos, err := parseArgs(fs, args[1:])
 	if err != nil {
 		return err
@@ -405,51 +507,136 @@ func (c *cli) channel(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "create":
 		if len(pos) != 1 {
-			return errors.New("usage: channel create NAME [--invite a,b]")
+			return errors.New("usage: channel create NAME [--invite a,b] [--invite-user u,v]")
 		}
 		name, err := NormalizeChannelName(pos[0])
 		if err != nil {
 			return err
 		}
-		agentIDs, err := c.lookupAgents(ctx, strings.Split(*invite, ","))
+		if err := ValidateProjectName(name); err != nil {
+			return err
+		}
+		agents, err := c.lookupUsers(ctx, *invite, true)
 		if err != nil {
 			return err
 		}
-		owner, err := c.user.AuthTestContext(ctx)
+		people, err := c.lookupUsers(ctx, *inviteUser, false)
 		if err != nil {
-			return fmt.Errorf("user auth.test: %w", err)
+			return err
 		}
-		ch, err := c.bot.CreateConversationContext(ctx, slack.CreateConversationParams{ChannelName: name, IsPrivate: true})
+		me, err := c.identity(ctx)
 		if err != nil {
-			return fmt.Errorf("creating #%s: %w", name, err)
+			return err
 		}
-		if _, err := c.bot.InviteUsersToConversationContext(ctx, ch.ID, append([]string{owner.UserID}, agentIDs...)...); err != nil {
-			return fmt.Errorf("inviting to #%s: %w", name, err)
+		// Created as the owner, so Slack records them as its creator: only
+		// they (through any of their agents) may archive the project.
+		members := append(append([]string{me.agentID}, userIDs(agents)...), userIDs(people)...)
+		id, _, err := ensureChannel(ctx, c.user, name, me.ownerID, members)
+		if err != nil {
+			return err
 		}
-		c.printJSON(map[string]any{"channel_id": ch.ID, "name": ch.Name})
-		return c.subscribe(ctx, []string{ch.ID}, 0)
+		// Created as the owner, so no bot is ever in it. Another person may
+		// own it already; the project does not depend on it.
+		usersID, _, err := ensureChannel(ctx, c.user, UsersChannelName(name), me.ownerID, userIDs(people))
+		if err != nil {
+			fmt.Fprintf(c.stderr, "slack-agent-chat: %v\n", err)
+		}
+		watch := []string{id}
+		if direct, err := c.ensureDirect(ctx, me, name); err != nil {
+			fmt.Fprintf(c.stderr, "slack-agent-chat: no direct channel for #%s: %v\n", name, err)
+		} else {
+			watch = append(watch, direct)
+		}
+		c.printJSON(map[string]any{"channel_id": id, "name": name, "users_channel_id": usersID})
+		return c.subscribe(ctx, watch, 0)
 	case "invite":
-		if len(pos) != 2 {
-			return errors.New("usage: channel invite CHANNEL AGENT[,AGENT]")
+		if len(pos) < 1 || len(pos) > 2 {
+			return errors.New("usage: channel invite CHANNEL [AGENT,AGENT] [--invite-user u,v]")
 		}
 		id, name, err := c.resolveChannel(ctx, pos[0])
 		if err != nil {
 			return err
 		}
-		agentIDs, err := c.lookupAgents(ctx, strings.Split(pos[1], ","))
+		agentList := ""
+		if len(pos) == 2 {
+			agentList = pos[1]
+		}
+		agents, err := c.lookupUsers(ctx, agentList, true)
 		if err != nil {
 			return err
 		}
-		if len(agentIDs) == 0 {
-			return errors.New("name at least one agent to invite")
+		people, err := c.lookupUsers(ctx, *inviteUser, false)
+		if err != nil {
+			return err
 		}
-		if _, err := c.bot.InviteUsersToConversationContext(ctx, id, agentIDs...); err != nil {
+		ids := append(userIDs(agents), userIDs(people)...)
+		if len(ids) == 0 {
+			return errors.New("name at least one agent or person to invite")
+		}
+		if err := inviteEach(ctx, c.bot, id, "", ids); err != nil {
 			return fmt.Errorf("inviting to #%s: %w", name, err)
 		}
-		c.printJSON(map[string]any{"ok": true, "channel_id": id, "invited": agentIDs})
+		c.printJSON(map[string]any{"ok": true, "channel_id": id, "invited": ids})
 		return nil
 	}
 	return fmt.Errorf("unknown channel command %q", args[0])
+}
+
+// side opens the side channel between this agent and others, or joins it if
+// one of them already opened it, and watches it.
+func (c *cli) side(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("side", flag.ContinueOnError)
+	fs.SetOutput(c.stderr)
+	channel := fs.String("channel", "", "the project channel (default: the one this session watches)")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
+		return errors.New("usage: side AGENT[,AGENT] [--channel PROJECT]")
+	}
+	agents, err := c.lookupUsers(ctx, pos[0], true)
+	if err != nil {
+		return err
+	}
+	var project string
+	if *channel != "" {
+		_, name, err := c.resolveChannel(ctx, *channel)
+		if err != nil {
+			return err
+		}
+		project, _ = ProjectOf(name)
+	} else {
+		sub, err := detectSession(os.Getenv)
+		if err != nil {
+			return err
+		}
+		if _, project, err = c.watchedProject(ctx, sub.SessionID); err != nil {
+			return fmt.Errorf("%w; name it with --channel", err)
+		}
+	}
+	me, err := c.identity(ctx)
+	if err != nil {
+		return err
+	}
+	names := []string{me.agentName}
+	for _, a := range agents {
+		names = append(names, shownName(&a))
+	}
+	name, err := SideChannelName(project, names)
+	if err != nil {
+		return err
+	}
+	id, created, err := ensureChannel(ctx, c.bot, name, me.agentID, append([]string{me.ownerID}, userIDs(agents)...))
+	if err != nil {
+		return err
+	}
+	c.printJSON(map[string]any{"channel_id": id, "name": name, "created": created})
+	backlog := 0
+	if !created {
+		backlog = autoBacklog // joining: catch up on what is already there
+	}
+	return c.subscribe(ctx, []string{id}, backlog)
 }
 
 // postAsOwner posts text as the owner and returns the message ts.
@@ -501,31 +688,50 @@ func (c *cli) ack(ctx context.Context, args []string) error {
 	return nil
 }
 
+// markTurn records whether the prompt was typed at the terminal, for
+// stop-hook. It never blocks the prompt: failures are only logged.
+func markTurn(envFile string, event relayEvent, stderr io.Writer) {
+	session := sessionOf(event.SessionID)
+	path, err := ResolveEnvFile(envFile, os.Getenv)
+	if err == nil {
+		err = MarkTurn(NewHome(path), session, turnKey(event.PromptID, event.TurnID), event.Prompt)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "slack-agent-chat: marking turn: %v\n", err)
+	}
+}
+
 func emitBlock(w io.Writer, err error) int {
 	data, _ := json.Marshal(map[string]string{"decision": "block", "reason": "slack-agent-chat relay: " + err.Error()})
 	fmt.Fprintln(w, string(data))
 	return 0
 }
 
+// blockRelay blocks a %agents prompt. No turn runs, so its terminal-turn
+// mark must not linger for a later turn's stop-hook.
+func (c *cli) blockRelay(session string, err error) int {
+	ClearTurn(c.home, session)
+	return emitBlock(c.stdout, err)
+}
+
 // relayEvent is the part of a UserPromptSubmit hook event the relay reads.
 type relayEvent struct {
 	Prompt    string `json:"prompt"`
 	SessionID string `json:"session_id"`
+	PromptID  string `json:"prompt_id"` // Claude Code
+	TurnID    string `json:"turn_id"`   // Codex
 }
 
 // relayHook posts a %agents prompt (already recognized by RunCLI) to Slack.
 func (c *cli) relayHook(ctx context.Context, event relayEvent) int {
 	target, text, _ := ParseRelayPrompt(event.Prompt)
 	if text == "" {
-		return emitBlock(c.stdout, errors.New("nothing to relay after the %agents prefix"))
+		return c.blockRelay(sessionOf(event.SessionID), errors.New("nothing to relay after the %agents prefix"))
 	}
-	session := event.SessionID
-	if session == "" {
-		session = os.Getenv("CODEX_THREAD_ID")
-	}
+	session := sessionOf(event.SessionID)
 	channelID, channelName, err := c.relayTarget(ctx, session, target)
 	if err != nil {
-		return emitBlock(c.stdout, err)
+		return c.blockRelay(session, err)
 	}
 	// Announce the relay before posting so its echo cannot reach this session first.
 	if _, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "expect", SessionID: session, Channel: channelID, Text: text}); err != nil {
@@ -533,7 +739,7 @@ func (c *cli) relayHook(ctx context.Context, event relayEvent) int {
 	}
 	ts, err := c.postAsOwner(ctx, channelID, "", text)
 	if err != nil {
-		return emitBlock(c.stdout, err)
+		return c.blockRelay(session, err)
 	}
 	if _, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "skip", SessionID: session, Channel: channelID, TS: ts}); err != nil {
 		fmt.Fprintf(c.stderr, "slack-agent-chat: could not mark relay as delivered: %v\n", err)
@@ -545,26 +751,62 @@ func (c *cli) relayHook(ctx context.Context, event relayEvent) int {
 	return 0
 }
 
-// relayTarget picks the channel for a relay: the explicit target, or the one
-// channel this session watches.
+// relayTarget picks the channel for a relay: the explicit target, or the
+// project channel this session watches.
 func (c *cli) relayTarget(ctx context.Context, session, target string) (string, string, error) {
 	if target != "" {
 		return c.resolveChannel(ctx, target)
 	}
+	id, name, err := c.watchedProject(ctx, session)
+	if err != nil {
+		return "", "", fmt.Errorf("%w; use %%agents@<channel>:", err)
+	}
+	return id, name, nil
+}
+
+// sessionChannels returns the channels session watches, by ID with names,
+// using the names the listener reports and asking Slack for the rest.
+func (c *cli) sessionChannels(ctx context.Context, session string) (ids []string, names map[string]string, err error) {
 	resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "status"})
 	if err != nil {
-		return "", "", errors.New("no slack-agent-chat listener is running; start a watch or use %agents@<channel>:")
+		return nil, nil, errors.New("no slack-agent-chat listener is running")
 	}
 	for _, s := range resp.Sessions {
 		if s.SessionID != session {
 			continue
 		}
-		if len(s.Channels) == 1 {
-			return c.resolveChannel(ctx, s.Channels[0])
+		names = map[string]string{}
+		for _, ch := range s.Channels {
+			name := s.Names[ch]
+			if name == "" {
+				if _, name, err = c.resolveChannel(ctx, ch); err != nil {
+					return nil, nil, err
+				}
+			}
+			names[ch] = name
 		}
-		return "", "", fmt.Errorf("this session watches %d channels; use %%agents@<channel>: to pick one", len(s.Channels))
+		return s.Channels, names, nil
 	}
-	return "", "", errors.New("this session is not watching a channel; start a watch or use %agents@<channel>:")
+	return nil, nil, errors.New("this session is not watching a channel")
+}
+
+// watchedProject returns the one project channel (not a derived __ channel)
+// that session watches.
+func (c *cli) watchedProject(ctx context.Context, session string) (string, string, error) {
+	ids, names, err := c.sessionChannels(ctx, session)
+	if err != nil {
+		return "", "", err
+	}
+	var projects []string
+	for _, id := range ids {
+		if _, derived := ProjectOf(names[id]); !derived {
+			projects = append(projects, id)
+		}
+	}
+	if len(projects) != 1 {
+		return "", "", fmt.Errorf("this session watches %d project channels", len(projects))
+	}
+	return projects[0], names[projects[0]], nil
 }
 
 // listenerEnv returns the environment for a detached listener: only neutral

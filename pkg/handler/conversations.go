@@ -7,21 +7,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"regexp"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gocarina/gocsv"
+	"github.com/korotovsky/slack-mcp-server/pkg/filesdir"
 	"github.com/korotovsky/slack-mcp-server/pkg/limiter"
 	"github.com/korotovsky/slack-mcp-server/pkg/provider"
-	"github.com/korotovsky/slack-mcp-server/pkg/provider/edge"
 	"github.com/korotovsky/slack-mcp-server/pkg/server/auth"
 	"github.com/korotovsky/slack-mcp-server/pkg/text"
+	"github.com/korotovsky/slack-mcp-server/pkg/toolconfig"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/slack-go/slack"
 	"go.uber.org/zap"
@@ -30,8 +31,34 @@ import (
 const (
 	defaultConversationsNumericLimit    = 50
 	defaultConversationsExpressionLimit = "1d"
-	maxFileSizeBytes                    = 5 * 1024 * 1024 // 5MB limit
+	maxFileSizeBytes                    = provider.MaxFileDownloadBytes // 64 MiB, for downloads and uploads
+	// Files passed inside a tool call or result are capped far lower: more
+	// would not fit in a model's context. Larger files go through the files
+	// folder (attachment_get_data save=true, files_upload path=...).
+	maxInlineBytes      = 1 << 20 // 1 MiB
+	maxInlineImageBytes = 5 << 20 // images are shown to the model as images
+
+	// Upper bounds for numeric tool inputs.
+	maxConversationsNumericLimit = 999
+	maxExpressionUnits           = 3650 // e.g. 3650d, ten years
+	maxSearchLimit               = 100
+	maxSearchPage                = 100
+	maxUnreadsChannels           = 500
+	maxUnreadsMessagesPerChannel = 100
+	maxUsersSearchLimit          = 100
+	maxChannelsLimit             = 999
 )
+
+// clampInt bounds v to [lo, hi].
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
 
 var validFilterKeys = map[string]struct{}{
 	"is":     {},
@@ -121,12 +148,15 @@ type addReactionParams struct {
 
 type filesGetParams struct {
 	fileID string
+	save   bool
 }
 
 type filesUploadParams struct {
 	channel         string
 	filename        string
 	content         string
+	file            *os.File // set instead of content for an upload from the files folder
+	size            int
 	title           string
 	initialComment  string
 	threadTimestamp string
@@ -144,9 +174,6 @@ type unreadsParams struct {
 	maxChannels           int
 	maxMessagesPerChannel int
 	mentionsOnly          bool
-	includeMuted          bool
-	mutedChannels         map[string]bool // populated at runtime from Slack prefs
-	mutedUnavailable      bool            // true when muted channels could not be fetched (e.g. xoxp token)
 }
 
 type markParams struct {
@@ -172,12 +199,16 @@ type inviteParams struct {
 type ConversationsHandler struct {
 	apiProvider *provider.ApiProvider
 	logger      *zap.Logger
+	cfg         *toolconfig.Config
+	// channelsFn overrides the channels cache lookup in unit tests.
+	channelsFn func() *provider.ChannelsCache
 }
 
-func NewConversationsHandler(apiProvider *provider.ApiProvider, logger *zap.Logger) *ConversationsHandler {
+func NewConversationsHandler(apiProvider *provider.ApiProvider, logger *zap.Logger, cfg *toolconfig.Config) *ConversationsHandler {
 	return &ConversationsHandler{
 		apiProvider: apiProvider,
 		logger:      logger,
+		cfg:         cfg,
 	}
 }
 
@@ -268,8 +299,7 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 	}
 	options = append(options, contentOpts...)
 
-	unfurlOpt := os.Getenv("SLACK_MCP_ADD_MESSAGE_UNFURLING")
-	if text.IsUnfurlingEnabled(params.text, unfurlOpt, ch.logger) {
+	if text.IsUnfurlingEnabled(params.text, ch.cfg.Unfurling, ch.logger) && text.BlocksUnfurlAllowed(params.blocks, ch.cfg.Unfurling, ch.logger) {
 		options = append(options, slack.MsgOptionEnableLinkUnfurl())
 	} else {
 		options = append(options, slack.MsgOptionDisableLinkUnfurl())
@@ -291,8 +321,7 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 		return nil, err
 	}
 
-	toolConfig := os.Getenv("SLACK_MCP_ADD_MESSAGE_MARK")
-	if toolConfig == "1" || toolConfig == "true" || toolConfig == "yes" {
+	if ch.cfg.AddMessageMark {
 		err := client.MarkConversationContext(ctx, params.channel, respTimestamp)
 		if err != nil {
 			ch.logger.Error("Slack MarkConversationContext failed", zap.Error(err))
@@ -335,34 +364,9 @@ func (ch *ConversationsHandler) ConversationsDeleteMessageHandler(ctx context.Co
 }
 
 func (ch *ConversationsHandler) parseParamsToolDeleteMessage(ctx context.Context, request mcp.CallToolRequest) (*deleteMessageParams, error) {
-	toolConfig := os.Getenv("SLACK_MCP_DELETE_MESSAGE_TOOL")
-	enabledTools := os.Getenv("SLACK_MCP_ENABLED_TOOLS")
-
-	if toolConfig == "" {
-		if !strings.Contains(enabledTools, "conversations_delete_message") {
-			ch.logger.Error("Delete-message tool disabled by default")
-			return nil, errors.New(
-				"by default, the conversations_delete_message tool is disabled to guard Slack workspaces against accidental deletion. " +
-					"To enable it, set the SLACK_MCP_DELETE_MESSAGE_TOOL environment variable to true, 1, or comma separated list of channels, " +
-					"e.g. 'SLACK_MCP_DELETE_MESSAGE_TOOL=true' for all channels and DMs",
-			)
-		}
-		toolConfig = "true"
-	}
-
-	channel := request.GetString("channel_id", "")
-	if channel == "" {
-		ch.logger.Error("channel_id missing in delete-message params")
-		return nil, errors.New("channel_id must be a string")
-	}
-	channel, err := ch.resolveChannelID(ctx, channel)
+	channel, err := ch.checkWriteTarget(ctx, toolconfig.ConversationsDeleteMessage, request.GetString("channel_id", ""))
 	if err != nil {
-		ch.logger.Error("Channel not found", zap.String("channel", channel), zap.Error(err))
 		return nil, err
-	}
-	if !isChannelAllowedForConfig(channel, toolConfig) {
-		ch.logger.Warn("Delete-message tool not allowed for channel", zap.String("channel", channel), zap.String("policy", toolConfig))
-		return nil, fmt.Errorf("conversations_delete_message tool is not allowed for channel %q, applied policy: %s", channel, toolConfig)
 	}
 
 	timestamp := request.GetString("timestamp", "")
@@ -414,14 +418,8 @@ func (ch *ConversationsHandler) ConversationsOpenHandler(ctx context.Context, re
 }
 
 func (ch *ConversationsHandler) parseParamsToolOpenConversation(ctx context.Context, request mcp.CallToolRequest) (*openConversationParams, error) {
-	toolConfig := os.Getenv("SLACK_MCP_OPEN_CONVERSATION_TOOL")
-	if toolConfig == "" {
-		ch.logger.Error("Open-conversation tool disabled by default")
-		return nil, errors.New(
-			"by default, the conversations_open tool is disabled to guard against accidentally creating new DMs or group DMs. " +
-				"To enable it, set the SLACK_MCP_OPEN_CONVERSATION_TOOL environment variable to true, " +
-				"e.g. 'SLACK_MCP_OPEN_CONVERSATION_TOOL=true'",
-		)
+	if err := ch.checkToolEnabled(toolconfig.ConversationsOpen); err != nil {
+		return nil, err
 	}
 
 	raw := request.GetString("users", "")
@@ -493,7 +491,7 @@ func (ch *ConversationsHandler) ReactionsAddHandler(ctx context.Context, request
 		return nil, err
 	}
 
-	params, err := ch.parseParamsToolReaction(ctx, request)
+	params, err := ch.parseParamsToolReaction(ctx, toolconfig.ReactionsAdd, request)
 	if err != nil {
 		ch.logger.Error("Failed to parse add-reaction params", zap.Error(err))
 		return nil, err
@@ -533,7 +531,7 @@ func (ch *ConversationsHandler) ReactionsRemoveHandler(ctx context.Context, requ
 		return nil, err
 	}
 
-	params, err := ch.parseParamsToolReaction(ctx, request)
+	params, err := ch.parseParamsToolReaction(ctx, toolconfig.ReactionsRemove, request)
 	if err != nil {
 		ch.logger.Error("Failed to parse remove-reaction params", zap.Error(err))
 		return nil, err
@@ -656,11 +654,15 @@ func (ch *ConversationsHandler) FilesGetHandler(ctx context.Context, request mcp
 		return nil, err
 	}
 
+	if isExternalFile(fileInfo) {
+		return nil, errors.New("attachment is an external file (hosted outside Slack) and cannot be downloaded")
+	}
 	if fileInfo.Size > maxFileSizeBytes {
 		return nil, fmt.Errorf("file size %d bytes exceeds maximum allowed size of %d bytes", fileInfo.Size, maxFileSizeBytes)
 	}
 
-	var buf bytes.Buffer
+	// The provider only fetches Slack-hosted URLs and caps the download at
+	// the same size limit, whatever the reported size says.
 	downloadURL := fileInfo.URLPrivateDownload
 	if downloadURL == "" {
 		downloadURL = fileInfo.URLPrivate
@@ -669,45 +671,125 @@ func (ch *ConversationsHandler) FilesGetHandler(ctx context.Context, request mcp
 		return nil, errors.New("file has no downloadable URL")
 	}
 
-	err = client.GetFileContext(ctx, downloadURL, &buf)
-	if err != nil {
+	if params.save {
+		return ch.saveAttachment(ctx, client, fileInfo, downloadURL)
+	}
+
+	inlineMax := maxInlineBytes
+	if isImageMimetype(fileInfo.Mimetype) {
+		inlineMax = maxInlineImageBytes
+	}
+	if fileInfo.Size > inlineMax {
+		return nil, fmt.Errorf("file is %d bytes, more than the %d returned inline; call again with save=true to save it to the files folder", fileInfo.Size, inlineMax)
+	}
+	buf := &cappedBuffer{max: inlineMax}
+	if err := client.GetFileContext(ctx, downloadURL, buf); err != nil {
+		if errors.Is(err, errInlineTooLarge) {
+			return nil, fmt.Errorf("file is more than the %d bytes returned inline; call again with save=true to save it to the files folder", inlineMax)
+		}
 		ch.logger.Error("Slack GetFileContext failed", zap.Error(err))
 		return nil, err
 	}
 
-	content := buf.Bytes()
+	return attachmentResult(fileInfo, buf.Bytes())
+}
+
+// saveAttachment streams a download into the files folder and returns where
+// it went instead of the content.
+func (ch *ConversationsHandler) saveAttachment(ctx context.Context, client provider.SlackAPI, fileInfo *slack.File, downloadURL string) (*mcp.CallToolResult, error) {
+	if ch.cfg.FilesDir == "" {
+		return nil, errors.New("the files folder is unavailable (see the server log); attachments cannot be saved")
+	}
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(client.GetFileContext(ctx, downloadURL, pw)) }()
+	path, n, err := filesdir.Save(ch.cfg.FilesDir, fileInfo.Name, pr, maxFileSizeBytes)
+	pr.Close()
+	if err != nil {
+		ch.logger.Error("Saving attachment failed", zap.String("file_id", fileInfo.ID), zap.Error(err))
+		return nil, err
+	}
+	result, err := json.Marshal(savedAttachment{
+		attachmentMetadata: attachmentMetadata{FileID: fileInfo.ID, Filename: fileInfo.Name, Mimetype: fileInfo.Mimetype, Size: int(n)},
+		Path:               path,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling saved attachment: %w", err)
+	}
+	return mcp.NewToolResultText(string(result)), nil
+}
+
+var errInlineTooLarge = errors.New("inline size limit exceeded")
+
+// cappedBuffer collects at most max bytes and fails the write beyond that.
+type cappedBuffer struct {
+	bytes.Buffer
+	max int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if b.Len()+len(p) > b.max {
+		return 0, errInlineTooLarge
+	}
+	return b.Buffer.Write(p)
+}
+
+// savedAttachment is the result for an attachment saved to the files folder.
+type savedAttachment struct {
+	attachmentMetadata
+	Path string `json:"path"`
+}
+
+// attachmentMetadata describes a downloaded attachment.
+type attachmentMetadata struct {
+	FileID   string `json:"file_id"`
+	Filename string `json:"filename"`
+	Mimetype string `json:"mimetype"`
+	Size     int    `json:"size"`
+}
+
+// attachmentContent is the JSON shape returned for non-image attachments.
+type attachmentContent struct {
+	attachmentMetadata
+	Encoding string `json:"encoding"`
+	Content  string `json:"content"`
+}
+
+// isExternalFile reports whether a Slack file is a reference to content
+// hosted outside Slack (Google Drive, Dropbox, ...). Such files are refused.
+func isExternalFile(f *slack.File) bool {
+	return f.IsExternal || f.ExternalType != "" || strings.EqualFold(f.Mode, "external")
+}
+
+// attachmentResult builds the tool result for downloaded file content.
+func attachmentResult(fileInfo *slack.File, content []byte) (*mcp.CallToolResult, error) {
+	meta := attachmentMetadata{
+		FileID:   fileInfo.ID,
+		Filename: fileInfo.Name,
+		Mimetype: fileInfo.Mimetype,
+		Size:     len(content),
+	}
 
 	// For image files, return as native MCP image content so the client
 	// can render them directly without base64-in-JSON overflow.
 	if isImageMimetype(fileInfo.Mimetype) {
-		imageData := base64.StdEncoding.EncodeToString(content)
-		metadata := fmt.Sprintf(`{"file_id":"%s","filename":"%s","mimetype":"%s","size":%d}`,
-			fileInfo.ID,
-			escapeJSON(fileInfo.Name),
-			escapeJSON(fileInfo.Mimetype),
-			len(content))
-		return mcp.NewToolResultImage(metadata, imageData, fileInfo.Mimetype), nil
+		metadata, err := json.Marshal(meta)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling attachment metadata: %w", err)
+		}
+		return mcp.NewToolResultImage(string(metadata), base64.StdEncoding.EncodeToString(content), fileInfo.Mimetype), nil
 	}
 
-	encoding := "none"
-	var contentStr string
-
-	if isTextMimetype(fileInfo.Mimetype) {
-		contentStr = string(content)
-	} else {
-		contentStr = base64.StdEncoding.EncodeToString(content)
-		encoding = "base64"
+	out := attachmentContent{attachmentMetadata: meta, Encoding: "none", Content: string(content)}
+	if !isTextMimetype(fileInfo.Mimetype) {
+		out.Encoding = "base64"
+		out.Content = base64.StdEncoding.EncodeToString(content)
 	}
 
-	result := fmt.Sprintf(`{"file_id":"%s","filename":"%s","mimetype":"%s","size":%d,"encoding":"%s","content":"%s"}`,
-		fileInfo.ID,
-		escapeJSON(fileInfo.Name),
-		escapeJSON(fileInfo.Mimetype),
-		len(content),
-		encoding,
-		escapeJSON(contentStr))
-
-	return mcp.NewToolResultText(result), nil
+	result, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling attachment: %w", err)
+	}
+	return mcp.NewToolResultText(string(result)), nil
 }
 
 // FilesUploadHandler uploads a file to Slack and shares it to one conversation.
@@ -727,7 +809,7 @@ func (ch *ConversationsHandler) FilesUploadHandler(ctx context.Context, request 
 	if err != nil {
 		return nil, err
 	}
-	file, err := client.UploadFileContext(ctx, slack.UploadFileParameters{
+	upload := slack.UploadFileParameters{
 		Content:         params.content,
 		FileSize:        len([]byte(params.content)),
 		Filename:        params.filename,
@@ -735,7 +817,12 @@ func (ch *ConversationsHandler) FilesUploadHandler(ctx context.Context, request 
 		InitialComment:  params.initialComment,
 		Channel:         params.channel,
 		ThreadTimestamp: params.threadTimestamp,
-	})
+	}
+	if params.file != nil {
+		defer params.file.Close()
+		upload.Content, upload.Reader, upload.FileSize = "", params.file, params.size
+	}
+	file, err := client.UploadFileContext(ctx, upload)
 	if err != nil {
 		ch.logger.Error("Slack file upload failed", zap.String("channel", params.channel), zap.String("filename", params.filename), zap.Error(err))
 		return nil, err
@@ -754,49 +841,69 @@ func (ch *ConversationsHandler) FilesUploadHandler(ctx context.Context, request 
 }
 
 func (ch *ConversationsHandler) parseParamsToolFilesUpload(ctx context.Context, request mcp.CallToolRequest) (*filesUploadParams, error) {
-	toolConfig := os.Getenv("SLACK_MCP_UPLOAD_FILE_TOOL")
-	enabledTools := os.Getenv("SLACK_MCP_ENABLED_TOOLS")
-	if toolConfig == "" {
-		if !slices.ContainsFunc(strings.Split(enabledTools, ","), func(tool string) bool {
-			return strings.TrimSpace(tool) == "files_upload"
-		}) {
-			return nil, errors.New("file uploads are disabled by default; set SLACK_MCP_UPLOAD_FILE_TOOL to true or to a comma-separated channel allowlist")
-		}
-		toolConfig = "true"
-	}
-	channel := strings.TrimSpace(request.GetString("channel_id", ""))
-	if channel == "" {
-		return nil, errors.New("channel_id is required")
-	}
-	channel, err := ch.resolveChannelID(ctx, channel)
+	channel, err := ch.checkWriteTarget(ctx, toolconfig.FilesUpload, request.GetString("channel_id", ""))
 	if err != nil {
 		return nil, err
 	}
-	if !isChannelAllowedForConfig(channel, toolConfig) {
-		return nil, fmt.Errorf("files_upload is not allowed for channel %q by SLACK_MCP_UPLOAD_FILE_TOOL", channel)
+	asUser := request.GetBool("as_user", false)
+	if err := ch.checkAsUser(asUser); err != nil {
+		return nil, err
+	}
+
+	args := request.GetArguments()
+	textContent, hasText := args["content"]
+	base64Content, hasBase64 := args["content_base64"]
+	pathArg, hasPath := args["path"]
+	sources := 0
+	for _, has := range []bool{hasText, hasBase64, hasPath} {
+		if has {
+			sources++
+		}
+	}
+	if sources != 1 {
+		return nil, errors.New("provide exactly one of content, content_base64 or path")
 	}
 
 	filename := strings.TrimSpace(request.GetString("filename", ""))
-	if filename == "" {
+	if filename == "" && !hasPath {
 		return nil, errors.New("filename is required")
 	}
 	if strings.ContainsAny(filename, `/\\`) || filename == "." || filename == ".." {
 		return nil, errors.New("filename must be a plain filename without path separators")
 	}
 
-	args := request.GetArguments()
-	textContent, hasText := args["content"]
-	base64Content, hasBase64 := args["content_base64"]
-	if hasText == hasBase64 {
-		return nil, errors.New("provide exactly one of content or content_base64")
-	}
 	var content string
-	if hasText {
+	var file *os.File
+	var size int
+	switch {
+	case hasPath:
+		path, _ := pathArg.(string)
+		if strings.TrimSpace(path) == "" {
+			return nil, errors.New("path must name a file in the files folder")
+		}
+		if ch.cfg.FilesDir == "" {
+			return nil, errors.New("the files folder is unavailable (see the server log); files cannot be uploaded from a path")
+		}
+		f, info, err := filesdir.Open(ch.cfg.FilesDir, path, maxFileSizeBytes)
+		if err != nil {
+			if errors.Is(err, filesdir.ErrTooLarge) {
+				return nil, fmt.Errorf("file exceeds the maximum allowed size of %d bytes", maxFileSizeBytes)
+			}
+			return nil, err
+		}
+		file, size = f, int(info.Size())
+		if filename == "" {
+			filename = info.Name()
+		}
+	case hasText:
 		content, _ = textContent.(string)
-	} else {
+	default:
 		encoded, ok := base64Content.(string)
 		if !ok || encoded == "" {
 			return nil, errors.New("content_base64 must be a non-empty base64 string")
+		}
+		if base64.StdEncoding.DecodedLen(len(encoded)) > maxInlineBytes+3 {
+			return nil, fmt.Errorf("inline content is limited to %d bytes; copy the file into the files folder and pass path instead", maxInlineBytes)
 		}
 		decoded, err := base64.StdEncoding.DecodeString(encoded)
 		if err != nil {
@@ -804,16 +911,24 @@ func (ch *ConversationsHandler) parseParamsToolFilesUpload(ctx context.Context, 
 		}
 		content = string(decoded)
 	}
-	if content == "" {
-		return nil, errors.New("file content must not be empty")
+	if file == nil {
+		if content == "" {
+			return nil, errors.New("file content must not be empty")
+		}
+		if len([]byte(content)) > maxInlineBytes {
+			return nil, fmt.Errorf("inline content is limited to %d bytes; copy the file into the files folder and pass path instead", maxInlineBytes)
+		}
 	}
-	if len([]byte(content)) > maxFileSizeBytes {
-		return nil, fmt.Errorf("file size exceeds the maximum allowed size of %d bytes", maxFileSizeBytes)
+	closeOnErr := func(err error) (*filesUploadParams, error) {
+		if file != nil {
+			file.Close()
+		}
+		return nil, err
 	}
 
 	threadTimestamp := request.GetString("thread_ts", "")
 	if threadTimestamp != "" && !strings.Contains(threadTimestamp, ".") {
-		return nil, errors.New("thread_ts must be a valid timestamp in format 1234567890.123456")
+		return closeOnErr(errors.New("thread_ts must be a valid timestamp in format 1234567890.123456"))
 	}
 
 	title := strings.TrimSpace(request.GetString("title", ""))
@@ -825,10 +940,12 @@ func (ch *ConversationsHandler) parseParamsToolFilesUpload(ctx context.Context, 
 		channel:         channel,
 		filename:        filename,
 		content:         content,
+		file:            file,
+		size:            size,
 		title:           title,
 		initialComment:  request.GetString("initial_comment", ""),
 		threadTimestamp: threadTimestamp,
-		asUser:          request.GetBool("as_user", false),
+		asUser:          asUser,
 	}, nil
 }
 
@@ -848,15 +965,6 @@ func isTextMimetype(mimetype string) bool {
 		"application/x-sh":       true,
 	}
 	return textMimetypes[mimetype]
-}
-
-func escapeJSON(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	s = strings.ReplaceAll(s, "\n", `\n`)
-	s = strings.ReplaceAll(s, "\r", `\r`)
-	s = strings.ReplaceAll(s, "\t", `\t`)
-	return s
 }
 
 // ConversationsHistoryHandler streams conversation history as CSV
@@ -997,271 +1105,14 @@ func (ch *ConversationsHandler) ConversationsUnreadsHandler(ctx context.Context,
 
 	params := ch.parseParamsToolUnreads(request)
 
-	// Fetch muted channels unless the caller wants them included
-	if !params.includeMuted {
-		mutedChannels, err := ch.apiProvider.UserSlack().GetMutedChannels(ctx)
-		if err != nil {
-			ch.logger.Warn("Failed to fetch muted channels, proceeding without mute filter", zap.Error(err))
-			params.mutedUnavailable = true
-		} else if len(mutedChannels) > 0 {
-			params.mutedChannels = mutedChannels
-			ch.logger.Debug("Loaded muted channels", zap.Int("count", len(mutedChannels)))
-		}
+	// Unreads are a user-level concept: bot tokens (xoxb) cannot track them.
+	if ch.apiProvider.UserIsBotToken() {
+		return nil, fmt.Errorf(
+			"conversations_unreads requires a user token (xoxp); " +
+				"bot tokens (xoxb) do not support unread tracking",
+		)
 	}
-
-	// Route based on token type:
-	// - xoxc/xoxd (browser session): use fast client.counts API
-	// - xoxp (OAuth user): fall back to conversations.info/history approach
-	// - xoxb (bot): not supported — unreads is a user-level concept
-	if ch.apiProvider.UserIsOAuth() {
-		if ch.apiProvider.UserIsBotToken() {
-			return nil, fmt.Errorf(
-				"conversations_unreads requires a user token (xoxp) or browser session tokens (xoxc/xoxd); " +
-					"bot tokens (xoxb) do not support unread tracking",
-			)
-		}
-		ch.logger.Info("OAuth token detected, using conversations.info fallback for unreads")
-		return ch.getUnreadsViaConversationsInfo(ctx, params)
-	}
-
-	counts, err := ch.apiProvider.UserSlack().ClientCounts(ctx)
-	if err != nil {
-		ch.logger.Error("ClientCounts failed", zap.Error(err))
-		return nil, fmt.Errorf("failed to get client counts: %v", err)
-	}
-
-	return ch.processClientCountsResponse(ctx, params, counts)
-}
-
-func (ch *ConversationsHandler) processClientCountsResponse(ctx context.Context, params *unreadsParams, counts edge.ClientCountsResponse) (*mcp.CallToolResult, error) {
-	ch.logger.Debug("Got counts data",
-		zap.Int("channels", len(counts.Channels)),
-		zap.Int("mpims", len(counts.MPIMs)),
-		zap.Int("ims", len(counts.IMs)))
-
-	// Get users map and channels map for resolving names
-	usersMap := ch.apiProvider.ProvideUsersMap()
-	channelsMaps := ch.apiProvider.ProvideChannelsMaps()
-
-	// Collect channels with unreads
-	var unreadChannels []UnreadChannel
-
-	// Process regular channels (public, private)
-	for _, snap := range counts.Channels {
-		if !snap.HasUnreads {
-			continue
-		}
-
-		// Skip muted channels (unless include_muted is set)
-		if params.mutedChannels[snap.ID] {
-			continue
-		}
-
-		// Priority Inbox: skip channels without @mentions
-		if params.mentionsOnly && snap.MentionCount == 0 {
-			continue
-		}
-
-		// Get channel info from cache to determine type and name
-		channelName := snap.ID
-		channelType := "internal"
-		if cached, ok := channelsMaps.Channels[snap.ID]; ok {
-			// The cached name may already have # prefix, so handle both cases
-			name := cached.Name
-			if strings.HasPrefix(name, "#") {
-				channelName = name
-			} else {
-				channelName = "#" + name
-			}
-			// Check if it's a partner/external channel using Slack's metadata
-			if cached.IsExtShared {
-				channelType = "partner"
-			}
-		}
-
-		// Filter by requested channel types
-		if params.channelTypes != "all" && channelType != params.channelTypes {
-			continue
-		}
-
-		unreadChannels = append(unreadChannels, UnreadChannel{
-			ChannelID:   snap.ID,
-			ChannelName: channelName,
-			ChannelType: channelType,
-			UnreadCount: snap.MentionCount,
-			LastRead:    snap.LastRead.SlackString(),
-			Latest:      snap.Latest.SlackString(),
-		})
-	}
-
-	// Process MPIMs (group DMs)
-	for _, snap := range counts.MPIMs {
-		if !snap.HasUnreads {
-			continue
-		}
-
-		// Skip muted channels (unless include_muted is set)
-		if params.mutedChannels[snap.ID] {
-			continue
-		}
-
-		// Priority Inbox: skip channels without @mentions
-		if params.mentionsOnly && snap.MentionCount == 0 {
-			continue
-		}
-
-		// Filter by requested channel types
-		if params.channelTypes != "all" && params.channelTypes != "group_dm" {
-			continue
-		}
-
-		channelName := snap.ID
-		if cached, ok := channelsMaps.Channels[snap.ID]; ok {
-			channelName = cached.Name
-		}
-
-		unreadChannels = append(unreadChannels, UnreadChannel{
-			ChannelID:   snap.ID,
-			ChannelName: channelName,
-			ChannelType: "group_dm",
-			UnreadCount: snap.MentionCount,
-			LastRead:    snap.LastRead.SlackString(),
-			Latest:      snap.Latest.SlackString(),
-		})
-	}
-
-	// Process IMs (direct messages)
-	for _, snap := range counts.IMs {
-		if !snap.HasUnreads {
-			continue
-		}
-
-		// Skip muted channels (unless include_muted is set)
-		if params.mutedChannels[snap.ID] {
-			continue
-		}
-
-		// Priority Inbox: skip channels without @mentions
-		if params.mentionsOnly && snap.MentionCount == 0 {
-			continue
-		}
-
-		// Filter by requested channel types
-		if params.channelTypes != "all" && params.channelTypes != "dm" {
-			continue
-		}
-
-		// Get display name for DM from channel cache or users
-		channelName := snap.ID
-		if cached, ok := channelsMaps.Channels[snap.ID]; ok {
-			if cached.User != "" {
-				if u, ok := usersMap.Users[cached.User]; ok {
-					channelName = "@" + u.Name
-				} else {
-					channelName = "@" + cached.User
-				}
-			}
-		}
-
-		unreadChannels = append(unreadChannels, UnreadChannel{
-			ChannelID:   snap.ID,
-			ChannelName: channelName,
-			ChannelType: "dm",
-			UnreadCount: snap.MentionCount,
-			LastRead:    snap.LastRead.SlackString(),
-			Latest:      snap.Latest.SlackString(),
-		})
-	}
-
-	// Sort by priority: DMs > partner channels > internal
-	ch.sortChannelsByPriority(unreadChannels)
-
-	// Limit channels
-	if len(unreadChannels) > params.maxChannels {
-		unreadChannels = unreadChannels[:params.maxChannels]
-	}
-
-	ch.logger.Debug("Found unread channels", zap.Int("count", len(unreadChannels)))
-
-	// Backfill real unread counts for channels where client.counts only gave us
-	// HasUnreads=true but MentionCount=0 (unreads without @mentions).
-	// DMs and group DMs don't need this — every DM message counts as a mention.
-	//
-	// NOTE: conversations.info does not return unread_count with browser tokens
-	// (xoxc/xoxd), so we use conversations.history to count messages since the
-	// last-read timestamp. Limit kept small (20) for speed; the exact count
-	// matters less than surfacing that unreads exist.
-	const backfillLimit = 20
-	backfilled := 0
-	for i := range unreadChannels {
-		if unreadChannels[i].UnreadCount > 0 {
-			continue // MentionCount was positive, good enough
-		}
-		if unreadChannels[i].LastRead == "" {
-			// No last-read timestamp means we can't bound the query.
-			// Conservatively report 1 unread since HasUnreads was true.
-			unreadChannels[i].UnreadCount = 1
-			backfilled++
-			continue
-		}
-		history, err := ch.apiProvider.UserSlack().GetConversationHistoryContext(ctx,
-			&slack.GetConversationHistoryParameters{
-				ChannelID: unreadChannels[i].ChannelID,
-				Oldest:    unreadChannels[i].LastRead,
-				Limit:     backfillLimit,
-				Inclusive: false,
-			})
-		if err != nil {
-			ch.logger.Debug("Failed to backfill unread count",
-				zap.String("channel", unreadChannels[i].ChannelID),
-				zap.Error(err))
-			continue
-		}
-		if len(history.Messages) > 0 {
-			unreadChannels[i].UnreadCount = len(history.Messages)
-		}
-		backfilled++
-	}
-	if backfilled > 0 {
-		ch.logger.Debug("Backfilled unread counts via conversations.history",
-			zap.Int("backfilled", backfilled))
-	}
-
-	// If not including messages, just return channel summary
-	if !params.includeMessages {
-		return ch.marshalUnreadChannelsToCSV(unreadChannels)
-	}
-
-	// Fetch messages for each unread channel
-	var allMessages []Message
-
-	for i := range unreadChannels {
-		historyParams := slack.GetConversationHistoryParameters{
-			ChannelID: unreadChannels[i].ChannelID,
-			Oldest:    unreadChannels[i].LastRead,
-			Limit:     params.maxMessagesPerChannel,
-			Inclusive: false,
-		}
-
-		history, err := ch.apiProvider.UserSlack().GetConversationHistoryContext(ctx, &historyParams)
-		if err != nil {
-			ch.logger.Warn("Failed to get history for channel",
-				zap.String("channel", unreadChannels[i].ChannelID),
-				zap.Error(err))
-			continue
-		}
-
-		// Update unread count from actual message count
-		unreadChannels[i].UnreadCount = len(history.Messages)
-
-		// Convert messages
-		channelMessages := ch.convertMessagesFromHistory(ctx, history.Messages, unreadChannels[i].ChannelName, false)
-		allMessages = append(allMessages, channelMessages...)
-	}
-
-	ch.logger.Debug("Fetched unread messages", zap.Int("total", len(allMessages)))
-
-	return marshalMessagesToCSV(allMessages)
+	return ch.getUnreadsViaConversationsInfo(ctx, params)
 }
 
 func (ch *ConversationsHandler) getUnreadsViaConversationsInfo(ctx context.Context, params *unreadsParams) (*mcp.CallToolResult, error) {
@@ -1330,19 +1181,15 @@ func (ch *ConversationsHandler) getUnreadsViaConversationsInfo(ctx context.Conte
 
 	// Prepend a note about xoxp limitations so the LLM understands
 	// these results may be partial.
-	mutedNote := ""
-	if params.mutedUnavailable && !params.includeMuted {
-		mutedNote = "Muted channel filtering is unavailable with xoxp tokens; results may include muted channels. "
-	}
 	rateLimitNote := ""
 	if totalRateLimited > 0 {
 		rateLimitNote = fmt.Sprintf("WARNING: %d channels were skipped due to Slack rate limiting (even after retries) — results are degraded. Try again after a brief cooldown. ", totalRateLimited)
 	}
 	xoxpNote := fmt.Sprintf(
-		"[xoxp token: scanned %d channels (%d API calls), found %d with unreads. %s%s"+
-			"Results may be incomplete — increase max_channels for broader coverage, "+
-			"or use xoxc/xoxd browser tokens for complete results.]\n\n",
-		totalScanned, totalAPIcalls, len(unreadChannels), rateLimitNote, mutedNote,
+		"[xoxp token: scanned %d channels (%d API calls), found %d with unreads. %s"+
+			"Muted channels are not filtered. "+
+			"Results may be incomplete — increase max_channels for broader coverage.]\n\n",
+		totalScanned, totalAPIcalls, len(unreadChannels), rateLimitNote,
 	)
 
 	if !params.includeMessages {
@@ -1485,7 +1332,15 @@ func (ch *ConversationsHandler) scanTypeGroupForUnreads(
 			Cursor:          cursor,
 		}
 
-		channels, nextCursor, err := ch.apiProvider.UserSlack().GetConversationsForUserContext(ctx, userConvParams)
+		type page struct {
+			channels   []slack.Channel
+			nextCursor string
+		}
+		pg, err := limiter.CallWithRetry(ctx, rl, 2, slackRetryAfter, func() (page, error) {
+			channels, nextCursor, err := ch.apiProvider.UserSlack().GetConversationsForUserContext(ctx, userConvParams)
+			return page{channels: channels, nextCursor: nextCursor}, err
+		})
+		channels, nextCursor := pg.channels, pg.nextCursor
 		apiCalls++
 		if err != nil {
 			ch.logger.Warn("Failed to list conversations for type group",
@@ -1504,11 +1359,6 @@ func (ch *ConversationsHandler) scanTypeGroupForUnreads(
 			}
 			if maxScan > 0 && scanned >= maxScan {
 				break
-			}
-
-			// Skip muted channels
-			if params.mutedChannels[channel.ID] {
-				continue
 			}
 
 			scanned++
@@ -1680,7 +1530,7 @@ func (ch *ConversationsHandler) getChannelDisplayName(info *slack.Channel, chann
 func (ch *ConversationsHandler) ConversationsMarkHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ch.logger.Debug("ConversationsMarkHandler called", zap.Any("params", request.Params))
 
-	params, err := ch.parseParamsToolMark(request)
+	params, err := ch.parseParamsToolMark(ctx, request)
 	if err != nil {
 		ch.logger.Error("Failed to parse mark params", zap.Error(err))
 		return nil, err
@@ -1695,7 +1545,7 @@ func (ch *ConversationsHandler) ConversationsMarkHandler(ctx context.Context, re
 			ChannelID: channel,
 			Limit:     1,
 		}
-		history, err := ch.apiProvider.Slack().GetConversationHistoryContext(ctx, &historyParams)
+		history, err := ch.apiProvider.UserSlack().GetConversationHistoryContext(ctx, &historyParams)
 		if err != nil {
 			ch.logger.Error("Failed to get latest message", zap.Error(err))
 			return nil, fmt.Errorf("failed to get latest message: %v", err)
@@ -1708,8 +1558,9 @@ func (ch *ConversationsHandler) ConversationsMarkHandler(ctx context.Context, re
 		}
 	}
 
-	// Mark the conversation as read
-	err = ch.apiProvider.Slack().MarkConversationContext(ctx, channel, ts)
+	// Mark the conversation as read. Read state belongs to the user, so this
+	// always uses the user token.
+	err = ch.apiProvider.UserSlack().MarkConversationContext(ctx, channel, ts)
 	if err != nil {
 		ch.logger.Error("Failed to mark conversation", zap.Error(err))
 		return nil, fmt.Errorf("failed to mark conversation as read: %v", err)
@@ -1724,6 +1575,10 @@ func (ch *ConversationsHandler) ConversationsMarkHandler(ctx context.Context, re
 
 func (ch *ConversationsHandler) ConversationsLeaveHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ch.logger.Debug("ConversationsLeaveHandler called", zap.Any("params", request.Params))
+
+	if err := ch.checkToolEnabled(toolconfig.ConversationsLeave); err != nil {
+		return nil, err
+	}
 
 	channel := request.GetString("channel_id", "")
 	if channel == "" {
@@ -1753,6 +1608,10 @@ func (ch *ConversationsHandler) ConversationsLeaveHandler(ctx context.Context, r
 func (ch *ConversationsHandler) ConversationsJoinHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ch.logger.Debug("ConversationsJoinHandler called", zap.Any("params", request.Params))
 
+	if err := ch.checkToolEnabled(toolconfig.ConversationsJoin); err != nil {
+		return nil, err
+	}
+
 	channel := request.GetString("channel_id", "")
 	if channel == "" {
 		return nil, fmt.Errorf("channel_id is required")
@@ -1775,6 +1634,10 @@ func (ch *ConversationsHandler) ConversationsJoinHandler(ctx context.Context, re
 
 func (ch *ConversationsHandler) ConversationsRenameHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ch.logger.Debug("ConversationsRenameHandler called", zap.Any("params", request.Params))
+
+	if err := ch.checkToolEnabled(toolconfig.ConversationsRename); err != nil {
+		return nil, err
+	}
 
 	channel := request.GetString("channel_id", "")
 	if channel == "" {
@@ -1803,6 +1666,10 @@ func (ch *ConversationsHandler) ConversationsRenameHandler(ctx context.Context, 
 
 func (ch *ConversationsHandler) ConversationsSetTopicHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ch.logger.Debug("ConversationsSetTopicHandler called", zap.Any("params", request.Params))
+
+	if err := ch.checkToolEnabled(toolconfig.ConversationsSetTopic); err != nil {
+		return nil, err
+	}
 
 	channel := request.GetString("channel_id", "")
 	if channel == "" {
@@ -1844,6 +1711,10 @@ func (ch *ConversationsHandler) ConversationsSetTopicHandler(ctx context.Context
 func (ch *ConversationsHandler) ConversationsCreateHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ch.logger.Debug("ConversationsCreateHandler called", zap.Any("params", request.Params))
 
+	if err := ch.checkToolEnabled(toolconfig.ConversationsCreate); err != nil {
+		return nil, err
+	}
+
 	params, err := ch.parseParamsToolCreateConversation(request)
 	if err != nil {
 		ch.logger.Error("Failed to parse create-conversation params", zap.Error(err))
@@ -1877,6 +1748,10 @@ func (ch *ConversationsHandler) parseParamsToolCreateConversation(request mcp.Ca
 
 func (ch *ConversationsHandler) ConversationsInviteHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ch.logger.Debug("ConversationsInviteHandler called", zap.Any("params", request.Params))
+
+	if err := ch.checkToolEnabled(toolconfig.ConversationsInvite); err != nil {
+		return nil, err
+	}
 
 	params, err := ch.parseParamsToolInvite(ctx, request)
 	if err != nil {
@@ -1921,12 +1796,8 @@ func (ch *ConversationsHandler) parseParamsToolInvite(ctx context.Context, reque
 func (ch *ConversationsHandler) ConversationsInviteSharedHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ch.logger.Debug("ConversationsInviteSharedHandler called", zap.Any("params", request.Params))
 
-	if toolConfig := os.Getenv("SLACK_MCP_INVITE_SHARED_TOOL"); toolConfig == "" {
-		ch.logger.Error("Invite-shared tool disabled by default")
-		return nil, errors.New(
-			"by default, the conversations_invite_shared tool is disabled to guard against accidentally sending real Slack Connect invites. " +
-				"To enable it, set the SLACK_MCP_INVITE_SHARED_TOOL environment variable, e.g. 'SLACK_MCP_INVITE_SHARED_TOOL=true'",
-		)
+	if err := ch.checkToolEnabled(toolconfig.ConversationsInviteShared); err != nil {
+		return nil, err
 	}
 
 	params, err := ch.parseParamsToolInviteShared(ctx, request)
@@ -2030,41 +1901,19 @@ func (ch *ConversationsHandler) marshalUnreadChannelsToCSV(channels []UnreadChan
 	return mcp.NewToolResultText(string(csvBytes)), nil
 }
 
-func isChannelAllowedForConfig(channel, config string) bool {
-	if config == "" || config == "true" || config == "1" {
-		return true
-	}
-	items := strings.Split(config, ",")
-	isNegated := strings.HasPrefix(strings.TrimSpace(items[0]), "!")
-	for _, item := range items {
-		item = strings.TrimSpace(item)
-		if isNegated {
-			if strings.TrimPrefix(item, "!") == channel {
-				return false
-			}
-		} else {
-			if item == channel {
-				return true
-			}
-		}
-	}
-	return isNegated
-}
-
-func isChannelAllowed(channel string) bool {
-	return isChannelAllowedForConfig(channel, os.Getenv("SLACK_MCP_ADD_MESSAGE_TOOL"))
-}
-
 func (ch *ConversationsHandler) resolveChannelID(ctx context.Context, channel string) (string, error) {
 	if !strings.HasPrefix(channel, "#") && !strings.HasPrefix(channel, "@") {
 		return channel, nil
 	}
 
 	// First attempt: try to resolve from current cache
-	channelsMaps := ch.apiProvider.ProvideChannelsMaps()
+	channelsMaps := ch.channelsSnapshot()
 	chn, ok := channelsMaps.ChannelsInv[channel]
 	if ok {
 		return channelsMaps.Channels[chn].ID, nil
+	}
+	if ch.apiProvider == nil {
+		return "", fmt.Errorf("channel %q not found", channel)
 	}
 
 	// Channel not found - try refreshing cache and retry once
@@ -2117,7 +1966,7 @@ func (ch *ConversationsHandler) convertMessagesFromHistory(ctx context.Context, 
 		userName, realName, ok := resolver.resolve(msg.User)
 
 		if !ok && msg.SubType == "bot_message" {
-			userName, realName, ok = getBotInfo(msg.Username)
+			userName, realName, ok = getBotInfo(msg.BotID, msg.Username)
 		}
 
 		if !ok {
@@ -2147,7 +1996,7 @@ func (ch *ConversationsHandler) convertMessagesFromHistory(ctx context.Context, 
 
 		botName := ""
 		if msg.BotProfile != nil && msg.BotProfile.Name != "" {
-			botName = msg.BotProfile.Name
+			botName = text.SanitizeInline(msg.BotProfile.Name)
 		}
 
 		fileCount := len(msg.Files)
@@ -2200,7 +2049,7 @@ func (ch *ConversationsHandler) convertMessagesFromSearch(ctx context.Context, s
 		userName, realName, ok := resolver.resolve(msg.User)
 
 		if !ok && msg.User == "" && msg.Username != "" {
-			userName, realName, ok = getBotInfo(msg.Username)
+			userName, realName, ok = getBotInfo("", msg.Username)
 		}
 
 		if !ok {
@@ -2315,35 +2164,13 @@ func (ch *ConversationsHandler) parseParamsToolConversations(ctx context.Context
 }
 
 func (ch *ConversationsHandler) parseParamsToolAddMessage(ctx context.Context, request mcp.CallToolRequest) (*addMessageParams, error) {
-	toolConfig := os.Getenv("SLACK_MCP_ADD_MESSAGE_TOOL")
-	enabledTools := os.Getenv("SLACK_MCP_ENABLED_TOOLS")
-
-	if toolConfig == "" {
-		if !strings.Contains(enabledTools, "conversations_add_message") {
-			ch.logger.Error("Add-message tool disabled by default")
-			return nil, errors.New(
-				"by default, the conversations_add_message tool is disabled to guard Slack workspaces against accidental spamming. " +
-					"To enable it, set the SLACK_MCP_ADD_MESSAGE_TOOL environment variable to true, 1, or comma separated list of channels " +
-					"to limit where the MCP can post messages, e.g. 'SLACK_MCP_ADD_MESSAGE_TOOL=C1234567890,D0987654321', 'SLACK_MCP_ADD_MESSAGE_TOOL=!C1234567890' " +
-					"to enable all except one or 'SLACK_MCP_ADD_MESSAGE_TOOL=true' for all channels and DMs",
-			)
-		}
-		toolConfig = "true"
-	}
-
-	channel := request.GetString("channel_id", "")
-	if channel == "" {
-		ch.logger.Error("channel_id missing in add-message params")
-		return nil, errors.New("channel_id must be a string")
-	}
-	channel, err := ch.resolveChannelID(ctx, channel)
+	channel, err := ch.checkWriteTarget(ctx, toolconfig.ConversationsAddMessage, request.GetString("channel_id", ""))
 	if err != nil {
-		ch.logger.Error("Channel not found", zap.String("channel", channel), zap.Error(err))
 		return nil, err
 	}
-	if !isChannelAllowed(channel) {
-		ch.logger.Warn("Add-message tool not allowed for channel", zap.String("channel", channel), zap.String("policy", toolConfig))
-		return nil, fmt.Errorf("conversations_add_message tool is not allowed for channel %q, applied policy: %s", channel, toolConfig)
+	asUser := request.GetBool("as_user", false)
+	if err := ch.checkAsUser(asUser); err != nil {
+		return nil, err
 	}
 
 	threadTs := request.GetString("thread_ts", "")
@@ -2407,39 +2234,18 @@ func (ch *ConversationsHandler) parseParamsToolAddMessage(ctx context.Context, r
 		text:        msgText,
 		contentType: contentType,
 		blocks:      blocks,
-		asUser:      request.GetBool("as_user", false),
+		asUser:      asUser,
 	}, nil
 }
 
-func (ch *ConversationsHandler) parseParamsToolReaction(ctx context.Context, request mcp.CallToolRequest) (*addReactionParams, error) {
-	toolConfig := os.Getenv("SLACK_MCP_REACTION_TOOL")
-	enabledTools := os.Getenv("SLACK_MCP_ENABLED_TOOLS")
-
-	if toolConfig == "" {
-		if !strings.Contains(enabledTools, "reactions_add") && !strings.Contains(enabledTools, "reactions_remove") {
-			ch.logger.Error("Reactions tool disabled by default")
-			return nil, errors.New(
-				"by default, the reactions tools are disabled to guard Slack workspaces against accidental spamming. " +
-					"To enable them, set the SLACK_MCP_REACTION_TOOL environment variable to true, 1, or comma separated list of channels " +
-					"to limit where the MCP can manage reactions, e.g. 'SLACK_MCP_REACTION_TOOL=C1234567890,D0987654321', 'SLACK_MCP_REACTION_TOOL=!C1234567890' " +
-					"to enable all except one or 'SLACK_MCP_REACTION_TOOL=true' for all channels and DMs",
-			)
-		}
-		toolConfig = "true"
-	}
-
-	channel := request.GetString("channel_id", "")
-	if channel == "" {
-		return nil, errors.New("channel_id is required")
-	}
-	channel, err := ch.resolveChannelID(ctx, channel)
+func (ch *ConversationsHandler) parseParamsToolReaction(ctx context.Context, tool string, request mcp.CallToolRequest) (*addReactionParams, error) {
+	channel, err := ch.checkWriteTarget(ctx, tool, request.GetString("channel_id", ""))
 	if err != nil {
-		ch.logger.Error("Channel not found", zap.String("channel", channel), zap.Error(err))
 		return nil, err
 	}
-	if !isChannelAllowedForConfig(channel, toolConfig) {
-		ch.logger.Warn("Reactions tool not allowed for channel", zap.String("channel", channel), zap.String("policy", toolConfig))
-		return nil, fmt.Errorf("reactions tools are not allowed for channel %q, applied policy: %s", channel, toolConfig)
+	asUser := request.GetBool("as_user", false)
+	if err := ch.checkAsUser(asUser); err != nil {
+		return nil, err
 	}
 
 	timestamp := request.GetString("timestamp", "")
@@ -2456,27 +2262,13 @@ func (ch *ConversationsHandler) parseParamsToolReaction(ctx context.Context, req
 		channel:   channel,
 		timestamp: timestamp,
 		emoji:     emoji,
-		asUser:    request.GetBool("as_user", false),
+		asUser:    asUser,
 	}, nil
 }
 
 func (ch *ConversationsHandler) parseParamsToolFilesGet(request mcp.CallToolRequest) (*filesGetParams, error) {
-	toolConfig := os.Getenv("SLACK_MCP_ATTACHMENT_TOOL")
-	enabledTools := os.Getenv("SLACK_MCP_ENABLED_TOOLS")
-
-	if toolConfig == "" {
-		if !strings.Contains(enabledTools, "attachment_get_data") {
-			ch.logger.Error("Attachment tool disabled by default")
-			return nil, errors.New(
-				"by default, the attachment_get_data tool is disabled. " +
-					"To enable it, set the SLACK_MCP_ATTACHMENT_TOOL environment variable to true or 1",
-			)
-		}
-		toolConfig = "true"
-	}
-	if toolConfig != "true" && toolConfig != "1" && toolConfig != "yes" {
-		ch.logger.Error("Attachment tool disabled", zap.String("config", toolConfig))
-		return nil, errors.New("SLACK_MCP_ATTACHMENT_TOOL must be set to 'true', '1', or 'yes' to enable")
+	if err := ch.checkToolEnabled(toolconfig.AttachmentGetData); err != nil {
+		return nil, err
 	}
 
 	fileID := request.GetString("file_id", "")
@@ -2486,6 +2278,7 @@ func (ch *ConversationsHandler) parseParamsToolFilesGet(request mcp.CallToolRequ
 
 	return &filesGetParams{
 		fileID: fileID,
+		save:   request.GetBool("save", false),
 	}, nil
 }
 
@@ -2496,12 +2289,10 @@ func (ch *ConversationsHandler) parseParamsToolUsersSearch(request mcp.CallToolR
 	}
 
 	limit := request.GetInt("limit", 10)
-	if limit <= 0 {
+	if limit == 0 {
 		limit = 10
 	}
-	if limit > 100 {
-		limit = 100
-	}
+	limit = clampInt(limit, 1, maxUsersSearchLimit)
 
 	return &usersSearchParams{
 		query: query,
@@ -2513,46 +2304,28 @@ func (ch *ConversationsHandler) parseParamsToolUnreads(request mcp.CallToolReque
 	return &unreadsParams{
 		includeMessages:       request.GetBool("include_messages", true),
 		channelTypes:          request.GetString("channel_types", "all"),
-		maxChannels:           request.GetInt("max_channels", 50),
-		maxMessagesPerChannel: request.GetInt("max_messages_per_channel", 10),
+		maxChannels:           clampInt(request.GetInt("max_channels", 50), 1, maxUnreadsChannels),
+		maxMessagesPerChannel: clampInt(request.GetInt("max_messages_per_channel", 10), 1, maxUnreadsMessagesPerChannel),
 		mentionsOnly:          request.GetBool("mentions_only", false),
-		includeMuted:          request.GetBool("include_muted", false),
 	}
 }
 
-func (ch *ConversationsHandler) parseParamsToolMark(request mcp.CallToolRequest) (*markParams, error) {
-	toolConfig := os.Getenv("SLACK_MCP_MARK_TOOL")
-	if toolConfig == "" {
-		ch.logger.Error("Mark tool disabled by default")
-		return nil, errors.New(
-			"by default, the conversations_mark tool is disabled to prevent accidental marking of messages as read. " +
-				"To enable it, set the SLACK_MCP_MARK_TOOL environment variable to true or 1, " +
-				"e.g. 'SLACK_MCP_MARK_TOOL=true'",
-		)
-	}
-	if toolConfig != "1" && toolConfig != "true" && toolConfig != "yes" {
-		ch.logger.Error("Mark tool disabled by config", zap.String("config", toolConfig))
-		return nil, errors.New(
-			"the conversations_mark tool is disabled. " +
-				"To enable it, set the SLACK_MCP_MARK_TOOL environment variable to true or 1",
-		)
+func (ch *ConversationsHandler) parseParamsToolMark(ctx context.Context, request mcp.CallToolRequest) (*markParams, error) {
+	if err := ch.checkToolEnabled(toolconfig.ConversationsMark); err != nil {
+		return nil, err
 	}
 
-	channel := request.GetString("channel_id", "")
+	channel := strings.TrimSpace(request.GetString("channel_id", ""))
 	if channel == "" {
 		ch.logger.Error("channel_id missing in mark params")
 		return nil, errors.New("channel_id is required")
 	}
 
-	// Resolve channel name to ID if needed
-	if strings.HasPrefix(channel, "#") || strings.HasPrefix(channel, "@") {
-		channelsMaps := ch.apiProvider.ProvideChannelsMaps()
-		chn, ok := channelsMaps.ChannelsInv[channel]
-		if !ok {
-			ch.logger.Error("Channel not found", zap.String("channel", channel))
-			return nil, fmt.Errorf("channel %q not found", channel)
-		}
-		channel = channelsMaps.Channels[chn].ID
+	// Resolve channel name to ID with the same refresh-and-retry as the
+	// other tools.
+	channel, err := ch.resolveChannelID(ctx, channel)
+	if err != nil {
+		return nil, err
 	}
 
 	ts := request.GetString("ts", "")
@@ -2616,7 +2389,7 @@ func (ch *ConversationsHandler) parseParamsToolSearch(ctx context.Context, req m
 	}
 
 	finalQuery := buildQuery(freeText, filters)
-	limit := req.GetInt("limit", 100)
+	limit := clampInt(req.GetInt("limit", 20), 1, maxSearchLimit)
 	cursor := req.GetString("cursor", "")
 
 	var (
@@ -2635,7 +2408,7 @@ func (ch *ConversationsHandler) parseParamsToolSearch(ctx context.Context, req m
 			return nil, fmt.Errorf("invalid cursor: %v", cursor)
 		}
 		page, err = strconv.Atoi(parts[1])
-		if err != nil || page < 1 {
+		if err != nil || page < 1 || page > maxSearchPage {
 			ch.logger.Error("Invalid cursor page", zap.String("cursor", cursor), zap.Error(err))
 			return nil, fmt.Errorf("invalid cursor page: %v", err)
 		}
@@ -2760,19 +2533,31 @@ func (r *userResolver) resolve(userID string) (userName, realName string, ok boo
 	return patched.Name, patched.RealName, true
 }
 
-func getBotInfo(botID string) (userName, realName string, ok bool) {
-	return botID, botID, true
+// getBotInfo renders the author of a bot message. The username of a
+// bot_message is chosen by whoever posted it, so it is shown as
+// "bot:<username>" together with the bot ID and is never used as a real
+// name, which would let a bot impersonate a person.
+func getBotInfo(botID, username string) (userName, realName string, ok bool) {
+	name := text.SanitizeInline(username)
+	if name == "" {
+		name = "unknown"
+	}
+	userName = "bot:" + name
+	if botID = text.SanitizeInline(botID); botID != "" {
+		userName += " (" + botID + ")"
+	}
+	return userName, "", true
 }
 
 func limitByNumeric(limit string, defaultLimit int) (int, error) {
 	if limit == "" {
 		return defaultLimit, nil
 	}
-	n, err := strconv.Atoi(limit)
+	n, err := strconv.Atoi(strings.TrimSpace(limit))
 	if err != nil {
 		return 0, fmt.Errorf("invalid numeric limit: %q", limit)
 	}
-	return n, nil
+	return clampInt(n, 1, maxConversationsNumericLimit), nil
 }
 
 func limitByExpression(limit, defaultLimit string) (slackLimit int, oldest, latest string, err error) {
@@ -2785,7 +2570,7 @@ func limitByExpression(limit, defaultLimit string) (slackLimit int, oldest, late
 	suffix := limit[len(limit)-1]
 	numStr := limit[:len(limit)-1]
 	n, err := strconv.Atoi(numStr)
-	if err != nil || n <= 0 {
+	if err != nil || n <= 0 || n > maxExpressionUnits {
 		return 0, "", "", fmt.Errorf("invalid duration limit %q: must be a positive integer followed by 'd', 'w', or 'm'", limit)
 	}
 	now := time.Now()

@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/gocarina/gocsv"
 	"github.com/korotovsky/slack-mcp-server/pkg/provider"
+	"github.com/korotovsky/slack-mcp-server/pkg/toolconfig"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/slack-go/slack"
 	"go.uber.org/zap"
@@ -29,12 +31,14 @@ type UserGroup struct {
 type UsergroupsHandler struct {
 	apiProvider *provider.ApiProvider
 	logger      *zap.Logger
+	cfg         *toolconfig.Config
 }
 
-func NewUsergroupsHandler(apiProvider *provider.ApiProvider, logger *zap.Logger) *UsergroupsHandler {
+func NewUsergroupsHandler(apiProvider *provider.ApiProvider, logger *zap.Logger, cfg *toolconfig.Config) *UsergroupsHandler {
 	return &UsergroupsHandler{
 		apiProvider: apiProvider,
 		logger:      logger,
+		cfg:         cfg,
 	}
 }
 
@@ -99,6 +103,10 @@ func (h *UsergroupsHandler) UsergroupsListHandler(ctx context.Context, request m
 func (h *UsergroupsHandler) UsergroupsCreateHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	h.logger.Debug("UsergroupsCreateHandler called", zap.Any("params", request.Params))
 
+	if !h.cfg.ToolEnabled(toolconfig.UsergroupsCreate) {
+		return nil, toolconfig.DisabledError(toolconfig.UsergroupsCreate)
+	}
+
 	if ready, err := h.apiProvider.IsReady(); !ready {
 		h.logger.Error("API provider not ready", zap.Error(err))
 		return nil, err
@@ -162,6 +170,10 @@ func (h *UsergroupsHandler) UsergroupsCreateHandler(ctx context.Context, request
 // UsergroupsUpdateHandler updates an existing user group's metadata
 func (h *UsergroupsHandler) UsergroupsUpdateHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	h.logger.Debug("UsergroupsUpdateHandler called", zap.Any("params", request.Params))
+
+	if !h.cfg.ToolEnabled(toolconfig.UsergroupsUpdate) {
+		return nil, toolconfig.DisabledError(toolconfig.UsergroupsUpdate)
+	}
 
 	if ready, err := h.apiProvider.IsReady(); !ready {
 		h.logger.Error("API provider not ready", zap.Error(err))
@@ -238,6 +250,10 @@ func (h *UsergroupsHandler) UsergroupsUpdateHandler(ctx context.Context, request
 func (h *UsergroupsHandler) UsergroupsUsersUpdateHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	h.logger.Debug("UsergroupsUsersUpdateHandler called", zap.Any("params", request.Params))
 
+	if !h.cfg.ToolEnabled(toolconfig.UsergroupsUsersUpdate) {
+		return nil, toolconfig.DisabledError(toolconfig.UsergroupsUsersUpdate)
+	}
+
 	if ready, err := h.apiProvider.IsReady(); !ready {
 		h.logger.Error("API provider not ready", zap.Error(err))
 		return nil, err
@@ -305,6 +321,9 @@ func (h *UsergroupsHandler) UsergroupsMeHandler(ctx context.Context, request mcp
 	action := request.GetString("action", "")
 	if action != "list" && action != "join" && action != "leave" {
 		return nil, errors.New("action must be 'list', 'join', or 'leave'")
+	}
+	if action != "list" && !h.cfg.UsergroupsMeWriteEnabled() {
+		return nil, fmt.Errorf("usergroups_me action %q changes group membership and is disabled; set %s=true to enable it", action, toolconfig.EnvUsergroupsWriteTool)
 	}
 
 	// Get current user ID
