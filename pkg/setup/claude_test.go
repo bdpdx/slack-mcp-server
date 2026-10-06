@@ -87,3 +87,38 @@ func TestRegisterMCPNonStandardClaudeHome(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(manual, "CLAUDE_CONFIG_DIR=/x/agent claude mcp add"), manual)
 }
+
+func TestRegisterMCPManualQuotesEnvValue(t *testing.T) {
+	manual, err := RegisterMCP(&fakeRunner{missing: map[string]bool{"claude": true}}, TypeClaude, "/a b/agent", "/b/slack-mcp-server")
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(manual, "CLAUDE_CONFIG_DIR='/a b/agent' claude mcp add"), manual)
+	manual, err = RegisterMCP(&fakeRunner{missing: map[string]bool{"codex": true}}, TypeCodex, "/a b/.codex", "/b/slack-mcp-server")
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(manual, "CODEX_HOME='/a b/.codex' codex mcp add"), manual)
+}
+
+func TestInstallClaudeInvalidSettingsChangesNothing(t *testing.T) {
+	home := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(home, "settings.json"), []byte(`{"hooks": []}`), 0o600))
+	_, err := InstallClaude(home, "/b/slack-mcp-server", &fakeRunner{}, testNow)
+	assert.ErrorContains(t, err, "settings.json")
+	assert.ErrorContains(t, err, "not a JSON object")
+	assert.NoDirExists(t, filepath.Join(home, "skills"))
+	data, _ := os.ReadFile(filepath.Join(home, "settings.json"))
+	assert.Equal(t, `{"hooks": []}`, string(data))
+
+	home2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(home2, "settings.json"), []byte(`{`), 0o600))
+	_, err = InstallClaude(home2, "/b/slack-mcp-server", &fakeRunner{}, testNow)
+	assert.Error(t, err)
+	assert.NoDirExists(t, filepath.Join(home2, "skills"))
+}
+
+func TestInstallClaudeNullSettings(t *testing.T) {
+	home := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(home, "settings.json"), []byte(`null`), 0o600))
+	_, err := InstallClaude(home, "/b/slack-mcp-server", &fakeRunner{}, testNow)
+	require.NoError(t, err)
+	data, _ := os.ReadFile(filepath.Join(home, "settings.json"))
+	assert.Contains(t, string(data), `"hooks"`)
+}

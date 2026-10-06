@@ -30,6 +30,9 @@ func readJSONObject(path string) (map[string]any, error) {
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("%s is not valid JSON (%v); fix it and run setup again", path, err)
 	}
+	if doc == nil { // literal null
+		doc = map[string]any{}
+	}
 	return doc, nil
 }
 
@@ -45,17 +48,22 @@ func writeJSONObject(path string, doc map[string]any, now time.Time) (bool, erro
 // Code home. The env file is written separately.
 func InstallClaude(home, bin string, r Runner, now time.Time) (Result, error) {
 	res := Result{Home: home}
-	changed, err := InstallSkill(home, TypeClaude, bin, now)
-	res.Changed = append(res.Changed, changed...)
-	if err != nil {
-		return res, err
-	}
 	settings := filepath.Join(home, "settings.json")
 	doc, err := readJSONObject(settings)
 	if err != nil {
 		return res, err
 	}
-	events, _ := doc["hooks"].(map[string]any)
+	var events map[string]any
+	if raw, ok := doc["hooks"]; ok && raw != nil {
+		if events, ok = raw.(map[string]any); !ok {
+			return res, fmt.Errorf("%s: \"hooks\" is not a JSON object; fix it and run setup again", settings)
+		}
+	}
+	changed, err := InstallSkill(home, TypeClaude, bin, now)
+	res.Changed = append(res.Changed, changed...)
+	if err != nil {
+		return res, err
+	}
 	doc["hooks"] = MergeHooks(events, ClaudeHookSpecs(), bin, EnvPath(home), "")
 	if wrote, err := writeJSONObject(settings, doc, now); err != nil {
 		return res, err

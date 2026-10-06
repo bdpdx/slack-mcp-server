@@ -48,7 +48,8 @@ func RegisterMCP(r Runner, kind, home, bin string) (string, error) {
 		}
 		prefix := ""
 		if len(env) > 0 {
-			prefix = shellQuote(env[0]) + " "
+			k, v, _ := strings.Cut(env[0], "=")
+			prefix = k + "=" + shellQuote(v) + " "
 		}
 		return prefix + name + " " + strings.Join(quoted, " "), nil
 	}
