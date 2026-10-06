@@ -89,9 +89,9 @@ func chooseHomes(o Options, st *State) ([]Home, error) {
 		}
 		switch i {
 		case 0:
-			return homes, nil
+			return homes, st.Save(filepath.Join(o.Repo, ".install-state.json"))
 		case 1:
-			h, err := addHome(o)
+			h, err := addHome(o, homes)
 			if err != nil {
 				return nil, err
 			}
@@ -108,14 +108,26 @@ func chooseHomes(o Options, st *State) ([]Home, error) {
 	}
 }
 
-func addHome(o Options) (Home, error) {
-	raw, err := o.P.Ask("Path of the home", "")
-	if err != nil {
-		return Home{}, err
-	}
-	path, err := ExpandPath(raw, o.UserHome)
-	if err != nil {
-		return Home{}, err
+func addHome(o Options, homes []Home) (Home, error) {
+	var path string
+	for path == "" {
+		raw, err := o.P.Ask("Path of the home", "")
+		if err != nil {
+			return Home{}, err
+		}
+		if raw == "" {
+			o.P.Say("A path is required.")
+			continue
+		}
+		if path, err = ExpandPath(raw, o.UserHome); err != nil {
+			return Home{}, err
+		}
+		for _, h := range homes {
+			if h.Path == path {
+				o.P.Say("%s is already in the list.", path)
+				path = ""
+			}
+		}
 	}
 	typ := DetectType(path)
 	if typ == "" {
@@ -155,7 +167,11 @@ func editHome(o Options, st *State, homes []Home, remove bool) ([]Home, error) {
 		return nil, err
 	}
 	dropState(st, old.Path)
-	homes[i] = Home{Path: path, Type: old.Type, HasEnv: exists(EnvPath(path))}
+	typ := DetectType(path)
+	if typ == "" {
+		typ = old.Type
+	}
+	homes[i] = Home{Path: path, Type: typ, HasEnv: exists(EnvPath(path))}
 	return homes, nil
 }
 
@@ -410,7 +426,11 @@ func validateTokens(ctx context.Context, o Options, name string, tok Tokens) (st
 		p.Say("The app-level token was rejected by Slack: %v. Please enter the app-level token again.", err)
 		return "app", nil
 	}
-	if taken, err := o.V.BotNameTaken(ctx, tok.Bot, name, bot.UserID); err == nil && taken {
+	taken, err := o.V.BotNameTaken(ctx, tok.Bot, name, bot.UserID)
+	switch {
+	case err != nil:
+		p.Say("Could not check whether %q is already used by another bot: %v", name, err)
+	case taken:
 		p.Say(takenMsg, name)
 	}
 	return "", nil

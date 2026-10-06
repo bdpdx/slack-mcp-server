@@ -2,6 +2,7 @@ package setup
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,12 +12,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type fakeValidator struct{ taken bool }
+type fakeValidator struct {
+	taken  bool
+	checkE error
+}
 
 func (f fakeValidator) AuthTest(_ context.Context, token string) (Identity, error) {
 	switch token {
 	case "xoxb-good":
 		return Identity{TeamID: "T1", UserID: "UB", User: "newbot", IsBot: true}, nil
+	case "xoxb-bad":
+		return Identity{}, errors.New("invalid_auth")
 	case "xoxp-dotted":
 		return Identity{TeamID: "T1", UserID: "UP", User: "pat.d"}, nil
 	}
@@ -24,7 +30,7 @@ func (f fakeValidator) AuthTest(_ context.Context, token string) (Identity, erro
 }
 func (fakeValidator) CheckAppToken(context.Context, string) error { return nil }
 func (f fakeValidator) BotNameTaken(context.Context, string, string, string) (bool, error) {
-	return f.taken, nil
+	return f.taken, f.checkE
 }
 
 func opts(user, repo string, p Prompter) Options {
@@ -94,7 +100,8 @@ func TestRunReasksOnlyBadToken(t *testing.T) {
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	p := &Scripted{Answers: []string{
 		"1", "pat-codex", "y", // set up; name; app exists
-		"xapp-1", "xoxp-wrong", "xoxp-good", // bot slot given a user token: prefix problem, re-ask bot
+		"xapp-1", "xoxp-wrong", // bot slot given a user token: prefix failure, re-ask bot
+
 		"xoxb-good", "xoxp-good", "y",
 	}}
 	_, err := Run(context.Background(), opts(user, repo, p))
@@ -116,4 +123,64 @@ func TestRunDottedUsernameFailsHomeOnly(t *testing.T) {
 	assert.Contains(t, res[0].Notes[0], "FAILED")
 	assert.Contains(t, res[0].Notes[0], "pat.d")
 	assert.NoFileExists(t, EnvPath(codex))
+}
+
+func TestRunLiveCheckReasksOnlyBotToken(t *testing.T) {
+	user, repo := t.TempDir(), t.TempDir()
+	codex := filepath.Join(user, ".codex")
+	require.NoError(t, os.MkdirAll(codex, 0o700))
+	p := &Scripted{Answers: []string{
+		"1", "pat-codex", "y",
+		"xapp-1", "xoxb-bad", "xoxp-good", // Slack rejects the bot token
+		"xoxb-good", // only the bot token is asked again
+		"y",
+	}}
+	_, err := Run(context.Background(), opts(user, repo, p))
+	require.NoError(t, err)
+	assert.Contains(t, p.Out.String(), "invalid_auth")
+	env, _ := ReadEnv(EnvPath(codex))
+	assert.Equal(t, "xoxb-good", env["SLACK_MCP_XOXB_TOKEN"])
+	assert.Equal(t, "xoxp-good", env["SLACK_MCP_XOXP_TOKEN"])
+}
+
+func runWithValidator(t *testing.T, v fakeValidator) string {
+	user, repo := t.TempDir(), t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(user, ".codex"), 0o700))
+	p := &Scripted{Answers: []string{"1", "pat-codex", "y", "xapp-1", "xoxb-good", "xoxp-good", "y"}}
+	o := opts(user, repo, p)
+	o.V = v
+	_, err := Run(context.Background(), o)
+	require.NoError(t, err)
+	return p.Out.String()
+}
+
+func TestRunBotNameCheckOutcomes(t *testing.T) {
+	assert.Contains(t, runWithValidator(t, fakeValidator{taken: true}), `another bot in this workspace is already named "pat-codex"`)
+	assert.Contains(t, runWithValidator(t, fakeValidator{checkE: errors.New("boom")}), `Could not check whether "pat-codex" is already used by another bot: boom`)
+}
+
+func TestAddHomeRejectsEmptyAndDuplicate(t *testing.T) {
+	user, repo := t.TempDir(), t.TempDir()
+	codex := filepath.Join(user, ".codex")
+	require.NoError(t, os.MkdirAll(codex, 0o700))
+	extra := filepath.Join(user, "extra")
+	require.NoError(t, os.MkdirAll(extra, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(extra, "settings.json"), []byte("{}"), 0o600))
+	require.NoError(t, os.WriteFile(EnvPath(extra), []byte("SLACK_MCP_XOXB_TOKEN=x\n"), 0o600))
+	require.NoError(t, os.WriteFile(EnvPath(codex), []byte("SLACK_MCP_XOXB_TOKEN=x\n"), 0o600))
+	p := &Scripted{Answers: []string{"2", "", codex, extra, "1", "3", "3"}} // add: empty, duplicate, ok; set up; skip both
+	res, err := Run(context.Background(), opts(user, repo, p))
+	require.NoError(t, err)
+	assert.Len(t, res, 2)
+	assert.Contains(t, p.Out.String(), "A path is required.")
+	assert.Contains(t, p.Out.String(), "already in the list")
+}
+
+func TestRunSavesStateWithoutCompletedHome(t *testing.T) {
+	user, repo := t.TempDir(), t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(user, ".codex"), 0o700))
+	_, err := Run(context.Background(), opts(user, repo, &Scripted{Answers: []string{"1", "n"}}))
+	require.ErrorIs(t, err, ErrAborted)
+	_, err = os.Stat(filepath.Join(repo, ".install-state.json"))
+	assert.NoError(t, err)
 }
