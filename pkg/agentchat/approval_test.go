@@ -148,6 +148,9 @@ func TestListenerApprovalReplies(t *testing.T) {
 	d, _ = takeApproval(t, l, "a1")
 	assert.Equal(t, "", d, "answered already")
 	assert.Empty(t, del.got, "approval-thread replies never reach the session")
+	for _, ts := range []string{"2000.2", "2000.3", "2000.4", "2000.5"} {
+		assert.True(t, l.state.WasDelivered("s1", "C1", ts), "consumed reply %s is marked delivered, so a restarted listener's recovery skips it", ts)
+	}
 
 	l.HandleMessage(ctx, Message{Channel: "C1", TS: "2000.6", ThreadTS: "1999.1", User: "UBR", Text: "other thread"})
 	assert.Len(t, del.got, 1, "other threads are delivered as usual")

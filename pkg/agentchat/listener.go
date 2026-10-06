@@ -171,7 +171,11 @@ func (l *Listener) notice(ctx context.Context, m Message) Notice {
 
 // HandleMessage routes one live message to every subscribed session.
 func (l *Listener) HandleMessage(ctx context.Context, m Message) {
-	if !m.Deliverable() || m.From(l.Self) || l.approvalReply(m) {
+	if !m.Deliverable() || m.From(l.Self) {
+		return
+	}
+	if l.approvalReply(m) {
+		l.markConsumed(m)
 		return
 	}
 	l.mu.Lock()
@@ -858,6 +862,20 @@ func (l *Listener) approvalReply(m Message) bool {
 		}
 	}
 	return true
+}
+
+// markConsumed records m as delivered to every session watching its
+// channel, so recovery after a listener restart never pushes an approval
+// answer the listener kept out of the sessions.
+func (l *Listener) markConsumed(m Message) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, sub := range l.state.Watchers(m.Channel) {
+		l.state.MarkDelivered(sub.SessionID, m.Channel, m.TS, l.Now())
+	}
+	if err := l.state.Save(l.StateFile); err != nil {
+		l.Log.Error("saving state failed", zap.Error(err))
+	}
 }
 
 // TakeApproval returns request id's answer for the waiting hook: a decision
