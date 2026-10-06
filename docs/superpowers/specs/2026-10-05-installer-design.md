@@ -87,7 +87,7 @@ tokens. Used only to offer defaults on re-runs.
    Then wait for Enter, and ask the user to set an icon:
    https://app.slack.com/apps → Build → <App> → Settings → Basic
    Information → Display Information.
-3. **Tokens**, each at a hidden prompt (`golang.org/x/term`), with where to
+3. **Tokens**, each at a visible prompt (shown as pasted, so the user can check it), with where to
    find it:
    - App-level token `xapp-…`: Basic Information → App-Level Tokens →
      Generate Token and Scopes, scope `connections:write`. Shown only once;

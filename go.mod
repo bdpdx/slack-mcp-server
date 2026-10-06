@@ -14,7 +14,6 @@ require (
 	github.com/takara2314/slack-go-util v0.4.0
 	go.uber.org/zap v1.27.1
 	golang.org/x/net v0.59.0
-	golang.org/x/term v0.46.0
 	golang.org/x/time v0.14.0
 )
 

@@ -8,19 +8,17 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-
-	"golang.org/x/term"
 )
 
 // ErrAborted ends setup when input runs out (EOF, Ctrl-D).
 var ErrAborted = errors.New("setup aborted")
 
 // Prompter asks the user questions. Ask returns def for an empty answer;
-// Choose numbers options from 1 and returns the chosen index; Secret reads
-// without echo and trims whitespace and wrapping quotes.
+// Choose numbers options from 1 and returns the chosen index; Secret reads a
+// pasted token (shown as typed, so it can be checked) and trims whitespace
+// and wrapping quotes.
 type Prompter interface {
 	Say(format string, a ...any)
 	Ask(question, def string) (string, error)
@@ -30,7 +28,7 @@ type Prompter interface {
 }
 
 // lineSource returns one answer line or ErrAborted.
-type lineSource func(secret bool) (string, error)
+type lineSource func() (string, error)
 
 type prompter struct {
 	out  io.Writer
@@ -45,7 +43,7 @@ func (p *prompter) Ask(q, def string) (string, error) {
 	} else {
 		fmt.Fprintf(p.out, "%s: ", q)
 	}
-	s, err := p.next(false)
+	s, err := p.next()
 	if err != nil {
 		return "", err
 	}
@@ -95,38 +93,23 @@ func (p *prompter) Choose(q string, options []string, def int) (int, error) {
 }
 
 func (p *prompter) Secret(q string) (string, error) {
-	fmt.Fprintf(p.out, "%s (input hidden): ", q)
-	s, err := p.next(true)
-	fmt.Fprintln(p.out)
+	fmt.Fprintf(p.out, "%s: ", q)
+	s, err := p.next()
 	if err != nil {
 		return "", err
 	}
 	return strings.Trim(strings.TrimSpace(s), `"'`), nil
 }
 
-// Terminal prompts on a real terminal, hiding secrets.
+// Terminal prompts on a real terminal. Pasted tokens are shown as typed, so
+// the user can check them.
 type Terminal struct{ prompter }
 
 // NewTerminal reads answers from in and writes prompts to out.
 func NewTerminal(in *os.File, out io.Writer) *Terminal {
 	r := bufio.NewReader(in)
 	t := &Terminal{prompter{out: out}}
-	t.next = func(secret bool) (string, error) {
-		if fd := int(in.Fd()); secret && term.IsTerminal(fd) {
-			state, err := term.GetState(fd)
-			if err != nil {
-				return "", ErrAborted
-			}
-			restore := func() {
-				_ = term.Restore(fd, state)
-				fmt.Fprintln(out)
-			}
-			b, err := restoreOnInterrupt(restore, os.Exit, func() ([]byte, error) { return term.ReadPassword(fd) })
-			if err != nil {
-				return "", ErrAborted
-			}
-			return string(b), nil
-		}
+	t.next = func() (string, error) {
 		line, err := r.ReadString('\n')
 		if err != nil && line == "" {
 			return "", ErrAborted
@@ -134,28 +117,6 @@ func NewTerminal(in *os.File, out io.Writer) *Terminal {
 		return strings.TrimRight(line, "\r\n"), nil
 	}
 	return t
-}
-
-// restoreOnInterrupt runs read; if SIGINT (Ctrl-C) arrives meanwhile it
-// calls restore (turning terminal echo back on) and exit(130).
-func restoreOnInterrupt(restore func(), exit func(int), read func() ([]byte, error)) ([]byte, error) {
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt)
-	done, finished := make(chan struct{}), make(chan struct{})
-	go func() {
-		defer close(finished)
-		select {
-		case <-sigs:
-			restore()
-			exit(130)
-		case <-done:
-		}
-	}()
-	b, err := read()
-	signal.Stop(sigs)
-	close(done)
-	<-finished
-	return b, err
 }
 
 // Scripted answers prompts from a list, for tests; Out records the output.
@@ -167,7 +128,7 @@ type Scripted struct {
 
 func (s *Scripted) get() *prompter {
 	if s.p == nil {
-		s.p = &prompter{out: &s.Out, next: func(bool) (string, error) {
+		s.p = &prompter{out: &s.Out, next: func() (string, error) {
 			if len(s.Answers) == 0 {
 				return "", ErrAborted
 			}
