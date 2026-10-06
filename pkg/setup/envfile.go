@@ -2,6 +2,7 @@ package setup
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -32,8 +33,26 @@ func ReadEnv(path string) (map[string]string, error) {
 	return values, err
 }
 
-// DefaultTools proposes tool settings: existing values win, else defaults.
+// CustomTools returns the existing *_TOOL settings that are not plain
+// booleans (e.g. channel lists like "C123,#general" or "!C123"). Setup keeps
+// them verbatim and does not offer to toggle them.
+func CustomTools(existing map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range existing {
+		if !strings.HasPrefix(k, "SLACK_MCP_") || !strings.HasSuffix(k, "_TOOL") {
+			continue
+		}
+		if _, ok := toolconfig.ParseBool(v); !ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// DefaultTools proposes on/off tool settings: existing values win, else
+// defaults. Custom (non-boolean) values are left out; MergeEnv keeps them.
 func DefaultTools(existing map[string]string) map[string]bool {
+	custom := CustomTools(existing)
 	tools := map[string]bool{}
 	for _, k := range DefaultOnTools {
 		tools[k] = true
@@ -42,9 +61,10 @@ func DefaultTools(existing map[string]string) map[string]bool {
 		tools[k] = false
 	}
 	for k := range tools {
-		if v, ok := existing[k]; ok {
-			on, _ := toolconfig.ParseBool(v)
-			tools[k] = on
+		if _, ok := custom[k]; ok {
+			delete(tools, k)
+		} else if v, ok := existing[k]; ok {
+			tools[k], _ = toolconfig.ParseBool(v)
 		}
 	}
 	return tools
@@ -68,8 +88,9 @@ func MergeEnv(existing map[string]string, tok Tokens, tools map[string]bool) map
 	return out
 }
 
-// RenderEnv writes sorted KEY=value lines (SLACK_MCP_* only).
-func RenderEnv(values map[string]string) []byte {
+// RenderEnv writes sorted KEY=value lines (SLACK_MCP_* only), quoting a
+// value only when godotenv would not read it back unchanged.
+func RenderEnv(values map[string]string) ([]byte, error) {
 	keys := make([]string, 0, len(values))
 	for k := range values {
 		if strings.HasPrefix(k, "SLACK_MCP_") {
@@ -80,7 +101,23 @@ func RenderEnv(values map[string]string) []byte {
 	var b strings.Builder
 	b.WriteString("# slack-mcp-server settings, written by `slack-mcp-server setup`. Keep private (mode 600).\n")
 	for _, k := range keys {
-		b.WriteString(k + "=" + values[k] + "\n")
+		v, err := envValue(k, values[k])
+		if err != nil {
+			return nil, err
+		}
+		b.WriteString(k + "=" + v + "\n")
 	}
-	return []byte(b.String())
+	return []byte(b.String()), nil
+}
+
+// envValue returns the first form of v (plain, single-quoted, double-quoted
+// with escapes) that godotenv parses back to exactly v.
+func envValue(k, v string) (string, error) {
+	dq := strings.NewReplacer(`\`, `\\`, "\n", `\n`, "\r", `\r`, `"`, `\"`, "$", `\$`).Replace(v)
+	for _, form := range []string{v, "'" + v + "'", `"` + dq + `"`} {
+		if got, err := godotenv.Unmarshal(k + "=" + form); err == nil && len(got) == 1 && got[k] == v {
+			return form, nil
+		}
+	}
+	return "", fmt.Errorf("the value of %s cannot be written to an env file; change it and run setup again", k)
 }

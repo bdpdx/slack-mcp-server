@@ -252,18 +252,32 @@ func configureEnv(ctx context.Context, o Options, h Home, saved string) (string,
 	if err != nil {
 		return "", nil, err
 	}
-	tools, err := askTools(o.P, DefaultTools(existing))
+	tools, err := askTools(o.P, DefaultTools(existing), CustomTools(existing))
 	if err != nil {
 		return "", nil, err
 	}
-	data := RenderEnv(MergeEnv(existing, tok, tools))
+	data, err := RenderEnv(MergeEnv(existing, tok, tools))
+	if err != nil {
+		return "", nil, err
+	}
 	if _, err := replaceFile(envPath, data, 0o600, o.Now()); err != nil {
 		return "", nil, err
 	}
 	return name, []string{fmt.Sprintf(iconMsgFmt, name, name)}, nil
 }
 
-func askTools(p Prompter, tools map[string]bool) (map[string]bool, error) {
+func askTools(p Prompter, tools map[string]bool, custom map[string]string) (map[string]bool, error) {
+	if len(custom) > 0 {
+		keys := make([]string, 0, len(custom))
+		for k := range custom {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		p.Say("These tool settings have custom values and are kept as they are:")
+		for _, k := range keys {
+			p.Say("  %s=%s: custom (kept)", k, custom[k])
+		}
+	}
 	var on []string
 	for k, v := range tools {
 		if v {

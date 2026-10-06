@@ -194,3 +194,31 @@ func TestExistingBinFor(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(claude, "settings.json"), []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"/opt/bin/slack-mcp-server chat --env-file /x relay-hook"}]}]}}`), 0o600))
 	assert.Equal(t, "/opt/bin/slack-mcp-server", existingBinFor(user, repo))
 }
+
+func TestRunReinstallKeepsCustomToolValues(t *testing.T) {
+	user, repo := t.TempDir(), t.TempDir()
+	codex := filepath.Join(user, ".codex")
+	require.NoError(t, os.MkdirAll(codex, 0o700))
+	require.NoError(t, os.WriteFile(EnvPath(codex), []byte(
+		"SLACK_MCP_XOXB_TOKEN=xoxb-old\nSLACK_MCP_ADD_MESSAGE_TOOL=C123,#general\nSLACK_MCP_DELETE_MESSAGE_TOOL='!C123 #x'\n"), 0o600))
+	answers := []string{"1", "2", "y", "pat-codex", "y", "xapp-1", "xoxb-good", "xoxp-good", "n"}
+	for range len(DefaultOnTools) + len(DefaultOffTools) - 2 {
+		answers = append(answers, "") // keep each toggle's default
+	}
+	p := &Scripted{Answers: answers}
+	res, err := Run(context.Background(), opts(user, repo, p))
+	require.NoError(t, err)
+	require.Len(t, res, 1)
+	out := p.Out.String()
+	assert.Contains(t, out, "SLACK_MCP_ADD_MESSAGE_TOOL=C123,#general: custom (kept)")
+	assert.Contains(t, out, "SLACK_MCP_DELETE_MESSAGE_TOOL=!C123 #x: custom (kept)")
+	assert.NotContains(t, out, "Enable SLACK_MCP_ADD_MESSAGE_TOOL?")
+	assert.NotContains(t, out, "Enable SLACK_MCP_DELETE_MESSAGE_TOOL?")
+	assert.Contains(t, out, "Enable SLACK_MCP_JOIN_TOOL?")
+
+	env, err := ReadEnv(EnvPath(codex))
+	require.NoError(t, err)
+	assert.Equal(t, "C123,#general", env["SLACK_MCP_ADD_MESSAGE_TOOL"])
+	assert.Equal(t, "!C123 #x", env["SLACK_MCP_DELETE_MESSAGE_TOOL"])
+	assert.Equal(t, "xoxb-good", env["SLACK_MCP_XOXB_TOKEN"])
+}
