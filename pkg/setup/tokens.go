@@ -53,8 +53,9 @@ func (SlackValidator) AuthTest(ctx context.Context, token string) (Identity, err
 	return Identity{TeamID: r.TeamID, UserID: r.UserID, User: r.User, IsBot: r.BotID != ""}, nil
 }
 
-// CheckAppToken opens (and drops) a Socket Mode connection, which proves the
-// token has connections:write and the app has Socket Mode on.
+// CheckAppToken calls apps.connections.open, which proves the token has
+// connections:write and the app has Socket Mode on. It does not open the
+// returned socket.
 func (SlackValidator) CheckAppToken(ctx context.Context, token string) error {
 	_, _, err := slack.New("", slack.OptionAppLevelToken(token)).StartSocketModeContext(ctx)
 	return err
