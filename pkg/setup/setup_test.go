@@ -184,3 +184,13 @@ func TestRunSavesStateWithoutCompletedHome(t *testing.T) {
 	_, err = os.Stat(filepath.Join(repo, ".install-state.json"))
 	assert.NoError(t, err)
 }
+
+func TestExistingBinFor(t *testing.T) {
+	user, repo := t.TempDir(), t.TempDir()
+	assert.Equal(t, "", existingBinFor(user, repo))
+
+	claude := filepath.Join(user, ".claude")
+	require.NoError(t, os.MkdirAll(claude, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(claude, "settings.json"), []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"/opt/bin/slack-mcp-server chat --env-file /x relay-hook"}]}]}}`), 0o600))
+	assert.Equal(t, "/opt/bin/slack-mcp-server", existingBinFor(user, repo))
+}

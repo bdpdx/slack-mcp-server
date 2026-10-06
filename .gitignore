@@ -12,3 +12,7 @@ slack-mcp-server.env
 
 # Subagent-driven development scratch space
 .superpowers/
+
+# Installer state and generated Slack manifests
+.install-state.json
+.install/

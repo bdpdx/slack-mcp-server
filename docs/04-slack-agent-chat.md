@@ -52,15 +52,12 @@ Remove the old `[mcp_servers.slack.env]` token block from each `config.toml`.
 ## Install skills
 
 ```bash
-make install-agent-chat
+./install.sh
 ```
 
-This builds `./build/slack-mcp-server` and installs the skills pointing at `AGENT_CHAT_BIN`
-(default `~/.bin/slack-mcp-server`), which must be, or link to, that build output.
-
-The target prints the SlackAgentChat hook commands for each home. Add them to each Codex home's
-`hooks.json` (with `"statusMessage": "SlackAgentChat"`) and to `~/.claude/settings.json`, replacing
-any old `agent-chat` relay hook. Codex asks you to trust new hooks in the next session.
+This runs prerequisites, build and the interactive setup, which links `./build/slack-mcp-server`,
+installs the skills and writes the SlackAgentChat hooks for each agent home. Codex asks you to
+trust new hooks in the next session.
 
 - `UserPromptSubmit` → `relay-hook`: `%agents:` prompts (both hosts).
 - `PreToolUse` with matcher `AskUserQuestion` → `ask-hook` (Claude): questions go to the

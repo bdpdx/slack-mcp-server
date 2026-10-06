@@ -436,13 +436,32 @@ func validateTokens(ctx context.Context, o Options, name string, tok Tokens) (st
 	return "", nil
 }
 
+// existingBinFor returns the binary path installed hooks already use, or "".
+func existingBinFor(user, repo string) string {
+	st, err := LoadState(filepath.Join(repo, ".install-state.json"))
+	if err != nil {
+		st = &State{}
+	}
+	return ExistingBin(DiscoverHomes(user, st))
+}
+
 // Main runs `slack-mcp-server setup` and returns the exit code.
 func Main(args []string) int {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	repo := fs.String("repo", ".", "repository directory (for the state file and manifests)")
 	bin := fs.String("bin", "", "absolute path the binary is linked at")
+	printBin := fs.Bool("print-existing-bin", false, "print the binary path already used by installed hooks, then exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if *printBin {
+		user, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "setup:", err)
+			return 1
+		}
+		fmt.Println(existingBinFor(user, *repo))
+		return 0
 	}
 	if *bin == "" {
 		exe, err := os.Executable()
