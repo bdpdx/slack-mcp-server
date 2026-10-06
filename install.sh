@@ -70,9 +70,16 @@ if [ -z "$default_link" ]; then
 	default_link="$HOME/.local/bin/slack-mcp-server"
 fi
 while true; do
-	printf 'Link the binary at [%s]: ' "$default_link"
+	printf 'Where should the slack-mcp-server binary be linked? Press Enter for %s: ' "$default_link"
 	read -r link
-	link="${link:-$default_link}"
+	case "$link" in
+		"") link="$default_link" ;;
+		*/* | "~"*) ;;
+		*)
+			say "Enter a path such as ~/.bin/slack-mcp-server, or press Enter to use the default."
+			continue
+			;;
+	esac
 	case "$link" in
 		"~"/*) link="$HOME/${link#\~/}" ;;
 	esac

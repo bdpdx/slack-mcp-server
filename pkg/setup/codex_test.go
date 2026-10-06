@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -101,4 +102,35 @@ func TestInstallCodexBacksUpConfigBeforeCLI(t *testing.T) {
 	_, err = InstallCodex(home2, "/b/slack-mcp-server", &fakeRunner{missing: map[string]bool{"codex": true}}, &Scripted{}, testNow)
 	require.NoError(t, err)
 	assert.NoFileExists(t, filepath.Join(home2, "config.toml.bak-20261005120000"))
+}
+
+func TestInstallCodexReplacesStaleRules(t *testing.T) {
+	home := t.TempDir()
+	rulesPath := filepath.Join(home, "rules", "default.rules")
+	require.NoError(t, os.MkdirAll(filepath.Dir(rulesPath), 0o700))
+	old := `prefix_rule(pattern=["/old/y", "chat"], decision="allow")` + "\n" +
+		`prefix_rule(pattern=["git", "status"], decision="allow")` + "\n" +
+		`prefix_rule(pattern=["/other/slack-mcp-server", "chat"], decision="allow")` + "\n" +
+		`prefix_rule(pattern=["/x/slack-mcp-server", "setup"], decision="allow")` + "\n" +
+		"# keep me\n"
+	require.NoError(t, os.WriteFile(rulesPath, []byte(old), 0o600))
+
+	_, err := InstallCodex(home, "/b/slack-mcp-server", &fakeRunner{}, &Scripted{}, testNow)
+	require.NoError(t, err)
+	got, _ := os.ReadFile(rulesPath)
+	assert.Equal(t, `prefix_rule(pattern=["/old/y", "chat"], decision="allow")`+"\n"+
+		`prefix_rule(pattern=["git", "status"], decision="allow")`+"\n"+
+		`prefix_rule(pattern=["/x/slack-mcp-server", "setup"], decision="allow")`+"\n"+
+		"# keep me\n"+
+		`prefix_rule(pattern=["/b/slack-mcp-server", "chat"], decision="allow")`+"\n", string(got))
+
+	// Same path again: file unchanged, no new backup.
+	before, _ := filepath.Glob(filepath.Join(home, "rules", "*"))
+	res, err := InstallCodex(home, "/b/slack-mcp-server", &fakeRunner{}, &Scripted{}, testNow.Add(time.Hour))
+	require.NoError(t, err)
+	again, _ := os.ReadFile(rulesPath)
+	assert.Equal(t, string(got), string(again))
+	after, _ := filepath.Glob(filepath.Join(home, "rules", "*"))
+	assert.Equal(t, before, after)
+	assert.NotContains(t, res.Changed, rulesPath)
 }

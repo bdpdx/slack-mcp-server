@@ -60,6 +60,42 @@ func codexRule(bin string) string {
 	return `prefix_rule(pattern=[` + string(q) + `, "chat"], decision="allow")`
 }
 
+var chatRuleLine = regexp.MustCompile(`^\s*prefix_rule\(\s*pattern\s*=\s*\[\s*("(?:[^"\\]|\\.)*")\s*,\s*"chat"\s*[,\]]`)
+
+// withCodexRule drops every slack-mcp-server "chat" prefix_rule (any path)
+// except one equal to rule, keeps all other lines as they are, and appends
+// rule if it is not already present.
+func withCodexRule(text, rule string) string {
+	var out []string
+	have := false
+	for _, line := range strings.SplitAfter(text, "\n") {
+		if line == "" {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == rule {
+			if have {
+				continue
+			}
+			have = true
+		} else if m := chatRuleLine.FindStringSubmatch(line); m != nil {
+			var path string
+			if json.Unmarshal([]byte(m[1]), &path) == nil && filepath.Base(path) == "slack-mcp-server" {
+				continue
+			}
+		}
+		out = append(out, line)
+	}
+	res := strings.Join(out, "")
+	if !have {
+		if res != "" && !strings.HasSuffix(res, "\n") {
+			res += "\n"
+		}
+		res += rule + "\n"
+	}
+	return res
+}
+
 // InstallCodex installs the skill, hooks, rule, notify cleanup (asked) and
 // MCP registration in a Codex home. The env file is written separately.
 func InstallCodex(home, bin string, r Runner, p Prompter, now time.Time) (Result, error) {
@@ -97,12 +133,8 @@ func InstallCodex(home, bin string, r Runner, p Prompter, now time.Time) (Result
 
 	rulesPath := filepath.Join(home, "rules", "default.rules")
 	rules, _ := os.ReadFile(rulesPath)
-	if rule := codexRule(bin); !strings.Contains(string(rules), rule) {
-		text := string(rules)
-		if text != "" && !strings.HasSuffix(text, "\n") {
-			text += "\n"
-		}
-		if _, err := replaceFile(rulesPath, []byte(text+rule+"\n"), 0o600, now); err != nil {
+	if next := withCodexRule(string(rules), codexRule(bin)); next != string(rules) {
+		if _, err := replaceFile(rulesPath, []byte(next), 0o600, now); err != nil {
 			return res, err
 		}
 		res.Changed = append(res.Changed, rulesPath)
