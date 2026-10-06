@@ -13,6 +13,7 @@ import (
 	"github.com/korotovsky/slack-mcp-server/pkg/agentchat"
 	"github.com/korotovsky/slack-mcp-server/pkg/provider"
 	"github.com/korotovsky/slack-mcp-server/pkg/server"
+	"github.com/korotovsky/slack-mcp-server/pkg/toolconfig"
 	"github.com/mattn/go-isatty"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -72,23 +73,6 @@ func main() {
 	}
 	defer logger.Sync()
 
-	addMessageToolEnv := os.Getenv("SLACK_MCP_ADD_MESSAGE_TOOL")
-	err = validateToolConfig(addMessageToolEnv)
-	if err != nil {
-		logger.Fatal("error in SLACK_MCP_ADD_MESSAGE_TOOL",
-			zap.String("context", "console"),
-			zap.Error(err),
-		)
-	}
-
-	err = validateToolConfig(os.Getenv("SLACK_MCP_UPLOAD_FILE_TOOL"))
-	if err != nil {
-		logger.Fatal("error in SLACK_MCP_UPLOAD_FILE_TOOL",
-			zap.String("context", "console"),
-			zap.Error(err),
-		)
-	}
-
 	err = server.ValidateEnabledTools(enabledTools)
 	if err != nil {
 		logger.Fatal("error in SLACK_MCP_ENABLED_TOOLS",
@@ -97,8 +81,16 @@ func main() {
 		)
 	}
 
+	toolCfg, err := toolconfig.Load(enabledTools, os.Getenv)
+	if err != nil {
+		logger.Fatal("invalid tool configuration",
+			zap.String("context", "console"),
+			zap.Error(err),
+		)
+	}
+
 	p := provider.New(transport, logger)
-	s := server.NewMCPServer(p, logger, enabledTools)
+	s := server.NewMCPServer(p, logger, toolCfg)
 
 	if noCache {
 		p.SkipCache()
@@ -248,34 +240,6 @@ func newChannelsWatcher(p *provider.ApiProvider, once *sync.Once, logger *zap.Lo
 			})
 		}
 	}
-}
-
-func validateToolConfig(config string) error {
-	if config == "" || config == "true" || config == "1" {
-		return nil
-	}
-
-	items := strings.Split(config, ",")
-	hasNegated := false
-	hasPositive := false
-
-	for _, item := range items {
-		item = strings.TrimSpace(item)
-		if item == "" {
-			continue
-		}
-		if strings.HasPrefix(item, "!") {
-			hasNegated = true
-		} else {
-			hasPositive = true
-		}
-	}
-
-	if hasNegated && hasPositive {
-		return fmt.Errorf("cannot mix allowed and disallowed (! prefixed) channels")
-	}
-
-	return nil
 }
 
 func newLogger(transport string) (*zap.Logger, error) {

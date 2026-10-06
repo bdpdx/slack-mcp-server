@@ -1,6 +1,7 @@
 package text
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/korotovsky/slack-mcp-server/pkg/toolconfig"
 	"github.com/slack-go/slack"
 	"go.uber.org/zap"
 	"golang.org/x/net/publicsuffix"
@@ -239,16 +241,47 @@ func AttachmentsTo2CSV(msgText string, attachments []slack.Attachment) string {
 	return prefix + strings.Join(descriptions, ", ")
 }
 
-func IsUnfurlingEnabled(text string, opt string, logger *zap.Logger) bool {
-	if opt == "" || opt == "no" || opt == "false" || opt == "0" {
-		return false
-	}
+var (
+	// unfurlURLRegex stops at characters that delimit a URL in Slack mrkdwn
+	// (<url|text>) and in JSON-encoded blocks.
+	unfurlURLRegex    = regexp.MustCompile(`https?://[^\s<>|"\\]+`)
+	unfurlDomainRegex = regexp.MustCompile(`\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}\b`)
+)
 
-	if opt == "yes" || opt == "true" || opt == "1" {
+// IsUnfurlingEnabled reports whether link unfurling may be enabled for a
+// message. opt is SLACK_MCP_ADD_MESSAGE_UNFURLING: a boolean turns unfurling
+// off or on for every link; otherwise it is a comma-separated domain
+// allow-list and every URL and bare domain in text must be on it. A URL that
+// cannot be parsed is treated as not allowed.
+func IsUnfurlingEnabled(text string, opt string, logger *zap.Logger) bool {
+	if v, ok := toolconfig.ParseBool(opt); ok {
+		return v
+	}
+	return unfurlTextAllowed(text, parseUnfurlAllowList(opt), opt, logger)
+}
+
+// BlocksUnfurlAllowed applies the same domain allow-list to every URL that
+// appears anywhere in a message's Block Kit blocks (link elements, image and
+// button URLs, mrkdwn text). It returns true when there are no blocks or when
+// opt is a boolean, in which case IsUnfurlingEnabled alone decides.
+func BlocksUnfurlAllowed(blocks []slack.Block, opt string, logger *zap.Logger) bool {
+	if len(blocks) == 0 {
 		return true
 	}
+	if _, ok := toolconfig.ParseBool(opt); ok {
+		return true
+	}
+	raw, err := json.Marshal(blocks)
+	if err != nil {
+		return false
+	}
+	// Undo JSON's HTML escaping so < > & do not hide URL boundaries.
+	encoded := strings.NewReplacer(`\u003c`, "<", `\u003e`, ">", `\u0026`, "&").Replace(string(raw))
+	return unfurlTextAllowed(encoded, parseUnfurlAllowList(opt), opt, logger)
+}
 
-	allowed := make(map[string]struct{}, 0)
+func parseUnfurlAllowList(opt string) map[string]struct{} {
+	allowed := make(map[string]struct{})
 	for _, d := range strings.Split(opt, ",") {
 		d = strings.ToLower(strings.TrimSpace(d))
 		if d == "" {
@@ -256,36 +289,33 @@ func IsUnfurlingEnabled(text string, opt string, logger *zap.Logger) bool {
 		}
 		allowed[d] = struct{}{}
 	}
+	return allowed
+}
 
-	urlRe := regexp.MustCompile(`https?://[^\s]+`)
-	urls := urlRe.FindAllString(text, -1)
-	for _, rawURL := range urls {
+func unfurlTextAllowed(text string, allowed map[string]struct{}, opt string, logger *zap.Logger) bool {
+	deny := func(host string) bool {
+		if logger != nil {
+			logger.Warn("Security: attempt to unfurl non-whitelisted host",
+				zap.String("host", host),
+				zap.String("allowed", opt),
+			)
+		}
+		return false
+	}
+
+	for _, rawURL := range unfurlURLRegex.FindAllString(text, -1) {
 		u, err := url.Parse(rawURL)
-		if err != nil || u.Host == "" {
-			continue
+		if err != nil || u.Hostname() == "" {
+			return deny(rawURL)
 		}
-		host := strings.ToLower(u.Host)
-		if idx := strings.Index(host, ":"); idx != -1 {
-			host = host[:idx]
-		}
-		host = strings.TrimPrefix(host, "www.")
+		host := strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
 		if _, ok := allowed[host]; !ok {
-			if logger != nil {
-				logger.Warn("Security: attempt to unfurl non-whitelisted host",
-					zap.String("host", host),
-					zap.String("allowed", opt),
-				)
-			}
-			return false
+			return deny(host)
 		}
 	}
 
-	txtNoURLs := urlRe.ReplaceAllString(text, " ")
-
-	domRe := regexp.MustCompile(`\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}\b`)
-	doms := domRe.FindAllString(txtNoURLs, -1)
-
-	for _, d := range doms {
+	txtNoURLs := unfurlURLRegex.ReplaceAllString(text, " ")
+	for _, d := range unfurlDomainRegex.FindAllString(txtNoURLs, -1) {
 		d = strings.ToLower(d)
 
 		if _, icann := publicsuffix.PublicSuffix(d); !icann {
@@ -293,13 +323,7 @@ func IsUnfurlingEnabled(text string, opt string, logger *zap.Logger) bool {
 		}
 
 		if _, ok := allowed[d]; !ok {
-			if logger != nil {
-				logger.Warn("Security: attempt to unfurl non-whitelisted host",
-					zap.String("host", d),
-					zap.String("allowed", opt),
-				)
-			}
-			return false
+			return deny(d)
 		}
 	}
 
