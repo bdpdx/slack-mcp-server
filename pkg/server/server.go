@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -107,17 +109,9 @@ func ValidateEnabledTools(tools []string) error {
 // NewMCPServer registers the tools that cfg enables. cfg is the same parsed
 // configuration the handlers check, so registration and enforcement agree.
 func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, cfg *toolconfig.Config) *MCPServer {
-	s := server.NewMCPServer(
-		"Slack MCP Server",
-		version.Version,
-		server.WithLogging(),
-		server.WithRecovery(),
-		// Middleware runs in the order given: errors become tool results,
-		// then authentication, then logging of authenticated calls only.
-		server.WithToolHandlerMiddleware(buildErrorRecoveryMiddleware(logger)),
-		server.WithToolHandlerMiddleware(auth.BuildMiddleware(provider.ServerTransport(), logger)),
-		server.WithToolHandlerMiddleware(buildLoggerMiddleware(logger)),
-	)
+	opts := append([]server.ServerOption{server.WithLogging(), server.WithRecovery()},
+		toolMiddlewares(provider.ServerTransport(), logger)...)
+	s := server.NewMCPServer("Slack MCP Server", version.Version, opts...)
 
 	conversationsHandler := handler.NewConversationsHandler(provider, logger, cfg)
 
@@ -735,7 +729,16 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, cfg *toolc
 	}
 }
 
-func (s *MCPServer) ServeSSE(addr string) *server.SSEServer {
+// httpEndpointPath is where the streamable HTTP transport is served.
+const httpEndpointPath = "/mcp"
+
+// ServeSSE builds the SSE transport for a server bound to host:port. The
+// message endpoint is advertised as an absolute URL on the bind address, or
+// as a relative path when bound to a wildcard address (0.0.0.0, ::) so
+// clients resolve it against the address they connected to. Use
+// ListenAndServeSSE to serve it behind HTTPSecurity.
+func (s *MCPServer) ServeSSE(host, port string) *server.SSEServer {
+	addr := net.JoinHostPort(host, port)
 	s.logger.Info("Creating SSE server",
 		zap.String("context", "console"),
 		zap.String("version", version.Version),
@@ -744,7 +747,8 @@ func (s *MCPServer) ServeSSE(addr string) *server.SSEServer {
 		zap.String("address", addr),
 	)
 	return server.NewSSEServer(s.server,
-		server.WithBaseURL(fmt.Sprintf("http://%s", addr)),
+		server.WithBaseURL("http://"+addr),
+		server.WithUseFullURLForMessageEndpoint(!isWildcardHost(host)),
 		server.WithSSEContextFunc(func(ctx context.Context, r *http.Request) context.Context {
 			ctx = auth.AuthFromRequest(s.logger)(ctx, r)
 
@@ -762,7 +766,7 @@ func (s *MCPServer) ServeHTTP(addr string) *server.StreamableHTTPServer {
 		zap.String("address", addr),
 	)
 	return server.NewStreamableHTTPServer(s.server,
-		server.WithEndpointPath("/mcp"),
+		server.WithEndpointPath(httpEndpointPath),
 		server.WithHTTPContextFunc(func(ctx context.Context, r *http.Request) context.Context {
 			ctx = auth.AuthFromRequest(s.logger)(ctx, r)
 
@@ -782,6 +786,17 @@ func (s *MCPServer) ServeStdio() error {
 		s.logger.Error("STDIO server error", zap.Error(err))
 	}
 	return err
+}
+
+// toolMiddlewares returns the tool middleware chain. Middleware runs in the
+// order given: errors become tool results, then authentication, then
+// logging, so unauthenticated calls are never logged with their parameters.
+func toolMiddlewares(transport string, logger *zap.Logger) []server.ServerOption {
+	return []server.ServerOption{
+		server.WithToolHandlerMiddleware(buildErrorRecoveryMiddleware(logger)),
+		server.WithToolHandlerMiddleware(auth.BuildMiddleware(transport, logger)),
+		server.WithToolHandlerMiddleware(buildLoggerMiddleware(logger)),
+	}
 }
 
 // buildErrorRecoveryMiddleware converts tool handler errors into MCP tool results
@@ -808,6 +823,10 @@ func buildLoggerMiddleware(logger *zap.Logger) server.ToolHandlerMiddleware {
 		return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			logger.Info("Request received",
 				zap.String("tool", req.Params.Name),
+				zap.Any("params", redactedToolParams(req)),
+			)
+			logger.Debug("Request parameters",
+				zap.String("tool", req.Params.Name),
 				zap.Any("params", loggableToolParams(req)),
 			)
 
@@ -827,6 +846,49 @@ func buildLoggerMiddleware(logger *zap.Logger) server.ToolHandlerMiddleware {
 	}
 }
 
+// redactedArguments are tool arguments that carry message or file content.
+// They are replaced by their size in Info-level logs.
+var redactedArguments = map[string]bool{
+	"text":            true,
+	"payload":         true,
+	"blocks":          true,
+	"content":         true,
+	"content_base64":  true,
+	"initial_comment": true,
+	"topic":           true,
+	"purpose":         true,
+	"description":     true,
+	"search_query":    true,
+	"query":           true,
+}
+
+// redactedToolParams returns the tool arguments with message text, blocks
+// and file content replaced by a size marker, for Info-level logging.
+func redactedToolParams(req mcp.CallToolRequest) map[string]any {
+	args := req.GetArguments()
+	out := make(map[string]any, len(args))
+	for k, v := range args {
+		if !redactedArguments[k] {
+			out[k] = v
+			continue
+		}
+		size := 0
+		switch val := v.(type) {
+		case string:
+			size = len(val)
+		case nil:
+		default:
+			if b, err := json.Marshal(val); err == nil {
+				size = len(b)
+			}
+		}
+		out[k] = fmt.Sprintf("[redacted %d bytes]", size)
+	}
+	return out
+}
+
+// loggableToolParams returns the parameters logged at Debug level. File
+// upload content is never logged.
 func loggableToolParams(req mcp.CallToolRequest) any {
 	if req.Params.Name != ToolFilesUpload {
 		return req.Params
