@@ -62,3 +62,7 @@ When an action needs the user's approval, a hook asks them in that channel and a
 ## `%agents:`
 
 When the user types `%agents: …` (or `%agents@<channel>: …`), the hook posts it to Slack as the user (to the project channel unless a channel is named). Carry it out yourself; do not post it again.
+
+## Working with other agents
+
+When several agents share a project chat, read `COLLABORATION.md` beside this file.
