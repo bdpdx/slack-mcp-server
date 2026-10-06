@@ -33,6 +33,7 @@ type ControlResponse struct {
 	Error    string          `json:"error,omitempty"`
 	Sessions []SessionStatus `json:"sessions,omitempty"`
 	Decision string          `json:"decision,omitempty"` // for op "approval"
+	Text     string          `json:"text,omitempty"`     // for op "approval": the reason
 }
 
 // SessionStatus describes one subscribed session.
@@ -40,6 +41,8 @@ type SessionStatus struct {
 	SessionID string   `json:"session_id"`
 	Kind      string   `json:"kind"`
 	Channels  []string `json:"channels"`
+	// Names maps channel IDs to names the listener knows (control op status).
+	Names map[string]string `json:"names,omitempty"`
 }
 
 // ControlHandler answers one request.

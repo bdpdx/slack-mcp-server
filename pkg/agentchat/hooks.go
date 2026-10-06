@@ -18,6 +18,8 @@ type hookEvent struct {
 	ToolName             string          `json:"tool_name"`
 	ToolInput            json.RawMessage `json:"tool_input"`
 	LastAssistantMessage string          `json:"last_assistant_message"`
+	PromptID             string          `json:"prompt_id"` // Claude Code
+	TurnID               string          `json:"turn_id"`   // Codex
 }
 
 // isQuietHook reports whether cmd is a hook that must never fail or block
@@ -139,17 +141,22 @@ func (c *cli) askHook(ctx context.Context, ev hookEvent) int {
 	return 0
 }
 
-func (c *cli) hookSession(ev hookEvent) string {
-	if ev.SessionID != "" {
-		return ev.SessionID
+func (c *cli) hookSession(ev hookEvent) string { return sessionOf(ev.SessionID) }
+
+// sessionOf is the session a hook runs for: the event's session_id, or the
+// Codex thread when the event has none. Subscriptions and turn marks use the
+// same key.
+func sessionOf(id string) string {
+	if id != "" {
+		return id
 	}
 	return os.Getenv("CODEX_THREAD_ID")
 }
 
 // directChannel returns the #PROJECT__OWNER_AGENT channel that session
-// watches for its project.
+// watches for its one project.
 func (c *cli) directChannel(ctx context.Context, session string) (string, string, identity, error) {
-	_, project, err := c.watchedProject(ctx, session)
+	ids, names, err := c.sessionChannels(ctx, session)
 	if err != nil {
 		return "", "", identity{}, err
 	}
@@ -157,13 +164,24 @@ func (c *cli) directChannel(ctx context.Context, session string) (string, string
 	if err != nil {
 		return "", "", identity{}, err
 	}
-	name, err := DirectChannelName(project, me.ownerName, me.agentName)
-	if err != nil {
-		return "", "", identity{}, err
+	var found []string // IDs of watched direct channels
+	for _, id := range ids {
+		project, derived := ProjectOf(names[id])
+		if derived {
+			continue
+		}
+		name, err := DirectChannelName(project, me.ownerName, me.agentName)
+		if err != nil {
+			continue
+		}
+		for _, d := range ids {
+			if names[d] == name {
+				found = append(found, d)
+			}
+		}
 	}
-	id, err := findChannel(ctx, c.bot, name)
-	if err != nil {
-		return "", "", identity{}, err
+	if len(found) != 1 {
+		return "", "", identity{}, fmt.Errorf("this session watches %d direct channels", len(found))
 	}
-	return id, name, me, nil
+	return found[0], names[found[0]], me, nil
 }

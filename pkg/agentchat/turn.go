@@ -27,8 +27,19 @@ func turnMarkerPath(home Home, session string) (string, error) {
 	return filepath.Join(home.StateDir, "terminal-turns", session), nil
 }
 
-// MarkTurn records whether the turn prompt starts was typed at the terminal.
-func MarkTurn(home Home, session, prompt string) error {
+// turnKey identifies a turn across its UserPromptSubmit and Stop hooks:
+// Claude Code's prompt_id or Codex's turn_id ("" if the host sends neither).
+func turnKey(promptID, turnID string) string {
+	if promptID != "" {
+		return promptID
+	}
+	return turnID
+}
+
+// MarkTurn records whether the turn prompt starts was typed at the terminal,
+// storing the turn's key so a mark left by a turn that never reached Stop
+// (blocked or interrupted) cannot match a later one.
+func MarkTurn(home Home, session, key, prompt string) error {
 	path, err := turnMarkerPath(home, session)
 	if err != nil {
 		return err
@@ -42,17 +53,30 @@ func MarkTurn(home Home, session, prompt string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, nil, 0o600)
+	return os.WriteFile(path, []byte(key), 0o600)
 }
 
-// TakeTurnMark reports whether session's ending turn was typed at the
-// terminal, clearing the mark.
-func TakeTurnMark(home Home, session string) bool {
+// ClearTurn drops session's mark.
+func ClearTurn(home Home, session string) {
+	if path, err := turnMarkerPath(home, session); err == nil {
+		_ = os.Remove(path)
+	}
+}
+
+// TakeTurnMark reports whether session's ending turn (key) was typed at the
+// terminal, clearing the mark. When both the mark and key carry a turn key
+// they must match.
+func TakeTurnMark(home Home, session, key string) bool {
 	path, err := turnMarkerPath(home, session)
 	if err != nil {
 		return false
 	}
-	return os.Remove(path) == nil
+	stored, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	_ = os.Remove(path)
+	return len(stored) == 0 || key == "" || string(stored) == key
 }
 
 // maxDMChunk keeps each message under Slack's 12,000-character limit for
@@ -130,7 +154,7 @@ func SplitMarkdown(text string, max int) []string {
 // stopHook (Stop) DMs the owner the final response of a turn they started
 // at the terminal. Stop fires only for the main agent, never for subagents.
 func (c *cli) stopHook(ctx context.Context, ev hookEvent) int {
-	if !TakeTurnMark(c.home, c.hookSession(ev)) || strings.TrimSpace(ev.LastAssistantMessage) == "" {
+	if !TakeTurnMark(c.home, c.hookSession(ev), turnKey(ev.PromptID, ev.TurnID)) || strings.TrimSpace(ev.LastAssistantMessage) == "" {
 		return 0
 	}
 	me, err := c.identity(ctx)

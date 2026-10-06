@@ -184,6 +184,9 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if err != nil {
 		if rest[0] == "relay-hook" {
+			if path != "" {
+				ClearTurn(NewHome(path), sessionOf(event.SessionID))
+			}
 			return emitBlock(stdout, err)
 		}
 		if isQuietHook(rest[0]) {
@@ -362,11 +365,12 @@ func (c *cli) watch(ctx context.Context, args []string) error {
 			}
 			ids = append(ids, id)
 			if _, derived := ProjectOf(name); !derived {
-				direct, err := c.ensureDirect(ctx, me, name)
-				if err != nil {
-					return err
+				// The project watch must not depend on the direct channel.
+				if direct, err := c.ensureDirect(ctx, me, name); err != nil {
+					fmt.Fprintf(c.stderr, "slack-agent-chat: no direct channel for #%s: %v\n", name, err)
+				} else {
+					ids = append(ids, direct)
 				}
-				ids = append(ids, direct)
 			}
 		}
 		return c.subscribe(ctx, ids, *backlog)
@@ -515,17 +519,20 @@ func (c *cli) channel(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		// Created as the owner, so no bot is ever in it.
+		// Created as the owner, so no bot is ever in it. Another person may
+		// own it already; the project does not depend on it.
 		usersID, _, err := ensureChannel(ctx, c.user, UsersChannelName(name), me.ownerID, userIDs(people))
 		if err != nil {
-			return err
+			fmt.Fprintf(c.stderr, "slack-agent-chat: %v\n", err)
 		}
-		direct, err := c.ensureDirect(ctx, me, name)
-		if err != nil {
-			return err
+		watch := []string{id}
+		if direct, err := c.ensureDirect(ctx, me, name); err != nil {
+			fmt.Fprintf(c.stderr, "slack-agent-chat: no direct channel for #%s: %v\n", name, err)
+		} else {
+			watch = append(watch, direct)
 		}
 		c.printJSON(map[string]any{"channel_id": id, "name": name, "users_channel_id": usersID})
-		return c.subscribe(ctx, []string{id, direct}, 0)
+		return c.subscribe(ctx, watch, 0)
 	case "invite":
 		if len(pos) < 1 || len(pos) > 2 {
 			return errors.New("usage: channel invite CHANNEL [AGENT,AGENT] [--invite-user u,v]")
@@ -668,13 +675,10 @@ func (c *cli) ack(ctx context.Context, args []string) error {
 // markTurn records whether the prompt was typed at the terminal, for
 // stop-hook. It never blocks the prompt: failures are only logged.
 func markTurn(envFile string, event relayEvent, stderr io.Writer) {
-	session := event.SessionID
-	if session == "" {
-		session = os.Getenv("CODEX_THREAD_ID")
-	}
+	session := sessionOf(event.SessionID)
 	path, err := ResolveEnvFile(envFile, os.Getenv)
 	if err == nil {
-		err = MarkTurn(NewHome(path), session, event.Prompt)
+		err = MarkTurn(NewHome(path), session, turnKey(event.PromptID, event.TurnID), event.Prompt)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "slack-agent-chat: marking turn: %v\n", err)
@@ -687,25 +691,31 @@ func emitBlock(w io.Writer, err error) int {
 	return 0
 }
 
+// blockRelay blocks a %agents prompt. No turn runs, so its terminal-turn
+// mark must not linger for a later turn's stop-hook.
+func (c *cli) blockRelay(session string, err error) int {
+	ClearTurn(c.home, session)
+	return emitBlock(c.stdout, err)
+}
+
 // relayEvent is the part of a UserPromptSubmit hook event the relay reads.
 type relayEvent struct {
 	Prompt    string `json:"prompt"`
 	SessionID string `json:"session_id"`
+	PromptID  string `json:"prompt_id"` // Claude Code
+	TurnID    string `json:"turn_id"`   // Codex
 }
 
 // relayHook posts a %agents prompt (already recognized by RunCLI) to Slack.
 func (c *cli) relayHook(ctx context.Context, event relayEvent) int {
 	target, text, _ := ParseRelayPrompt(event.Prompt)
 	if text == "" {
-		return emitBlock(c.stdout, errors.New("nothing to relay after the %agents prefix"))
+		return c.blockRelay(sessionOf(event.SessionID), errors.New("nothing to relay after the %agents prefix"))
 	}
-	session := event.SessionID
-	if session == "" {
-		session = os.Getenv("CODEX_THREAD_ID")
-	}
+	session := sessionOf(event.SessionID)
 	channelID, channelName, err := c.relayTarget(ctx, session, target)
 	if err != nil {
-		return emitBlock(c.stdout, err)
+		return c.blockRelay(session, err)
 	}
 	// Announce the relay before posting so its echo cannot reach this session first.
 	if _, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "expect", SessionID: session, Channel: channelID, Text: text}); err != nil {
@@ -713,7 +723,7 @@ func (c *cli) relayHook(ctx context.Context, event relayEvent) int {
 	}
 	ts, err := c.postAsOwner(ctx, channelID, "", text)
 	if err != nil {
-		return emitBlock(c.stdout, err)
+		return c.blockRelay(session, err)
 	}
 	if _, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "skip", SessionID: session, Channel: channelID, TS: ts}); err != nil {
 		fmt.Fprintf(c.stderr, "slack-agent-chat: could not mark relay as delivered: %v\n", err)
@@ -738,33 +748,49 @@ func (c *cli) relayTarget(ctx context.Context, session, target string) (string, 
 	return id, name, nil
 }
 
-// watchedProject returns the one project channel (not a derived __ channel)
-// that session watches.
-func (c *cli) watchedProject(ctx context.Context, session string) (string, string, error) {
+// sessionChannels returns the channels session watches, by ID with names,
+// using the names the listener reports and asking Slack for the rest.
+func (c *cli) sessionChannels(ctx context.Context, session string) (ids []string, names map[string]string, err error) {
 	resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "status"})
 	if err != nil {
-		return "", "", errors.New("no slack-agent-chat listener is running")
+		return nil, nil, errors.New("no slack-agent-chat listener is running")
 	}
 	for _, s := range resp.Sessions {
 		if s.SessionID != session {
 			continue
 		}
-		var ids, names []string
+		names = map[string]string{}
 		for _, ch := range s.Channels {
-			id, name, err := c.resolveChannel(ctx, ch)
-			if err != nil {
-				return "", "", err
+			name := s.Names[ch]
+			if name == "" {
+				if _, name, err = c.resolveChannel(ctx, ch); err != nil {
+					return nil, nil, err
+				}
 			}
-			if _, derived := ProjectOf(name); !derived {
-				ids, names = append(ids, id), append(names, name)
-			}
+			names[ch] = name
 		}
-		if len(ids) == 1 {
-			return ids[0], names[0], nil
-		}
-		return "", "", fmt.Errorf("this session watches %d project channels", len(ids))
+		return s.Channels, names, nil
 	}
-	return "", "", errors.New("this session is not watching a channel")
+	return nil, nil, errors.New("this session is not watching a channel")
+}
+
+// watchedProject returns the one project channel (not a derived __ channel)
+// that session watches.
+func (c *cli) watchedProject(ctx context.Context, session string) (string, string, error) {
+	ids, names, err := c.sessionChannels(ctx, session)
+	if err != nil {
+		return "", "", err
+	}
+	var projects []string
+	for _, id := range ids {
+		if _, derived := ProjectOf(names[id]); !derived {
+			projects = append(projects, id)
+		}
+	}
+	if len(projects) != 1 {
+		return "", "", fmt.Errorf("this session watches %d project channels", len(projects))
+	}
+	return projects[0], names[projects[0]], nil
 }
 
 // listenerEnv returns the environment for a detached listener: only neutral

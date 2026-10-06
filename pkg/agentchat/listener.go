@@ -59,20 +59,15 @@ type Listener struct {
 	// Users acts as the owner; nil leaves <project>__users alone.
 	Users UserAPI
 
-	mu       sync.Mutex
-	state    *State
-	repeats  *RepeatFilter
-	users    map[string]*slack.User
-	chNames  map[string]string
-	relays   map[string]time.Time      // expected %agents echoes: session|channel|text → expiry
-	sessLock map[string]*sync.Mutex    // serializes deliveries per session
-	queues   map[string]chan []pending // per-session delivery queues (Async)
-	approved map[string]approvalClick  // Slack approval button clicks by approval ID
-}
-
-type approvalClick struct {
-	decision string
-	at       time.Time
+	mu        sync.Mutex
+	state     *State
+	repeats   *RepeatFilter
+	users     map[string]*slack.User
+	chNames   map[string]string
+	relays    map[string]time.Time      // expected %agents echoes: session|channel|text → expiry
+	sessLock  map[string]*sync.Mutex    // serializes deliveries per session
+	queues    map[string]chan []pending // per-session delivery queues (Async)
+	approvals map[string]*approval      // approval-hook requests by approval ID
 }
 
 // queueDepth bounds each session's pending deliveries. Overflow is dropped;
@@ -95,7 +90,7 @@ func NewListener(api SlackAPI, d Deliverer, self Identity, ownerID, stateFile st
 		Now: time.Now, Log: log, state: st,
 		users: map[string]*slack.User{}, chNames: map[string]string{},
 		relays: map[string]time.Time{}, sessLock: map[string]*sync.Mutex{}, queues: map[string]chan []pending{},
-		approved: map[string]approvalClick{},
+		approvals: map[string]*approval{},
 	}
 	l.repeats = NewRepeatFilter(repeatWindow, func() time.Time { return l.Now() })
 	return l, nil
@@ -176,7 +171,7 @@ func (l *Listener) notice(ctx context.Context, m Message) Notice {
 
 // HandleMessage routes one live message to every subscribed session.
 func (l *Listener) HandleMessage(ctx context.Context, m Message) {
-	if !m.Deliverable() || m.From(l.Self) {
+	if !m.Deliverable() || m.From(l.Self) || l.approvalReply(m) {
 		return
 	}
 	l.mu.Lock()
@@ -222,7 +217,9 @@ func (l *Listener) autoWatch(ctx context.Context, channel string) {
 	var subs []Subscription
 	for _, sub := range l.state.Subscriptions {
 		if !sub.Watches(channel) {
-			subs = append(subs, *sub)
+			cp := *sub
+			cp.Channels = slices.Clone(sub.Channels) // Unsubscribe edits the stored slice in place
+			subs = append(subs, cp)
 		}
 	}
 	l.mu.Unlock()
@@ -683,18 +680,65 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 		l.Skip(req.SessionID, req.Channel, req.TS)
 	case "expect":
 		l.ExpectRelay(req.SessionID, req.Channel, req.Text)
+	case "approval-watch":
+		l.WatchApproval(req.Approval, req.Channel, req.TS)
 	case "approval":
-		return ControlResponse{OK: true, Decision: l.TakeApproval(req.Approval)}
+		decision, reason := l.TakeApproval(req.Approval)
+		return ControlResponse{OK: true, Decision: decision, Text: reason}
 	case "status":
+		// Names save each hook a conversations.info call per channel.
+		sessions := l.Status()
+		for i := range sessions {
+			sessions[i].Names = map[string]string{}
+			for _, ch := range sessions[i].Channels {
+				if name := l.channelName(ctx, ch); name != "" && name != ch {
+					sessions[i].Names[ch] = name
+				}
+			}
+		}
+		return ControlResponse{OK: true, Sessions: sessions}
 	default:
 		return ControlResponse{Error: "unknown op " + req.Op}
 	}
 	return ControlResponse{OK: true, Sessions: l.Status()}
 }
 
-// HandleInteraction records a click on an approval button posted by
-// approval-hook. Only the owner's clicks count; the waiting hook collects
-// the decision with TakeApproval.
+// approval is one approval-hook request the listener answers for.
+type approval struct {
+	channel, ts      string // the request message, once the hook registers it
+	decision, reason string // "" until answered
+	hint             bool   // the owner typed an allow word, which cannot approve
+	at               time.Time
+}
+
+// approvalEntry returns the request with id, creating it, and forgets
+// requests older than an hour. Call with l.mu held.
+func (l *Listener) approvalEntry(id string) *approval {
+	for k, a := range l.approvals {
+		if l.Now().Sub(a.at) > time.Hour {
+			delete(l.approvals, k)
+		}
+	}
+	a := l.approvals[id]
+	if a == nil {
+		a = &approval{at: l.Now()}
+		l.approvals[id] = a
+	}
+	return a
+}
+
+// WatchApproval registers the message approval-hook posted for request id,
+// so replies in its thread are read as answers instead of delivered.
+func (l *Listener) WatchApproval(id, channel, ts string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	a := l.approvalEntry(id)
+	a.channel, a.ts = channel, ts
+}
+
+// HandleInteraction records a click on an approval button. Slack vouches
+// for who clicked, so a click is the only way to allow: agents can post as
+// the owner, but cannot click as them. Only the owner's first click counts.
 func (l *Listener) HandleInteraction(payload []byte) {
 	var in struct {
 		Type string `json:"type"`
@@ -709,39 +753,70 @@ func (l *Listener) HandleInteraction(payload []byte) {
 	if json.Unmarshal(payload, &in) != nil || in.Type != "block_actions" {
 		return
 	}
-	for _, a := range in.Actions {
-		decision, ok := strings.CutPrefix(a.ActionID, approvalActionPrefix)
-		if !ok || a.Value == "" {
+	for _, act := range in.Actions {
+		decision, ok := strings.CutPrefix(act.ActionID, approvalActionPrefix)
+		if !ok || act.Value == "" {
 			continue
 		}
 		if in.User.ID != l.OwnerID {
-			l.Log.Warn("ignoring approval click from someone other than the owner", zap.String("user", in.User.ID), zap.String("approval", a.Value))
+			l.Log.Warn("ignoring approval click from someone other than the owner", zap.String("user", in.User.ID), zap.String("approval", act.Value))
 			continue
 		}
 		l.mu.Lock()
-		for id, c := range l.approved {
-			if l.Now().Sub(c.at) > time.Hour {
-				delete(l.approved, id)
-			}
-		}
-		if _, done := l.approved[a.Value]; !done {
-			l.approved[a.Value] = approvalClick{decision, l.Now()}
+		if a := l.approvalEntry(act.Value); a.decision == "" {
+			a.decision = decision
 		}
 		l.mu.Unlock()
-		l.Log.Info("approval clicked", zap.String("approval", a.Value), zap.String("decision", decision))
+		l.Log.Info("approval clicked", zap.String("approval", act.Value), zap.String("decision", decision))
 	}
 }
 
-// TakeApproval returns and forgets the decision clicked for an approval, or "".
-func (l *Listener) TakeApproval(id string) string {
+// approvalReply consumes a reply in a watched approval thread, so it is
+// never delivered as a notice. The owner's first reply that denies or picks
+// the terminal answers the request. A reply cannot allow: anything posting
+// with the owner's token, an agent included, could have written it.
+func (l *Listener) approvalReply(m Message) bool {
+	if m.ThreadTS == "" {
+		return false
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	c, ok := l.approved[id]
-	if !ok {
-		return ""
+	for _, a := range l.approvals {
+		if a.channel != m.Channel || a.ts != m.ThreadTS {
+			continue
+		}
+		if m.User == l.OwnerID && a.decision == "" {
+			switch decision, reason := ParseApprovalReply(m.Text); decision {
+			case decisionAllow:
+				a.hint = true
+			default:
+				a.decision, a.reason = decision, reason
+			}
+		}
+		return true
 	}
-	delete(l.approved, id)
-	return c.decision
+	return false
+}
+
+// TakeApproval returns request id's answer for the waiting hook: a decision
+// with its reason, decisionHint once after the owner typed an allow word, or
+// "" while unanswered.
+func (l *Listener) TakeApproval(id string) (decision, reason string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	a := l.approvals[id]
+	switch {
+	case a == nil || a.decision == decisionTaken:
+		return "", ""
+	case a.decision != "":
+		decision, reason = a.decision, a.reason
+		a.decision = decisionTaken // keep the entry so later replies stay out of the session
+		return decision, reason
+	case a.hint:
+		a.hint = false
+		return decisionHint, ""
+	}
+	return "", ""
 }
 
 // RecoverAll catches every restored session up on messages that arrived while

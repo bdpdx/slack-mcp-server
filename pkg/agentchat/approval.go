@@ -18,34 +18,45 @@ import (
 // only after the hook returns, so the hook waits a limited time and then
 // hands the prompt back to the terminal.
 //
-// Button clicks reach this home's listener (the app's Socket Mode
-// connection), which checks they came from the owner; the hook polls it.
-// The owner can also reply in the message's thread: "yes"/"no ..." etc.
+// Button clicks and replies in the message's thread reach this home's
+// listener (the app's Socket Mode connection), which keeps the owner's
+// answer for the hook to poll. Only a click can allow: Slack vouches for who
+// clicked, but anything holding the owner's token, agents included, can post
+// a reply as the owner. Replies can deny (with a reason) or pick the terminal.
 
 const (
 	approvalActionPrefix = "sac-approval-"
 	decisionAllow        = "allow"
 	decisionDeny         = "deny"
 	decisionTerminal     = "terminal"
+	decisionHint         = "hint"  // the owner typed an allow word; explain the button
+	decisionTaken        = "taken" // answered and handed to the hook
 	defaultApprovalWait  = 10 * time.Minute
-	approvalPoll         = 1500 * time.Millisecond
+	approvalPoll         = time.Second
 )
 
 var (
-	allowWords   = map[string]bool{"yes": true, "y": true, "yep": true, "ok": true, "okay": true, "allow": true, "approve": true, "approved": true, "lgtm": true, "go": true, "sure": true}
-	denyWords    = map[string]bool{"no": true, "n": true, "nope": true, "deny": true, "denied": true, "reject": true, "stop": true}
+	allowWords = map[string]bool{"yes": true, "y": true, "yep": true, "ok": true, "okay": true, "allow": true, "approve": true, "approved": true,
+		"lgtm": true, "go": true, "sure": true, "+1": true, "👍": true, "white_check_mark": true, "✅": true, "heavy_check_mark": true, "✔️": true}
+	denyWords = map[string]bool{"no": true, "n": true, "nope": true, "deny": true, "denied": true, "reject": true, "stop": true,
+		"-1": true, "👎": true, "x": true, "❌": true}
 	leadMentions = regexp.MustCompile(`^(?:\s*<@[^>]+>)+`)
+	firstWord    = regexp.MustCompile(`^(\S+)\s*`)
 )
 
 // ParseApprovalReply reads an owner's thread reply to an approval request:
 // it opens with an allow word, a deny word (anything after it is the reason
 // for the agent), or "terminal". Any other reply denies, passing the whole
-// reply to the agent as the reason.
+// reply to the agent as the reason. (The listener does not let a reply
+// allow; see approvalReply.)
 func ParseApprovalReply(text string) (decision, reason string) {
 	text = strings.TrimSpace(leadMentions.ReplaceAllString(text, ""))
-	first, rest, _ := strings.Cut(text, " ")
-	word := strings.ToLower(strings.Trim(first, ".,!:;-—"))
-	rest = strings.TrimSpace(strings.TrimLeft(rest, ".,!:;-— "))
+	m := firstWord.FindStringSubmatch(text)
+	if m == nil {
+		return decisionDeny, ""
+	}
+	word := strings.ToLower(strings.Trim(m[1], ".,!:;-—*_~`"))
+	rest := strings.TrimSpace(strings.TrimLeft(text[len(m[0]):], ".,!:;-— "))
 	switch {
 	case allowWords[word]:
 		return decisionAllow, ""
@@ -55,19 +66,6 @@ func ParseApprovalReply(text string) (decision, reason string) {
 		return decisionTerminal, ""
 	}
 	return decisionDeny, text
-}
-
-// ownerReplyDecision returns the decision in the first reply from ownerID
-// among a thread's messages (the parent first, as Slack returns them).
-func ownerReplyDecision(msgs []slack.Message, ownerID string) (decision, reason string, ok bool) {
-	for i, m := range msgs {
-		if i == 0 || m.User != ownerID || strings.TrimSpace(m.Text) == "" {
-			continue
-		}
-		decision, reason = ParseApprovalReply(m.Text)
-		return decision, reason, true
-	}
-	return "", "", false
 }
 
 func approvalButton(id, decision, label, style string) *slack.ButtonBlockElement {
@@ -87,7 +85,7 @@ func approvalBlocks(text, id string, wait time.Duration) []slack.Block {
 			approvalButton(id, decisionTerminal, "Answer in terminal", ""),
 		),
 		slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, fmt.Sprintf(
-			"Or reply in the thread: _yes_, or _no_ plus a reason for the agent. After %s with no answer, the terminal asks.", wait), false, false)),
+			"Or reply in the thread: _no_ plus a reason for the agent, or _terminal_. Only the button can allow. After %s with no answer, the terminal asks.", wait), false, false)),
 	}
 }
 
@@ -147,8 +145,12 @@ func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration
 		return 0
 	}
 
+	if _, err := SendControl(setup, c.home.ControlSocket, ControlRequest{Op: "approval-watch", Approval: id, Channel: channel, TS: ts}); err != nil {
+		fmt.Fprintf(c.stderr, "slack-agent-chat: registering approval with the listener: %v\n", err)
+	}
+
 	waitCtx, cancelWait := context.WithTimeout(ctx, wait)
-	decision, reason := c.waitForApproval(waitCtx, channel, ts, id, me.ownerID)
+	decision, reason := c.waitForApproval(waitCtx, channel, ts, id)
 	cancelWait()
 
 	finish, cancelFinish := context.WithTimeout(ctx, relayTimeout)
@@ -168,9 +170,10 @@ func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration
 	return 0
 }
 
-// waitForApproval polls for a button click (via the listener) or an owner
-// reply in the thread until one arrives or ctx ends ("" decision).
-func (c *cli) waitForApproval(ctx context.Context, channel, ts, id, ownerID string) (string, string) {
+// waitForApproval polls the listener for the owner's answer until one
+// arrives or ctx ends ("" decision). When the owner types an allow word, it
+// explains in the thread that only the button can allow, and keeps waiting.
+func (c *cli) waitForApproval(ctx context.Context, channel, ts, id string) (string, string) {
 	tick := time.NewTicker(approvalPoll)
 	defer tick.Stop()
 	for {
@@ -179,14 +182,16 @@ func (c *cli) waitForApproval(ctx context.Context, channel, ts, id, ownerID stri
 			return "", ""
 		case <-tick.C:
 		}
-		if resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval", Approval: id}); err == nil && resp.Decision != "" {
-			return resp.Decision, ""
-		}
-		msgs, _, _, err := c.bot.GetConversationRepliesContext(ctx, &slack.GetConversationRepliesParameters{ChannelID: channel, Timestamp: ts})
-		if err == nil {
-			if decision, reason, ok := ownerReplyDecision(msgs, ownerID); ok {
-				return decision, reason
+		resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval", Approval: id})
+		switch {
+		case err != nil || resp.Decision == "":
+		case resp.Decision == decisionHint:
+			if _, _, err := c.bot.PostMessageContext(ctx, channel, slack.MsgOptionTS(ts), slack.MsgOptionText(
+				"Replies can only deny (_no_ plus a reason) or send this to the _terminal_; click *Allow* to approve.", false)); err != nil {
+				fmt.Fprintf(c.stderr, "slack-agent-chat: posting approval hint: %v\n", err)
 			}
+		default:
+			return resp.Decision, resp.Text
 		}
 	}
 }

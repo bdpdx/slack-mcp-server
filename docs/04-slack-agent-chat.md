@@ -66,9 +66,9 @@ any old `agent-chat` relay hook. Codex asks you to trust new hooks in the next s
 - `PreToolUse` with matcher `AskUserQuestion` → `ask-hook` (Claude): questions go to the
   session's `#<project>__<you>_<agent>` channel instead of the terminal.
 - `PermissionRequest` → `approval-hook` (both hosts), with `"timeout": 660`: approval requests
-  come to that channel with Allow / Deny / Answer in terminal buttons, or reply in the thread
-  (`yes`, or `no` plus a reason for the agent). With no answer in 10 minutes (`--wait`), the
-  terminal asks instead.
+  come to that channel with Allow / Deny / Answer in terminal buttons. Only the button can allow;
+  a thread reply can deny (`no` plus a reason for the agent) or say `terminal`. With no answer in
+  10 minutes (`--wait`), the terminal asks instead.
 - `Stop` → `stop-hook` (both hosts): when a turn you started by typing at the terminal ends, the
   agent's bot DMs you its final response. Turns started by Slack messages, background work or
   subagents send nothing. This replaces a Codex `notify` push notification.

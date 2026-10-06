@@ -161,18 +161,23 @@ the session's direct channel `<project>__<owner>_<agent>`:
 - `chat approval-hook [--wait 10m]` (`PermissionRequest`, Claude and Codex;
   fires only when the user is about to be prompted) asks in the direct channel
   and answers the prompt for the owner. The message shows the tool and its
-  command or description, with buttons Allow / Deny / Answer in terminal. The
-  owner can also reply in its thread: an allow word (yes, ok, lgtm…), a deny
-  word (no, deny, stop…) followed by a reason for the agent, or `terminal`;
-  any other reply denies with the reply as the reason. Only the owner counts.
+  command or description, with buttons Allow / Deny / Answer in terminal.
+  Only a click can allow: Slack vouches for who clicked, while every agent
+  home holds the owner's user token and could post a reply as the owner. The
+  owner can also reply in its thread with a deny word (no, deny, stop…)
+  followed by a reason for the agent, or `terminal`; any other reply denies
+  with the reply as the reason, except an allow word (yes, ok, 👍…), which
+  only earns a hint in the thread to click Allow. Only the owner counts.
   Both hosts show their own prompt only after the hook returns, so after
   `--wait` with no answer (or on Answer in terminal) the hook prints nothing
   and the terminal asks; the hook's configured timeout must exceed `--wait`.
   The message is then updated to show the outcome in place of the buttons.
 - Clicks are Socket Mode interactions, which reach the home's listener (a
-  second Socket Mode connection would split events with it). The listener
-  records the owner's first click per approval ID; the hook polls it with the
-  control op `approval` and polls the thread for replies.
+  second Socket Mode connection would split events with it). The hook
+  registers its message with the control op `approval-watch`; the listener
+  then records the owner's first click or reply per approval ID, keeps every
+  reply in that thread out of the session (so an answer is not also delivered
+  as an instruction), and the hook polls the control op `approval`.
 - Codex's `request_user_input` is not hookable, so for Codex (and as a
   fallback for Claude) the skill says to ask in the direct channel.
 - Both hooks never fail their host: bad input, a session watching no project,
@@ -187,9 +192,12 @@ place of a push notification.
 - `relay-hook` (`UserPromptSubmit`) marks the session's turn as typed unless
   the prompt contains `[slack-agent-chat]` (a listener notice), in case the
   host runs the hook for injected messages; the mark is a file under
-  `<state>/terminal-turns/<session>`. It never blocks the prompt.
+  `<state>/terminal-turns/<session>` holding the turn's key (Claude
+  `prompt_id`, Codex `turn_id`). It never blocks the prompt; a blocked
+  `%agents:` prompt clears its mark.
 - `stop-hook` (`Stop`, both hosts; it fires only for the main agent, never
-  subagents) takes the mark and, if set, sends `last_assistant_message` with a
+  subagents) takes the mark and, if set and its key matches the ending turn's
+  (so a mark left by an interrupted turn never leaks into a later one), sends `last_assistant_message` with a
   header naming the agent and working directory, as `markdown` blocks split at
   10,000 characters on line breaks (code fences closed and reopened).
 - Turns started by Slack notices, background tasks or subagents are never

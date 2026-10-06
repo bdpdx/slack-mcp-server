@@ -12,20 +12,33 @@ import (
 func TestTurnMarks(t *testing.T) {
 	home := NewHome(filepath.Join(t.TempDir(), EnvFileName))
 
-	require.NoError(t, MarkTurn(home, "s1", "fix the bug"))
-	assert.True(t, TakeTurnMark(home, "s1"), "typed at the terminal")
-	assert.False(t, TakeTurnMark(home, "s1"), "taking clears the mark")
+	require.NoError(t, MarkTurn(home, "s1", "p1", "fix the bug"))
+	assert.True(t, TakeTurnMark(home, "s1", "p1"), "typed at the terminal")
+	assert.False(t, TakeTurnMark(home, "s1", "p1"), "taking clears the mark")
 
-	require.NoError(t, MarkTurn(home, "s1", "fix the bug"))
-	require.NoError(t, MarkTurn(home, "s1", "[slack-agent-chat] #proj (C1) from codex-b, ts 1.2:\n> hi"))
-	assert.False(t, TakeTurnMark(home, "s1"), "a Slack notice starting the turn clears it")
+	require.NoError(t, MarkTurn(home, "s1", "p1", "fix the bug"))
+	require.NoError(t, MarkTurn(home, "s1", "p2", "[slack-agent-chat] #proj (C1) from codex-b, ts 1.2:\n> hi"))
+	assert.False(t, TakeTurnMark(home, "s1", "p2"), "a Slack notice starting the turn clears it")
 
-	require.NoError(t, MarkTurn(home, "s1", "x"))
-	assert.False(t, TakeTurnMark(home, "s2"), "marks are per session")
+	require.NoError(t, MarkTurn(home, "s1", "p1", "typed, then interrupted"))
+	assert.False(t, TakeTurnMark(home, "s1", "p3"), "a stale mark from another turn does not match")
+	assert.False(t, TakeTurnMark(home, "s1", "p1"), "and is gone")
 
-	assert.Error(t, MarkTurn(home, "../evil", "x"))
-	assert.Error(t, MarkTurn(home, "", "x"))
-	assert.False(t, TakeTurnMark(home, "../evil"))
+	require.NoError(t, MarkTurn(home, "s1", "", "x"))
+	assert.True(t, TakeTurnMark(home, "s1", "p4"), "without keys the mark alone decides")
+
+	require.NoError(t, MarkTurn(home, "s1", "p5", "x"))
+	ClearTurn(home, "s1")
+	assert.False(t, TakeTurnMark(home, "s1", "p5"), "cleared by a blocked prompt")
+
+	require.NoError(t, MarkTurn(home, "s1", "p6", "x"))
+	assert.False(t, TakeTurnMark(home, "s2", "p6"), "marks are per session")
+
+	assert.Error(t, MarkTurn(home, "../evil", "", "x"))
+	assert.Error(t, MarkTurn(home, "", "", "x"))
+	assert.False(t, TakeTurnMark(home, "../evil", ""))
+	assert.Equal(t, "p", turnKey("p", "t"))
+	assert.Equal(t, "t", turnKey("", "t"))
 }
 
 func TestSplitMarkdown(t *testing.T) {

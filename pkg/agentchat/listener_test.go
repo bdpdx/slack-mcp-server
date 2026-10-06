@@ -530,3 +530,15 @@ func TestListenerAddsPeopleToUsersChannel(t *testing.T) {
 	l.HandleMemberJoined(context.Background(), "C9", "UBR")
 	assert.Equal(t, []string{"UBR", "UMI"}, owner.members["GUSERS"])
 }
+
+func TestListenerStatusReportsChannelNames(t *testing.T) {
+	api := newFakeSlack()
+	api.names["C2"] = "proj__brian_claude"
+	l := newTestListener(t, api, &fakeDeliverer{})
+	sub := claudeSub("s1")
+	sub.Channels = []string{"C1", "C2", "C9"}
+	require.NoError(t, l.Subscribe(context.Background(), sub, 0))
+	resp := l.Control(context.Background(), ControlRequest{Op: "status"})
+	require.Len(t, resp.Sessions, 1)
+	assert.Equal(t, map[string]string{"C1": "proj", "C2": "proj__brian_claude"}, resp.Sessions[0].Names, "unknown names are left out")
+}
