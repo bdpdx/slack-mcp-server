@@ -2,14 +2,16 @@ package setup
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"time"
 )
 
-// backup copies an existing file to <path>.bak-<timestamp> before setup
-// changes it, and returns the copy's path ("" if path does not exist).
+// backup copies an existing file to <path>.bak-<timestamp> (or
+// <path>.bak-<timestamp>-N if that exists) before setup changes it, and
+// returns the copy's path ("" if path does not exist).
 func backup(path string, now time.Time) (string, error) {
 	src, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -23,8 +25,16 @@ func backup(path string, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dst := path + ".bak-" + now.Format("20060102150405")
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
+	base := path + ".bak-" + now.Format("20060102150405")
+	dst := base
+	var out *os.File
+	for n := 2; ; n++ {
+		out, err = os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
+		if !errors.Is(err, os.ErrExist) {
+			break
+		}
+		dst = fmt.Sprintf("%s-%d", base, n)
+	}
 	if err != nil {
 		return "", err
 	}

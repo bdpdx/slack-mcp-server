@@ -84,3 +84,21 @@ func TestInstallCodexRejectsNonObjectHooks(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(home, "skills"))
 	assert.NoFileExists(t, filepath.Join(home, "rules", "default.rules"))
 }
+
+func TestInstallCodexBacksUpConfigBeforeCLI(t *testing.T) {
+	home := t.TempDir()
+	cfg := filepath.Join(home, "config.toml")
+	require.NoError(t, os.WriteFile(cfg, []byte("model = \"x\"\n"), 0o600))
+	_, err := InstallCodex(home, "/b/slack-mcp-server", &fakeRunner{}, &Scripted{}, testNow)
+	require.NoError(t, err)
+	got, err := os.ReadFile(cfg + ".bak-20261005120000")
+	require.NoError(t, err, "config.toml is backed up before codex mcp edits it")
+	assert.Equal(t, "model = \"x\"\n", string(got))
+
+	// Without the codex CLI nothing edits config.toml: no backup.
+	home2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(home2, "config.toml"), []byte("model = \"x\"\n"), 0o600))
+	_, err = InstallCodex(home2, "/b/slack-mcp-server", &fakeRunner{missing: map[string]bool{"codex": true}}, &Scripted{}, testNow)
+	require.NoError(t, err)
+	assert.NoFileExists(t, filepath.Join(home2, "config.toml.bak-20261005120000"))
+}

@@ -78,3 +78,18 @@ func TestReplaceFileWritesThroughSymlink(t *testing.T) {
 	assert.Equal(t, "old", string(bak))
 	assert.NoFileExists(t, link+".bak-20261005120000")
 }
+
+func TestBackupNeverOverwritesAnEarlierBackup(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(p, []byte("one"), 0o600))
+	first, err := backup(p, testNow)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(p, []byte("two"), 0o600))
+	second, err := backup(p, testNow)
+	require.NoError(t, err)
+	assert.Equal(t, p+".bak-20261005120000-2", second)
+	got, _ := os.ReadFile(first)
+	assert.Equal(t, "one", string(got), "the first backup is kept")
+	got, _ = os.ReadFile(second)
+	assert.Equal(t, "two", string(got))
+}

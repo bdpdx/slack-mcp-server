@@ -108,7 +108,11 @@ func InstallCodex(home, bin string, r Runner, p Prompter, now time.Time) (Result
 		res.Changed = append(res.Changed, rulesPath)
 	}
 
-	if fixed, ok, err := fixNotify(cfg); err == nil && ok {
+	fixed, ok, err := fixNotify(cfg)
+	if err != nil {
+		return res, err
+	}
+	if ok {
 		yes, err := p.Confirm("Codex's notify runs codex-push.py; Slack turn-end DMs replace it. Remove it from notify?", true)
 		if err != nil {
 			return res, err
@@ -121,6 +125,12 @@ func InstallCodex(home, bin string, r Runner, p Prompter, now time.Time) (Result
 		}
 	}
 
+	if _, err := r.LookPath("codex"); err == nil {
+		// codex mcp remove/add rewrite config.toml.
+		if _, err := backup(cfgPath, now); err != nil {
+			return res, err
+		}
+	}
 	manual, err := RegisterMCP(r, TypeCodex, home, "", bin)
 	if err != nil {
 		return res, err
