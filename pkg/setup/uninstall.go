@@ -87,14 +87,28 @@ func (u *uninstaller) note(f string, a ...any) {
 	u.res.Notes = append(u.res.Notes, fmt.Sprintf(f, a...))
 }
 
-// removeFile backs up path (unless it holds secrets) and deletes it.
-func (u *uninstaller) removeFile(path string, keepBackup bool) error {
-	if keepBackup {
-		if _, err := backup(path, u.o.Now()); err != nil {
-			return err
-		}
+// removeFile backs up path next to it and deletes it.
+func (u *uninstaller) removeFile(path string) error {
+	if _, err := backup(path, u.o.Now()); err != nil {
+		return err
 	}
 	return os.Remove(path)
+}
+
+// removeAway backs up path into <repo>/.install/backups (private, so a plist
+// is not loaded by launchd and a script is not on PATH), deletes it and
+// reports where the backup went.
+func (u *uninstaller) removeAway(path string) error {
+	dst, err := backupInto(path, filepath.Join(u.o.Repo, ".install", "backups"), 0o600, u.o.Now())
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	u.removed(path)
+	u.note("backup of %s: %s", filepath.Base(path), dst)
+	return nil
 }
 
 func (u *uninstaller) hooks(h Home) {
@@ -141,14 +155,19 @@ func (u *uninstaller) skill(h Home) {
 	}
 	dir := filepath.Join(h.Path, "skills", "slack-agent-chat")
 	for n := range files {
-		if err := os.Remove(filepath.Join(dir, n)); err == nil {
-			u.removed(filepath.Join(dir, n))
-		} else if !errors.Is(err, os.ErrNotExist) {
+		p := filepath.Join(dir, n)
+		if !exists(p) {
+			continue
+		}
+		if err := u.removeFile(p); err != nil {
 			u.fail("skill", err)
 			return
 		}
+		u.removed(p)
 	}
-	_ = os.Remove(dir) // only when empty
+	if err := os.Remove(dir); err != nil && exists(dir) { // only when empty
+		u.note("%s kept: it still holds the skill file backups (and any files you added)", dir)
+	}
 }
 
 func (u *uninstaller) mcp(h unHome) {
@@ -174,6 +193,9 @@ func (u *uninstaller) rule(h Home) {
 	path := filepath.Join(h.Path, "rules", "default.rules")
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			u.fail("rule", err)
+		}
 		return
 	}
 	next := withoutCodexRules(string(data), u.bin)
@@ -211,6 +233,9 @@ func (u *uninstaller) config(h Home) {
 	path := filepath.Join(h.Path, "config.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			u.fail("config.toml", err)
+		}
 		return
 	}
 	next, ok := withoutApproveLine(string(data))
@@ -258,7 +283,7 @@ func (u *uninstaller) launchAgent(h Home) error {
 	}
 	u.removed("app-server launch agent " + label)
 	if hasPlist {
-		if err := u.removeFile(plist, true); err != nil {
+		if err := u.removeAway(plist); err != nil {
 			u.fail("launch agent plist", err)
 		}
 	}
@@ -280,18 +305,20 @@ func (u *uninstaller) startScript(h Home) error {
 		}
 		return err
 	}
-	if err := u.removeFile(path, true); err != nil {
+	if err := u.removeAway(path); err != nil {
 		u.fail("start script", err)
-		return nil
 	}
-	u.removed(path)
 	return nil
 }
 
 // uninstallHome runs the steps for one home the user said yes to.
 func (u *uninstaller) uninstallHome(h unHome) error {
 	if h.missing {
-		u.note("folder missing: hooks, skill, rule, config and env file skipped")
+		skipped := "hooks, skill and env file"
+		if h.Type == TypeCodex {
+			skipped = "hooks, skill, rule, config and env file"
+		}
+		u.note("folder missing: %s skipped", skipped)
 	} else {
 		u.hooks(h.Home)
 		u.skill(h.Home)

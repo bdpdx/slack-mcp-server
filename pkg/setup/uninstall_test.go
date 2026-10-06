@@ -134,7 +134,6 @@ func TestUninstallDefaultIsNo(t *testing.T) {
 	assert.True(t, exists(filepath.Join(home, "skills", "slack-agent-chat", "SKILL.md")))
 	assert.Empty(t, e.r.calls)
 	assert.Len(t, e.loadState(t).Homes, 1)
-	assert.Contains(t, e.bin, "slack-mcp-server")
 	_, err := os.Lstat(e.bin)
 	assert.NoError(t, err, "link stays while a home remains")
 	require.Len(t, res, 1)
@@ -156,7 +155,10 @@ func TestUninstallClaudeDefaultHome(t *testing.T) {
 	assert.NotContains(t, string(data), "Stop", "emptied event dropped")
 	assert.NotEmpty(t, baks(t, filepath.Join(home, "settings.json")))
 
-	assert.False(t, exists(filepath.Join(home, "skills", "slack-agent-chat")))
+	skillDir := filepath.Join(home, "skills", "slack-agent-chat")
+	assert.False(t, exists(filepath.Join(skillDir, "SKILL.md")))
+	assert.NotEmpty(t, baks(t, filepath.Join(skillDir, "SKILL.md")), "skill file backed up")
+	assert.True(t, exists(skillDir), "folder kept: it holds the backups")
 	assert.False(t, exists(EnvPath(home)))
 	assert.Empty(t, baks(t, EnvPath(home)), "no backup of the tokens")
 	assert.Equal(t, []string{"-u CLAUDE_CONFIG_DIR claude mcp remove -s user slack"}, e.r.calls)
@@ -211,7 +213,7 @@ func TestUninstallCodexYes(t *testing.T) {
 	script := e.startScript(t, home)
 	e.state(t, HomeState{Path: home, Type: TypeCodex})
 	e.answer("y", "y", "y", "y")
-	e.run(t)
+	res := e.run(t)
 
 	doc, _ := json.Marshal(readJSON(t, filepath.Join(home, "hooks.json")))
 	assert.Contains(t, string(doc), "other-stop")
@@ -225,11 +227,20 @@ func TestUninstallCodexYes(t *testing.T) {
 	assert.Contains(t, e.r.calls, "CODEX_HOME="+home+" codex mcp remove slack")
 	assert.Contains(t, e.r.calls, "launchctl bootout "+target)
 	assert.False(t, exists(plist))
-	assert.NotEmpty(t, baks(t, plist))
 	assert.False(t, exists(script))
-	assert.NotEmpty(t, baks(t, script), "script may hold PROJECT_ROOT")
+	// backups go to the repo, not where launchd or PATH would find them
+	assert.Empty(t, baks(t, plist), "no backup in LaunchAgents")
+	assert.Empty(t, baks(t, script), "no backup next to the script")
+	for _, orig := range []string{plist, script} {
+		m := baks(t, filepath.Join(e.repo, ".install", "backups", filepath.Base(orig)))
+		require.Len(t, m, 1)
+		info, err := os.Stat(m[0])
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	}
+	assert.Contains(t, strings.Join(res[0].Notes, "\n"), filepath.Join(e.repo, ".install", "backups"))
 	assert.False(t, exists(EnvPath(home)))
-	assert.False(t, exists(filepath.Join(home, "skills", "slack-agent-chat")))
+	assert.False(t, exists(filepath.Join(home, "skills", "slack-agent-chat", "SKILL.md")))
 }
 
 func TestUninstallCodexNoKeepsAgentAndScript(t *testing.T) {
@@ -357,4 +368,28 @@ func TestUninstallSummaryReminders(t *testing.T) {
 	assert.Contains(t, out, "https://api.slack.com/apps")
 	assert.Contains(t, out, "claude-a")
 	assert.Contains(t, out, "Restart any running Claude/Codex sessions")
+}
+
+func TestUninstallClaudeMissingFolderNoteIsKindSpecific(t *testing.T) {
+	e := newUnEnv(t)
+	home := filepath.Join(e.user, ".claude-gone")
+	e.state(t, HomeState{Path: home, Type: TypeClaude})
+	e.answer("y", "n")
+	res := e.run(t)
+	n := strings.Join(res[0].Notes, "\n")
+	assert.Contains(t, n, "folder missing")
+	assert.NotContains(t, n, "rule")
+}
+
+func TestUninstallRulesReadErrorFails(t *testing.T) {
+	e := newUnEnv(t)
+	home := e.codexHome(t, ".codex-test")
+	rules := filepath.Join(home, "rules", "default.rules")
+	require.NoError(t, os.Remove(rules))
+	require.NoError(t, os.Mkdir(rules, 0o700)) // reading a directory fails
+	e.state(t, HomeState{Path: home, Type: TypeCodex})
+	e.answer("y", "n", "n", "n")
+	res := e.run(t)
+	assert.Contains(t, strings.Join(res[0].Notes, "\n"), "FAILED: rule")
+	assert.Len(t, e.loadState(t).Homes, 1)
 }

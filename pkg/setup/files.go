@@ -13,6 +13,12 @@ import (
 // <path>.bak-<timestamp>-N if that exists) before setup changes it, and
 // returns the copy's path ("" if path does not exist).
 func backup(path string, now time.Time) (string, error) {
+	return backupInto(path, filepath.Dir(path), 0, now)
+}
+
+// backupInto is backup with the copy placed in dir; a non-zero perm
+// replaces the source's file mode.
+func backupInto(path, dir string, perm os.FileMode, now time.Time) (string, error) {
 	src, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
@@ -25,11 +31,17 @@ func backup(path string, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	base := path + ".bak-" + now.Format("20060102150405")
+	if perm == 0 {
+		perm = info.Mode().Perm()
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	base := filepath.Join(dir, filepath.Base(path)) + ".bak-" + now.Format("20060102150405")
 	dst := base
 	var out *os.File
 	for n := 2; ; n++ {
-		out, err = os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
+		out, err = os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
 		if !errors.Is(err, os.ErrExist) {
 			break
 		}
