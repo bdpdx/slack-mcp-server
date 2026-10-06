@@ -34,8 +34,8 @@ func main() {
 	var envFile string
 	flag.StringVar(&transport, "t", "stdio", "Transport type (stdio, sse or http)")
 	flag.StringVar(&transport, "transport", "stdio", "Transport type (stdio, sse or http)")
-	flag.StringVar(&enabledToolsFlag, "e", "", "Comma-separated list of enabled tools (empty = all tools)")
-	flag.StringVar(&enabledToolsFlag, "enabled-tools", "", "Comma-separated list of enabled tools (empty = all tools)")
+	flag.StringVar(&enabledToolsFlag, "e", "", "Comma-separated list of enabled tools (empty = every read tool, plus write tools enabled by their SLACK_MCP_*_TOOL settings)")
+	flag.StringVar(&enabledToolsFlag, "enabled-tools", "", "Comma-separated list of enabled tools (empty = every read tool, plus write tools enabled by their SLACK_MCP_*_TOOL settings)")
 	flag.BoolVar(&noCache, "no-cache", false, "Skip user/channel cache loading on startup for faster initialization. Lookups by #channel-name or @username will not work; use channel/user IDs instead.")
 	flag.StringVar(&envFile, "env-file", "", "Path to the slack-mcp-server.env file (default: detected from the Codex or Claude Code session)")
 	flag.Usage = func() {
