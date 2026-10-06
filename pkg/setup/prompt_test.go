@@ -1,9 +1,13 @@
 package setup
 
 import (
+	"errors"
 	"io"
 	"os"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -187,4 +191,43 @@ func TestTerminalNonTTY(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTerminalSecretFromPipe(t *testing.T) {
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	defer r.Close()
+	_, err = w.WriteString(" 'xoxb-1' \n")
+	require.NoError(t, err)
+	w.Close()
+	var out strings.Builder
+	s, err := NewTerminal(r, &out).Secret("Bot token")
+	require.NoError(t, err, "a non-terminal stdin is read as a plain line")
+	assert.Equal(t, "xoxb-1", s)
+	assert.Contains(t, out.String(), "Bot token (input hidden): ")
+}
+
+func TestRestoreOnInterrupt(t *testing.T) {
+	restored := false
+	code := make(chan int, 1)
+	_, err := restoreOnInterrupt(func() { restored = true }, func(c int) { code <- c }, func() ([]byte, error) {
+		require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGINT))
+		select {
+		case c := <-code:
+			code <- c
+		case <-time.After(5 * time.Second):
+		}
+		return nil, errors.New("read interrupted")
+	})
+	assert.Error(t, err)
+	assert.True(t, restored, "the terminal state is restored on Ctrl-C")
+	assert.Equal(t, 130, <-code)
+
+	restored = false
+	b, err := restoreOnInterrupt(func() { restored = true }, func(int) { t.Error("exit called") }, func() ([]byte, error) {
+		return []byte("tok"), nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "tok", string(b))
+	assert.False(t, restored)
 }

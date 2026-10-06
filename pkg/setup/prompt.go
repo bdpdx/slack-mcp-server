@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 
@@ -111,8 +112,16 @@ func NewTerminal(in *os.File, out io.Writer) *Terminal {
 	r := bufio.NewReader(in)
 	t := &Terminal{prompter{out: out}}
 	t.next = func(secret bool) (string, error) {
-		if secret && term.IsTerminal(int(in.Fd())) {
-			b, err := term.ReadPassword(int(in.Fd()))
+		if fd := int(in.Fd()); secret && term.IsTerminal(fd) {
+			state, err := term.GetState(fd)
+			if err != nil {
+				return "", ErrAborted
+			}
+			restore := func() {
+				_ = term.Restore(fd, state)
+				fmt.Fprintln(out)
+			}
+			b, err := restoreOnInterrupt(restore, os.Exit, func() ([]byte, error) { return term.ReadPassword(fd) })
 			if err != nil {
 				return "", ErrAborted
 			}
@@ -125,6 +134,28 @@ func NewTerminal(in *os.File, out io.Writer) *Terminal {
 		return strings.TrimRight(line, "\r\n"), nil
 	}
 	return t
+}
+
+// restoreOnInterrupt runs read; if SIGINT (Ctrl-C) arrives meanwhile it
+// calls restore (turning terminal echo back on) and exit(130).
+func restoreOnInterrupt(restore func(), exit func(int), read func() ([]byte, error)) ([]byte, error) {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt)
+	done, finished := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(finished)
+		select {
+		case <-sigs:
+			restore()
+			exit(130)
+		case <-done:
+		}
+	}()
+	b, err := read()
+	signal.Stop(sigs)
+	close(done)
+	<-finished
+	return b, err
 }
 
 // Scripted answers prompts from a list, for tests; Out records the output.
