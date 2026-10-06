@@ -33,6 +33,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "setup" {
 		os.Exit(setup.Main(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "uninstall" {
+		os.Exit(setup.UninstallMain(os.Args[2:]))
+	}
 
 	var transport string
 	var enabledToolsFlag string

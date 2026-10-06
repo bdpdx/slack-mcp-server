@@ -17,6 +17,8 @@ type Result struct {
 	Changed   []string // files written or registrations made
 	Manual    []string // commands the user must run
 	Notes     []string // anything else to tell the user
+	Bot       string   // uninstall: the home's saved Slack bot name
+	Removed   bool     // uninstall: the user chose to uninstall this home
 }
 
 // readJSONObject reads a JSON object file; a missing file is empty. Invalid

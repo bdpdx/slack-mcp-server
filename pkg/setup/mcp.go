@@ -55,37 +55,53 @@ func commandEnv(base, env []string) []string {
 func RegisterMCP(r Runner, kind, home, userHome, bin string) (string, error) {
 	serve := []string{"--", bin, "--transport", "stdio", "--env-file", EnvPath(home)}
 	var name string
-	var env, rm, add []string
-	switch kind {
-	case TypeClaude:
-		name, rm, add = "claude", []string{"mcp", "remove", "-s", "user", "slack"}, append([]string{"mcp", "add", "-s", "user", "slack"}, serve...)
-		if filepath.Clean(home) == filepath.Join(userHome, ".claude") {
-			env = []string{"CLAUDE_CONFIG_DIR"}
-		} else {
-			env = []string{"CLAUDE_CONFIG_DIR=" + home}
-		}
-	default:
-		name, env = "codex", []string{"CODEX_HOME=" + home}
-		rm, add = []string{"mcp", "remove", "slack"}, append([]string{"mcp", "add", "slack"}, serve...)
-	}
+	name, rm := mcpRemoveArgs(kind)
+	env := mcpEnv(kind, home, userHome)
+	// add takes remove's options (-s user) and the name, then the server command.
+	add := append(append([]string{"mcp", "add"}, rm[2:len(rm)-1]...), "slack")
+	add = append(add, serve...)
 	if _, err := r.LookPath(name); err != nil {
-		quoted := make([]string, len(add))
-		for i, a := range add {
-			quoted[i] = shellQuote(a)
-		}
-		var prefix string
-		if k, v, ok := strings.Cut(env[0], "="); ok {
-			prefix = k + "=" + shellQuote(v) + " "
-		} else {
-			prefix = "env -u " + k + " "
-		}
-		return prefix + name + " " + strings.Join(quoted, " "), nil
+		return manualCommand(env, name, add), nil
 	}
 	_, _ = r.Run(env, name, rm...) // absent is fine
 	if out, err := r.Run(env, name, add...); err != nil {
 		return "", &cliError{name: name, out: out, err: err}
 	}
 	return "", nil
+}
+
+// mcpRemoveArgs is the agent's CLI and its `mcp remove` arguments.
+func mcpRemoveArgs(kind string) (string, []string) {
+	if kind == TypeClaude {
+		return "claude", []string{"mcp", "remove", "-s", "user", "slack"}
+	}
+	return "codex", []string{"mcp", "remove", "slack"}
+}
+
+// mcpEnv is the environment the agent's CLI runs in for one home.
+func mcpEnv(kind, home, userHome string) []string {
+	if kind != TypeClaude {
+		return []string{"CODEX_HOME=" + home}
+	}
+	if filepath.Clean(home) == filepath.Join(userHome, ".claude") {
+		return []string{"CLAUDE_CONFIG_DIR"}
+	}
+	return []string{"CLAUDE_CONFIG_DIR=" + home}
+}
+
+// manualCommand renders a CLI call for the user to run later.
+func manualCommand(env []string, name string, args []string) string {
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = shellQuote(a)
+	}
+	var prefix string
+	if k, v, ok := strings.Cut(env[0], "="); ok {
+		prefix = k + "=" + shellQuote(v) + " "
+	} else {
+		prefix = "env -u " + k + " "
+	}
+	return prefix + name + " " + strings.Join(quoted, " ")
 }
 
 type cliError struct {

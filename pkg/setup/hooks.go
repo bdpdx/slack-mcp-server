@@ -67,10 +67,12 @@ func isOurHook(cmd string) bool {
 	return slices.ContainsFunc(splitCommand(cmd)[2:], func(a string) bool { return slices.Contains(ourHooks, a) })
 }
 
-// MergeHooks removes every slack-mcp-server chat hook from events (any
-// binary path) and adds specs, keeping all other hooks.
-func MergeHooks(events map[string]any, specs []HookSpec, bin, envFile, status string) map[string]any {
+// removeOurHooks drops every slack-mcp-server chat hook from events (any
+// binary path), keeps all other hooks, drops entries and events left empty,
+// and counts the hooks removed.
+func removeOurHooks(events map[string]any) (map[string]any, int) {
 	out := map[string]any{}
+	removed := 0
 	for event, list := range events {
 		entries, _ := list.([]any)
 		var kept []any
@@ -85,7 +87,9 @@ func MergeHooks(events map[string]any, specs []HookSpec, bin, envFile, status st
 			for _, h := range hs {
 				hm, _ := h.(map[string]any)
 				cmd, _ := hm["command"].(string)
-				if !isOurHook(cmd) {
+				if isOurHook(cmd) {
+					removed++
+				} else {
 					keepHooks = append(keepHooks, h)
 				}
 			}
@@ -102,6 +106,13 @@ func MergeHooks(events map[string]any, specs []HookSpec, bin, envFile, status st
 			out[event] = kept
 		}
 	}
+	return out, removed
+}
+
+// MergeHooks removes every slack-mcp-server chat hook from events (any
+// binary path) and adds specs, keeping all other hooks.
+func MergeHooks(events map[string]any, specs []HookSpec, bin, envFile, status string) map[string]any {
+	out, _ := removeOurHooks(events)
 	for _, s := range specs {
 		h := map[string]any{"type": "command", "command": HookCommand(bin, envFile, s.Hook), "timeout": s.Timeout}
 		if status != "" {

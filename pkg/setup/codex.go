@@ -99,6 +99,37 @@ func codexRule(bin string) string {
 
 var chatRuleLine = regexp.MustCompile(`^\s*prefix_rule\(\s*pattern\s*=\s*\[\s*("(?:[^"\\]|\\.)*")\s*,\s*"chat"\s*[,\]]`)
 
+// isOurChatRule reports whether line is a slack-mcp-server "chat"
+// prefix_rule: base name slack-mcp-server, or resolving to binReal.
+func isOurChatRule(line, binReal string, binErr error) bool {
+	m := chatRuleLine.FindStringSubmatch(line)
+	if m == nil {
+		return false
+	}
+	var path string
+	if json.Unmarshal([]byte(m[1]), &path) != nil {
+		return false
+	}
+	if filepath.Base(path) == "slack-mcp-server" {
+		return true
+	}
+	real, err := filepath.EvalSymlinks(path)
+	return err == nil && binErr == nil && real == binReal
+}
+
+// withoutCodexRules drops every slack-mcp-server "chat" prefix_rule and keeps
+// all other lines as they are.
+func withoutCodexRules(text, bin string) string {
+	binReal, binErr := filepath.EvalSymlinks(bin)
+	var out []string
+	for _, line := range strings.SplitAfter(text, "\n") {
+		if line != "" && !isOurChatRule(line, binReal, binErr) {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "")
+}
+
 // withCodexRule drops every slack-mcp-server "chat" prefix_rule (any path)
 // except one equal to rule, keeps all other lines as they are, and appends
 // rule if it is not already present.
@@ -110,22 +141,13 @@ func withCodexRule(text, rule, bin string) string {
 		if line == "" {
 			continue
 		}
-		trimmed := strings.TrimSpace(line)
-		if trimmed == rule {
+		if strings.TrimSpace(line) == rule {
 			if have {
 				continue
 			}
 			have = true
-		} else if m := chatRuleLine.FindStringSubmatch(line); m != nil {
-			var path string
-			if json.Unmarshal([]byte(m[1]), &path) == nil {
-				if filepath.Base(path) == "slack-mcp-server" {
-					continue
-				}
-				if real, err := filepath.EvalSymlinks(path); err == nil && binErr == nil && real == binReal {
-					continue
-				}
-			}
+		} else if isOurChatRule(line, binReal, binErr) {
+			continue
 		}
 		out = append(out, line)
 	}

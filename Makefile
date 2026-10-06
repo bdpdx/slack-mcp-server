@@ -50,6 +50,10 @@ test: ## Run the tests (all are local; none need Slack tokens or network)
 install: ## Set up agent chat on this Mac (prerequisites, build, link, interactive setup)
 	./install.sh
 
+.PHONY: uninstall
+uninstall: ## Remove agent chat from the agent homes you choose (asks before each)
+	./uninstall.sh
+
 .PHONY: format
 format: ## Format the code
 	$(GO) fmt ./...
