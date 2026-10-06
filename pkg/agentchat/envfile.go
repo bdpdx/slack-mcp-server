@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/joho/godotenv"
 )
@@ -51,11 +52,22 @@ func ExpandHome(path, home string) string {
 }
 
 // LoadEnvFile makes path the only source of SLACK_MCP_* settings: inherited
-// SLACK_MCP_* variables are unset, then the file's values are set.
+// SLACK_MCP_* variables are unset, then the file's values are set. The file
+// holds Slack tokens, so it must belong to this user and be private to them,
+// and it may set only SLACK_MCP_* variables (never, say, PATH, which the
+// detached listener inherits).
 func LoadEnvFile(path string) error {
+	if err := checkEnvFilePrivate(path); err != nil {
+		return err
+	}
 	values, err := godotenv.Read(path)
 	if err != nil {
 		return fmt.Errorf("reading env file %s: %w", path, err)
+	}
+	for k := range values {
+		if !strings.HasPrefix(k, "SLACK_MCP_") {
+			return fmt.Errorf("env file %s sets %s; only SLACK_MCP_* settings are allowed", path, k)
+		}
 	}
 	for _, kv := range os.Environ() {
 		if name, _, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(name, "SLACK_MCP_") {
@@ -68,6 +80,22 @@ func LoadEnvFile(path string) error {
 		if err := os.Setenv(k, v); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// checkEnvFilePrivate refuses an env file another user owns or can read or
+// write.
+func checkEnvFilePrivate(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("reading env file %s: %w", path, err)
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("env file %s belongs to another user", path)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Errorf("env file %s is accessible to other users (mode %#o); run: chmod 600 %s", path, perm, path)
 	}
 	return nil
 }

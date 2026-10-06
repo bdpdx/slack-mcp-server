@@ -76,16 +76,24 @@ func approvalButton(id, decision, label, style string) *slack.ButtonBlockElement
 	return b
 }
 
-func approvalBlocks(text, id string, wait time.Duration) []slack.Block {
+// approvalBlocks lays out the request. When unsafe is set (see
+// FormatApproval) there is no Allow button: the owner can deny, or answer in
+// the terminal, which shows the request in full.
+func approvalBlocks(text, unsafe, id string, wait time.Duration) []slack.Block {
+	var buttons []slack.BlockElement
+	note := "Or reply in the thread: _no_ plus a reason for the agent, or _terminal_. Only the button can allow."
+	if unsafe == "" {
+		buttons = append(buttons, approvalButton(id, decisionAllow, "Allow", "primary"))
+	} else {
+		note = fmt.Sprintf("This can't be allowed from Slack because %s. Deny it here, or answer in the terminal, which shows it in full.", slackEscaper.Replace(unsafe))
+	}
+	buttons = append(buttons,
+		approvalButton(id, decisionDeny, "Deny", "danger"),
+		approvalButton(id, decisionTerminal, "Answer in terminal", ""))
 	return []slack.Block{
 		slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, text, false, false), nil, nil),
-		slack.NewActionBlock("",
-			approvalButton(id, decisionAllow, "Allow", "primary"),
-			approvalButton(id, decisionDeny, "Deny", "danger"),
-			approvalButton(id, decisionTerminal, "Answer in terminal", ""),
-		),
-		slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, fmt.Sprintf(
-			"Or reply in the thread: _no_ plus a reason for the agent, or _terminal_. Only the button can allow. After %s with no answer, the terminal asks.", wait), false, false)),
+		slack.NewActionBlock("", buttons...),
+		slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, fmt.Sprintf("%s After %s with no answer, the terminal asks.", note, wait), false, false)),
 	}
 }
 
@@ -135,11 +143,11 @@ func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration
 	if err != nil {
 		return 0
 	}
-	text := FormatApproval(me.ownerID, me.agentName, ev.ToolName, ev.ToolInput)
+	text, unsafe := FormatApproval(me.ownerID, me.agentName, ev.ToolName, ev.ToolInput)
 	id := newApprovalID()
 	_, ts, err := c.bot.PostMessageContext(setup, channel,
 		slack.MsgOptionText(fmt.Sprintf("%s needs your approval: %s", me.agentName, ev.ToolName), false),
-		slack.MsgOptionBlocks(approvalBlocks(text, id, wait)...))
+		slack.MsgOptionBlocks(approvalBlocks(text, unsafe, id, wait)...))
 	if err != nil {
 		fmt.Fprintf(c.stderr, "slack-agent-chat: posting approval request to #%s: %v\n", name, err)
 		return 0
@@ -152,6 +160,9 @@ func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration
 	waitCtx, cancelWait := context.WithTimeout(ctx, wait)
 	decision, reason := c.waitForApproval(waitCtx, channel, ts, id)
 	cancelWait()
+	if decision == decisionAllow && unsafe != "" {
+		decision = decisionTerminal // there was no Allow button; never allow what was not shown
+	}
 
 	finish, cancelFinish := context.WithTimeout(ctx, relayTimeout)
 	defer cancelFinish()

@@ -708,7 +708,13 @@ type approval struct {
 	channel, ts      string // the request message, once the hook registers it
 	decision, reason string // "" until answered
 	hint             bool   // the owner typed an allow word, which cannot approve
+	early            *click // a click that arrived before the hook registered
 	at               time.Time
+}
+
+// click is an owner's button click on a message posted by this bot.
+type click struct {
+	channel, ts, decision string
 }
 
 // approvalEntry returns the request with id, creating it, and forgets
@@ -734,17 +740,30 @@ func (l *Listener) WatchApproval(id, channel, ts string) {
 	defer l.mu.Unlock()
 	a := l.approvalEntry(id)
 	a.channel, a.ts = channel, ts
+	if c := a.early; c != nil && a.decision == "" && c.channel == channel && c.ts == ts {
+		a.decision = c.decision
+	}
+	a.early = nil
 }
 
 // HandleInteraction records a click on an approval button. Slack vouches
 // for who clicked, so a click is the only way to allow: agents can post as
-// the owner, but cannot click as them. Only the owner's first click counts.
+// the owner, but cannot click as them. A click counts only when the owner
+// made it, on the message this bot posted for that approval, with a known
+// decision; the first such click wins.
 func (l *Listener) HandleInteraction(payload []byte) {
 	var in struct {
 		Type string `json:"type"`
 		User struct {
 			ID string `json:"id"`
 		} `json:"user"`
+		Container struct {
+			ChannelID string `json:"channel_id"`
+			MessageTS string `json:"message_ts"`
+		} `json:"container"`
+		Message struct {
+			BotID string `json:"bot_id"`
+		} `json:"message"`
 		Actions []struct {
 			ActionID string `json:"action_id"`
 			Value    string `json:"value"`
@@ -758,13 +777,30 @@ func (l *Listener) HandleInteraction(payload []byte) {
 		if !ok || act.Value == "" {
 			continue
 		}
-		if in.User.ID != l.OwnerID {
+		switch {
+		case in.User.ID != l.OwnerID:
 			l.Log.Warn("ignoring approval click from someone other than the owner", zap.String("user", in.User.ID), zap.String("approval", act.Value))
 			continue
+		case in.Message.BotID != l.Self.BotID:
+			l.Log.Warn("ignoring approval click on a message this bot did not post", zap.String("bot", in.Message.BotID), zap.String("approval", act.Value))
+			continue
+		case decision != decisionAllow && decision != decisionDeny && decision != decisionTerminal:
+			l.Log.Warn("ignoring approval click with an unknown decision", zap.String("decision", decision))
+			continue
 		}
+		c := click{in.Container.ChannelID, in.Container.MessageTS, decision}
 		l.mu.Lock()
-		if a := l.approvalEntry(act.Value); a.decision == "" {
+		a := l.approvalEntry(act.Value)
+		switch {
+		case a.decision != "":
+		case a.channel == "":
+			if a.early == nil {
+				a.early = &c // checked when the hook registers its message
+			}
+		case a.channel == c.channel && a.ts == c.ts:
 			a.decision = decision
+		default:
+			l.Log.Warn("ignoring approval click on a different message", zap.String("approval", act.Value), zap.String("channel", c.channel), zap.String("ts", c.ts))
 		}
 		l.mu.Unlock()
 		l.Log.Info("approval clicked", zap.String("approval", act.Value), zap.String("decision", decision))

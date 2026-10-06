@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode"
 
 	"github.com/slack-go/slack"
 )
@@ -72,10 +73,34 @@ func FormatQuestions(ownerID, agent string, input json.RawMessage) (string, bool
 	return b.String(), true
 }
 
-const maxApprovalDetail = 500
+// maxApprovalDetail keeps the message within Slack's 3,000-character limit
+// for a section's text.
+const maxApprovalDetail = 2500
+
+// revealHidden replaces characters that render invisibly or reorder text
+// (format characters such as zero-width spaces, bidi overrides and Unicode
+// tags, and control characters other than newline and tab) with a visible
+// ⟨U+XXXX⟩, reporting whether there were any.
+func revealHidden(s string) (string, bool) {
+	var b strings.Builder
+	hidden := false
+	for _, r := range s {
+		if r != '\n' && r != '\t' && (unicode.Is(unicode.Cf, r) || unicode.IsControl(r) || r == '\u2028' || r == '\u2029') {
+			fmt.Fprintf(&b, "⟨U+%04X⟩", r)
+			hidden = true
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String(), hidden
+}
 
 // FormatApproval renders a pending permission prompt as a Slack message.
-func FormatApproval(ownerID, agent, tool string, input json.RawMessage) string {
+// unsafe is non-empty when the message cannot show the owner exactly what
+// they would approve: the detail had to be cut, or it holds characters that
+// render invisibly or reorder text. Such a request must not be allowed from
+// Slack; unsafe says why.
+func FormatApproval(ownerID, agent, tool string, input json.RawMessage) (msg, unsafe string) {
 	var in map[string]any
 	_ = json.Unmarshal(input, &in)
 	detail := ""
@@ -96,15 +121,20 @@ func FormatApproval(ownerID, agent, tool string, input json.RawMessage) string {
 			detail = string(input)
 		}
 	}
+	detail, hidden := revealHidden(detail)
+	if hidden {
+		unsafe = "it contains invisible or text-reordering characters (shown as ⟨U+…⟩)"
+	}
 	if r := []rune(detail); len(r) > maxApprovalDetail {
+		unsafe = fmt.Sprintf("it is too long to show in full (%d characters; the first %d are shown)", len(r), maxApprovalDetail)
 		detail = string(r[:maxApprovalDetail]) + "…"
 	}
-	msg := fmt.Sprintf("<@%s> %s needs your approval: %s", ownerID, slackEscaper.Replace(agent), slackEscaper.Replace(tool))
+	msg = fmt.Sprintf("<@%s> %s needs your approval: %s", ownerID, slackEscaper.Replace(agent), slackEscaper.Replace(tool))
 	if detail != "" {
 		// Inside a code block only the backticks that would close it matter.
-		msg += "\n```" + strings.ReplaceAll(slackEscaper.Replace(detail), "```", "`​``") + "```"
+		msg += "\n```" + strings.ReplaceAll(slackEscaper.Replace(detail), "```", "`\u200b``") + "```"
 	}
-	return msg
+	return msg, unsafe
 }
 
 // askHookReason tells Claude where its question went instead of the terminal.

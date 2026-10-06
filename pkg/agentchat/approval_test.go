@@ -47,7 +47,7 @@ func TestApprovalOutcome(t *testing.T) {
 }
 
 func TestApprovalBlocksCarryTheID(t *testing.T) {
-	blocks := approvalBlocks("text", "abc123", defaultApprovalWait)
+	blocks := approvalBlocks("text", "", "abc123", defaultApprovalWait)
 	data, _ := json.Marshal(blocks)
 	for _, d := range []string{decisionAllow, decisionDeny, decisionTerminal} {
 		assert.Contains(t, string(data), `"action_id":"`+approvalActionPrefix+d+`","value":"abc123"`)
@@ -55,7 +55,14 @@ func TestApprovalBlocksCarryTheID(t *testing.T) {
 }
 
 func clickPayload(user, decision, id string) []byte {
-	return []byte(`{"type":"block_actions","user":{"id":"` + user + `"},"actions":[{"action_id":"` + approvalActionPrefix + decision + `","value":"` + id + `"}]}`)
+	return clickOn(user, decision, id, "C1", "2000.1", "BCL")
+}
+
+func clickOn(user, decision, id, channel, ts, bot string) []byte {
+	return []byte(`{"type":"block_actions","user":{"id":"` + user + `"},` +
+		`"container":{"type":"message","channel_id":"` + channel + `","message_ts":"` + ts + `"},` +
+		`"message":{"bot_id":"` + bot + `"},` +
+		`"actions":[{"action_id":"` + approvalActionPrefix + decision + `","value":"` + id + `"}]}`)
 }
 
 func takeApproval(t *testing.T, l *Listener, id string) (string, string) {
@@ -64,13 +71,19 @@ func takeApproval(t *testing.T, l *Listener, id string) (string, string) {
 	return resp.Decision, resp.Text
 }
 
-// Only the owner's click decides, the first click wins, and the hook takes
-// the decision through the control socket once.
+// Only the owner's click on this bot's registered message, with a known
+// decision, decides; the first click wins; the hook takes it once.
 func TestListenerApprovalClicks(t *testing.T) {
 	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	ctx := context.Background()
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "a1", Channel: "C1", TS: "2000.1"}).OK)
+
 	l.HandleInteraction(clickPayload("UMI", decisionAllow, "a1"))
+	l.HandleInteraction(clickOn("UBR", decisionAllow, "a1", "C1", "2000.1", "BOTHER"))
+	l.HandleInteraction(clickOn("UBR", decisionAllow, "a1", "C1", "2000.9", "BCL"))
+	l.HandleInteraction(clickOn("UBR", "everything", "a1", "C1", "2000.1", "BCL"))
 	d, _ := takeApproval(t, l, "a1")
-	assert.Equal(t, "", d, "not the owner")
+	assert.Equal(t, "", d, "not the owner, another bot's message, another message, unknown decision")
 
 	l.HandleInteraction(clickPayload("UBR", decisionDeny, "a1"))
 	l.HandleInteraction(clickPayload("UBR", decisionAllow, "a1"))
@@ -84,6 +97,24 @@ func TestListenerApprovalClicks(t *testing.T) {
 	l.HandleInteraction(clickPayload("UBR", decisionAllow, ""))
 	d, _ = takeApproval(t, l, "")
 	assert.Equal(t, "", d)
+}
+
+// A click that beats the hook's registration is kept and checked against the
+// message once it registers.
+func TestListenerApprovalEarlyClick(t *testing.T) {
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	ctx := context.Background()
+	l.HandleInteraction(clickPayload("UBR", decisionAllow, "a1"))
+	d, _ := takeApproval(t, l, "a1")
+	assert.Equal(t, "", d, "not yet registered")
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "a1", Channel: "C1", TS: "2000.1"}).OK)
+	d, _ = takeApproval(t, l, "a1")
+	assert.Equal(t, decisionAllow, d)
+
+	l.HandleInteraction(clickOn("UBR", decisionAllow, "a2", "C1", "2000.7", "BCL"))
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "a2", Channel: "C1", TS: "2000.8"}).OK)
+	d, _ = takeApproval(t, l, "a2")
+	assert.Equal(t, "", d, "an early click on another message does not count")
 }
 
 // Replies in an approval thread answer it and are never delivered as

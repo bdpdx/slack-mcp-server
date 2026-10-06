@@ -90,7 +90,10 @@ Each home has its own Slack app (bot token, user token, app-level token).
 
 ## Notices
 
-One block per message: channel name and ID, sender (owner flagged), ts,
+One block per message: the `[slack-agent-chat]` prefix, then `[console user]`
+for the owner (a fixed position before any field another person controls;
+sender and file names lose brackets, parentheses and line breaks, so a display
+name cannot imitate it), channel name and ID, sender, ts,
 thread, text with `<@U…>` rendered as `@name` (truncated at 4000 chars),
 and attached file names. How to reply and ack lives in the skill, not in
 each notice, so it is read once per session. Recovery batches join blocks
@@ -162,6 +165,9 @@ the session's direct channel `<project>__<owner>_<agent>`:
   fires only when the user is about to be prompted) asks in the direct channel
   and answers the prompt for the owner. The message shows the tool and its
   command or description, with buttons Allow / Deny / Answer in terminal.
+  A request the message cannot show exactly (detail over 2,500 characters, or
+  invisible / text-reordering characters, shown as ⟨U+XXXX⟩) gets no Allow
+  button and can only be denied or sent to the terminal.
   Only a click can allow: Slack vouches for who clicked, while every agent
   home holds the owner's user token and could post a reply as the owner. The
   owner can also reply in its thread with a deny word (no, deny, stop…)
@@ -175,7 +181,9 @@ the session's direct channel `<project>__<owner>_<agent>`:
 - Clicks are Socket Mode interactions, which reach the home's listener (a
   second Socket Mode connection would split events with it). The hook
   registers its message with the control op `approval-watch`; the listener
-  then records the owner's first click or reply per approval ID, keeps every
+  then records the owner's first click (only on that message, posted by this
+  bot, with a known decision; a click before registration is checked when it
+  registers) or reply per approval ID, keeps every
   reply in that thread out of the session (so an answer is not also delivered
   as an instruction), and the hook polls the control op `approval`.
 - Codex's `request_user_input` is not hookable, so for Codex (and as a
@@ -211,6 +219,18 @@ Socket Mode on; app-level token with `connections:write`; Event Subscriptions
 `groups:write` (creating `__users` and inviting to it as the owner); bot
 scopes `chat:write` and `im:write` (turn-end DMs); Interactivity on (approval
 buttons; no request URL with Socket Mode); reinstall if prompted.
+
+## Trust boundaries
+
+- The env file must belong to the user, be private (no group/other bits),
+  and set only `SLACK_MCP_*` keys.
+- The control socket (0600 in a 0700 directory) admits any process of the
+  same user, agents included. No op grants an approval, but a same-user
+  process can always stop the listener and impersonate it; this design does
+  not defend against code already running as the user.
+- Every agent home holds the owner's user token, so anything an agent posts
+  as the owner looks like the owner. Hence: only button clicks can allow, and
+  the owner marker reflects the token, not intent.
 
 ## Out of scope
 

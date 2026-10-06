@@ -141,7 +141,7 @@ func TestListenerDeliversEveryMessage(t *testing.T) {
 
 	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "2001.000001", User: "UBR", Text: "status please; <@UCR> rerun the tests"})
 	require.Len(t, d.got, 1)
-	assert.Contains(t, d.got[0].text, "#proj (C1) from brian (the console user")
+	assert.Contains(t, d.got[0].text, "[slack-agent-chat] [console user] #proj (C1) from brian,")
 	assert.Contains(t, d.got[0].text, "@codex-r rerun the tests")
 	assert.Equal(t, clientMessageID("s1", "C1", "2001.000001"), d.got[0].clientID)
 	assert.Contains(t, api.reactions, "eyes|C1|2001.000001")
