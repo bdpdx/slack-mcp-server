@@ -49,8 +49,7 @@ func TestRunNewCodexHome(t *testing.T) {
 		"1",         // set up these homes
 		"my_bot",    // invalid: warned, asked again
 		"pat-codex", // bot name
-		"n",         // app does not exist yet
-		"",          // Enter after installing the app
+		"",          // Enter after creating/updating the app
 		" xapp-1 ",  // app token
 		"xoxb-good", // bot token
 		"xoxp-good", // user token
@@ -99,12 +98,36 @@ func TestRunAbortsOnEOF(t *testing.T) {
 	assert.NoFileExists(t, EnvPath(filepath.Join(user, ".codex")))
 }
 
+// The bot step always writes the manifest, says where it is, and offers to
+// copy it to the clipboard; it covers both a new and an existing app.
+func TestRunOffersManifestOnClipboard(t *testing.T) {
+	user, repo := t.TempDir(), t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(user, ".claude"), 0o700))
+	var copied []byte
+	p := &Scripted{Answers: []string{"1", "pat-claude", "y", "", "xapp-1", "xoxb-good", "xoxp-good", "y"}}
+	o := opts(user, repo, p)
+	o.Clipboard = func(b []byte) error { copied = b; return nil }
+	_, err := Run(context.Background(), o)
+	require.NoError(t, err)
+	path := filepath.Join(repo, ".install", "manifests", "pat-claude.json")
+	want, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, string(want), string(copied), "the saved manifest was copied")
+	out := p.Out.String()
+	assert.Contains(t, out, "saved to "+path)
+	assert.Contains(t, out, "Copied to the clipboard.")
+	assert.Contains(t, out, "From a manifest", "new app route")
+	assert.Contains(t, out, "App Manifest", "existing app route")
+	assert.NotContains(t, out, "already exist", "no app-exists question")
+	assert.Contains(t, out, "\n\nApp-level token (xapp-…): Settings", "help lines are spaced")
+}
+
 func TestRunReasksOnlyBadToken(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
 	codex := filepath.Join(user, ".codex")
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	p := &Scripted{Answers: []string{
-		"1", "pat-codex", "y", // set up; name; app exists
+		"1", "pat-codex", "", // set up; name; Enter after the app step
 		"xapp-1", "xoxp-wrong", // bot slot given a user token: prefix failure, re-ask bot
 
 		"xoxb-good", "xoxp-good", "y",
@@ -120,7 +143,7 @@ func TestRunDottedUsernameFailsHomeOnly(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
 	codex := filepath.Join(user, ".codex")
 	require.NoError(t, os.MkdirAll(codex, 0o700))
-	p := &Scripted{Answers: []string{"1", "pat-codex", "y", "xapp-1", "xoxb-good", "xoxp-dotted"}}
+	p := &Scripted{Answers: []string{"1", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-dotted"}}
 	res, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
 	require.Len(t, res, 1)
@@ -137,7 +160,7 @@ func TestRunLiveCheckReasksOnlyBotToken(t *testing.T) {
 	codex := filepath.Join(user, ".codex")
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	p := &Scripted{Answers: []string{
-		"1", "pat-codex", "y",
+		"1", "pat-codex", "",
 		"xapp-1", "xoxb-bad", "xoxp-good", // Slack rejects the bot token
 		"xoxb-good", // only the bot token is asked again
 		"y",
@@ -153,7 +176,7 @@ func TestRunLiveCheckReasksOnlyBotToken(t *testing.T) {
 func runWithValidator(t *testing.T, v fakeValidator) string {
 	user, repo := t.TempDir(), t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(user, ".codex"), 0o700))
-	p := &Scripted{Answers: []string{"1", "pat-codex", "y", "xapp-1", "xoxb-good", "xoxp-good", "y"}}
+	p := &Scripted{Answers: []string{"1", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-good", "y"}}
 	o := opts(user, repo, p)
 	o.V = v
 	_, err := Run(context.Background(), o)
@@ -208,7 +231,7 @@ func TestRunReinstallKeepsCustomToolValues(t *testing.T) {
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	require.NoError(t, os.WriteFile(EnvPath(codex), []byte(
 		"SLACK_MCP_XOXB_TOKEN=xoxb-old\nSLACK_MCP_ADD_MESSAGE_TOOL=C123,#general\nSLACK_MCP_DELETE_MESSAGE_TOOL='!C123 #x'\n"), 0o600))
-	answers := []string{"1", "2", "y", "pat-codex", "y", "xapp-1", "xoxb-good", "xoxp-good", "n"}
+	answers := []string{"1", "2", "y", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-good", "n"}
 	for range len(DefaultOnTools) + len(DefaultOffTools) - 2 {
 		answers = append(answers, "") // keep each toggle's default
 	}

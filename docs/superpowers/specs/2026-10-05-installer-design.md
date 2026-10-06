@@ -76,13 +76,17 @@ tokens. Used only to offer defaults on re-runs.
    are separators in channel names and cannot be used, then ask again
    (nothing about them is shown otherwise). Other invalid names: explain and
    ask again.
-2. **App exists?** If not:
-   - Render the manifest (§2.4), save it to
-     `.install/manifests/<name>.json` (git-ignored), print it.
-   - Guide: https://api.slack.com/apps → Create New App → From a manifest →
-     choose the workspace → paste → Create → Install to Workspace.
-   - Ask the user to set an icon: https://app.slack.com/apps → Build →
-     <App> → Settings → Basic Information → Display Information.
+2. **Manifest** (always): render it (§2.4), save it to
+   `.install/manifests/<name>.json` (git-ignored), say where it is, and
+   offer to copy it to the clipboard (`pbcopy`). Then give both routes:
+   - New app: https://api.slack.com/apps → Create New App → From a
+     manifest → choose the workspace → paste → Create → Install to
+     Workspace.
+   - Existing app: Build → <App> → Settings → App Manifest → paste → Save
+     Changes (reinstall if Slack asks), so its scopes and settings match.
+   Then wait for Enter, and ask the user to set an icon:
+   https://app.slack.com/apps → Build → <App> → Settings → Basic
+   Information → Display Information.
 3. **Tokens**, each at a hidden prompt (`golang.org/x/term`), with where to
    find it:
    - App-level token `xapp-…`: Basic Information → App-Level Tokens →

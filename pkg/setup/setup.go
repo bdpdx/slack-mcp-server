@@ -1,12 +1,14 @@
 package setup
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -20,6 +22,8 @@ type Options struct {
 	V                   Validator
 	R                   Runner
 	Now                 func() time.Time
+	// Clipboard copies text for the user (pbcopy); nil means don't offer.
+	Clipboard func([]byte) error
 }
 
 const (
@@ -344,39 +348,50 @@ func setupBot(ctx context.Context, o Options, h Home, saved string) (string, Tok
 		name = n
 		break
 	}
-	appExists, err := p.Confirm("Does the Slack app already exist?", false)
-	if err != nil {
+	if err := showManifest(o, name); err != nil {
 		return "", Tokens{}, err
 	}
-	if !appExists {
-		if err := showManifest(o, name); err != nil {
-			return "", Tokens{}, err
-		}
-	}
-	p.Say(iconMsgFmt, name, name)
+	p.Say("\n"+iconMsgFmt, name, name)
 	tok, err := askTokens(ctx, o, name)
 	return name, tok, err
 }
 
+// showManifest saves the Slack app manifest, offers to copy it, and says how
+// to create the app from it (or update an existing app to match).
 func showManifest(o Options, name string) error {
 	m, err := RenderManifest(name)
 	if err != nil {
 		return err
 	}
-	if err := writeAtomic(filepath.Join(o.Repo, ".install", "manifests", name+".json"), m, 0o600); err != nil {
+	path := filepath.Join(o.Repo, ".install", "manifests", name+".json")
+	if err := writeAtomic(path, m, 0o600); err != nil {
 		return err
 	}
-	o.P.Say("%s", string(m))
-	o.P.Say("1. Open https://api.slack.com/apps and click Create New App → From a manifest.")
-	o.P.Say("2. Choose your workspace, paste the manifest above, and click Create.")
-	o.P.Say("3. Click Install to Workspace and allow.")
-	_, err = o.P.Ask("Press Enter when the app is installed", "")
+	p := o.P
+	p.Say("\nSlack app manifest for %s saved to %s", name, path)
+	if o.Clipboard != nil {
+		copyIt, err := p.Confirm("Copy the manifest to the clipboard?", true)
+		if err != nil {
+			return err
+		}
+		if copyIt {
+			if err := o.Clipboard(m); err != nil {
+				p.Say("Could not copy it (%v); open the file instead.", err)
+			} else {
+				p.Say("Copied to the clipboard.")
+			}
+		}
+	}
+	p.Say("\nNew app: open https://api.slack.com/apps, click Create New App → From a manifest, choose your workspace, paste the manifest, click Create, then Install to Workspace.")
+	p.Say("\nExisting app: https://app.slack.com/apps → Build → %s → Settings → App Manifest, paste the manifest, Save Changes, and reinstall the app if Slack asks.", name)
+	_, err = p.Ask("\nPress Enter when the app is installed", "")
 	return err
 }
 
 // askToken reads one token until it is non-empty and has the right prefix.
 func askToken(p Prompter, kind, label string) (string, error) {
 	for {
+		p.Say("")
 		s, err := p.Secret(label)
 		if err != nil {
 			return "", err
@@ -396,8 +411,8 @@ func askToken(p Prompter, kind, label string) (string, error) {
 
 func askTokens(ctx context.Context, o Options, name string) (Tokens, error) {
 	p := o.P
-	p.Say("%s", appTokHelp)
-	p.Say(tokenHelpFm, name)
+	p.Say("\n%s", appTokHelp)
+	p.Say("\n"+tokenHelpFm, name)
 	var tok Tokens
 	need := map[string]bool{"app": true, "bot": true, "user": true}
 	for {
@@ -523,6 +538,7 @@ func Main(args []string) int {
 	results, err := Run(context.Background(), Options{
 		Repo: *repo, Bin: linkPath, UserHome: user,
 		P: NewTerminal(os.Stdin, os.Stdout), V: SlackValidator{}, R: ExecRunner{}, Now: time.Now,
+		Clipboard: pbcopy,
 	})
 	printSummary(os.Stdout, linkPath, results, errors.Is(err, ErrAborted))
 	if err != nil {
@@ -534,6 +550,13 @@ func Main(args []string) int {
 
 // printSummary reports each home, then the remaining manual steps when at
 // least one home was set up and setup was not aborted.
+// pbcopy puts data on the macOS clipboard.
+func pbcopy(data []byte) error {
+	cmd := exec.Command("pbcopy")
+	cmd.Stdin = bytes.NewReader(data)
+	return cmd.Run()
+}
+
 func printSummary(w io.Writer, bin string, results []Result, aborted bool) {
 	fmt.Fprintln(w, "\nSummary")
 	if real, err := filepath.EvalSymlinks(bin); err == nil && real != bin {
