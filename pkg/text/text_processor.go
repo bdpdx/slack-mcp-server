@@ -205,10 +205,12 @@ func richTextSectionToText(section *slack.RichTextSection) string {
 				parts = append(parts, e.Text)
 			}
 		case *slack.RichTextSectionLinkElement:
-			if e.Text != "" {
+			// Always show the real target: display text alone could
+			// disguise where the link goes.
+			if e.URL != "" {
+				parts = append(parts, renderLink(e.URL, e.Text))
+			} else if e.Text != "" {
 				parts = append(parts, e.Text)
-			} else if e.URL != "" {
-				parts = append(parts, e.URL)
 			}
 		case *slack.RichTextSectionBroadcastElement:
 			if e.Range != "" {
@@ -390,7 +392,7 @@ func normalizeLinks(text string) string {
 	}
 
 	render := func(url, linkText string, isLast bool) string {
-		out := url + " - " + linkText
+		out := renderLink(url, linkText)
 		if !isLast {
 			out += ","
 		}
@@ -415,10 +417,31 @@ func normalizeLinks(text string) string {
 	return text
 }
 
+// renderLink renders a link so that its real target is always visible. When
+// the display text is just the URL again it is not repeated.
+func renderLink(target, linkText string) string {
+	linkText = strings.TrimSpace(linkText)
+	if linkText == "" || linkText == target || strings.TrimRight(linkText, "/") == strings.TrimRight(target, "/") {
+		return target
+	}
+	return target + " - " + linkText
+}
+
+// SanitizeInline makes an untrusted short string (a username or bot name)
+// safe to show on one line: unsafe runes are stripped and line breaks and
+// tabs become spaces.
+func SanitizeInline(s string) string {
+	s = stripUnsafeRunes(s)
+	s = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "\t", " ", "\u2028", " ", "\u2029", " ").Replace(s)
+	return strings.TrimSpace(collapseInlineSpaces(s))
+}
+
 // stripUnsafeRunes removes runes that are display-corrupting or carry no
 // semantic content: C0/C1 controls (except \t \n \r), DEL, BOM, ZWSP,
-// LRM/RLM, bidi overrides, and bidi isolates. Bidi overrides are a known
-// prompt-injection vector in chat corpora. U+200C (ZWNJ) and U+200D (ZWJ)
+// LRM/RLM, bidi overrides and isolates, invisible operators (U+2060-U+2064),
+// the Mongolian vowel separator (U+180E), and Unicode tag characters
+// (U+E0000-U+E007F). Bidi overrides and tag characters are known
+// prompt-injection vectors: they hide or reorder text a reader cannot see. U+200C (ZWNJ) and U+200D (ZWJ)
 // are preserved: they are required for Persian and Arabic letter joining
 // and for emoji ZWJ sequences such as family and flag emoji.
 func stripUnsafeRunes(s string) string {
@@ -439,6 +462,12 @@ func stripUnsafeRunes(s string) string {
 		case r >= 0x202A && r <= 0x202E:
 			continue
 		case r >= 0x2066 && r <= 0x2069:
+			continue
+		case r >= 0x2060 && r <= 0x2064: // word joiner and invisible operators
+			continue
+		case r == 0x180E: // Mongolian vowel separator
+			continue
+		case r >= 0xE0000 && r <= 0xE007F: // tag characters
 			continue
 		default:
 			b.WriteRune(r)

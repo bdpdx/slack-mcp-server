@@ -622,10 +622,15 @@ func (ch *ConversationsHandler) FilesGetHandler(ctx context.Context, request mcp
 		return nil, err
 	}
 
+	if isExternalFile(fileInfo) {
+		return nil, errors.New("attachment is an external file (hosted outside Slack) and cannot be downloaded")
+	}
 	if fileInfo.Size > maxFileSizeBytes {
 		return nil, fmt.Errorf("file size %d bytes exceeds maximum allowed size of %d bytes", fileInfo.Size, maxFileSizeBytes)
 	}
 
+	// The provider only fetches Slack-hosted URLs and caps the download at
+	// the same size limit, whatever the reported size says.
 	var buf bytes.Buffer
 	downloadURL := fileInfo.URLPrivateDownload
 	if downloadURL == "" {
@@ -641,39 +646,60 @@ func (ch *ConversationsHandler) FilesGetHandler(ctx context.Context, request mcp
 		return nil, err
 	}
 
-	content := buf.Bytes()
+	return attachmentResult(fileInfo, buf.Bytes())
+}
+
+// attachmentMetadata describes a downloaded attachment.
+type attachmentMetadata struct {
+	FileID   string `json:"file_id"`
+	Filename string `json:"filename"`
+	Mimetype string `json:"mimetype"`
+	Size     int    `json:"size"`
+}
+
+// attachmentContent is the JSON shape returned for non-image attachments.
+type attachmentContent struct {
+	attachmentMetadata
+	Encoding string `json:"encoding"`
+	Content  string `json:"content"`
+}
+
+// isExternalFile reports whether a Slack file is a reference to content
+// hosted outside Slack (Google Drive, Dropbox, ...). Such files are refused.
+func isExternalFile(f *slack.File) bool {
+	return f.IsExternal || f.ExternalType != "" || strings.EqualFold(f.Mode, "external")
+}
+
+// attachmentResult builds the tool result for downloaded file content.
+func attachmentResult(fileInfo *slack.File, content []byte) (*mcp.CallToolResult, error) {
+	meta := attachmentMetadata{
+		FileID:   fileInfo.ID,
+		Filename: fileInfo.Name,
+		Mimetype: fileInfo.Mimetype,
+		Size:     len(content),
+	}
 
 	// For image files, return as native MCP image content so the client
 	// can render them directly without base64-in-JSON overflow.
 	if isImageMimetype(fileInfo.Mimetype) {
-		imageData := base64.StdEncoding.EncodeToString(content)
-		metadata := fmt.Sprintf(`{"file_id":"%s","filename":"%s","mimetype":"%s","size":%d}`,
-			fileInfo.ID,
-			escapeJSON(fileInfo.Name),
-			escapeJSON(fileInfo.Mimetype),
-			len(content))
-		return mcp.NewToolResultImage(metadata, imageData, fileInfo.Mimetype), nil
+		metadata, err := json.Marshal(meta)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling attachment metadata: %w", err)
+		}
+		return mcp.NewToolResultImage(string(metadata), base64.StdEncoding.EncodeToString(content), fileInfo.Mimetype), nil
 	}
 
-	encoding := "none"
-	var contentStr string
-
-	if isTextMimetype(fileInfo.Mimetype) {
-		contentStr = string(content)
-	} else {
-		contentStr = base64.StdEncoding.EncodeToString(content)
-		encoding = "base64"
+	out := attachmentContent{attachmentMetadata: meta, Encoding: "none", Content: string(content)}
+	if !isTextMimetype(fileInfo.Mimetype) {
+		out.Encoding = "base64"
+		out.Content = base64.StdEncoding.EncodeToString(content)
 	}
 
-	result := fmt.Sprintf(`{"file_id":"%s","filename":"%s","mimetype":"%s","size":%d,"encoding":"%s","content":"%s"}`,
-		fileInfo.ID,
-		escapeJSON(fileInfo.Name),
-		escapeJSON(fileInfo.Mimetype),
-		len(content),
-		encoding,
-		escapeJSON(contentStr))
-
-	return mcp.NewToolResultText(result), nil
+	result, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling attachment: %w", err)
+	}
+	return mcp.NewToolResultText(string(result)), nil
 }
 
 // FilesUploadHandler uploads a file to Slack and shares it to one conversation.
@@ -801,15 +827,6 @@ func isTextMimetype(mimetype string) bool {
 		"application/x-sh":       true,
 	}
 	return textMimetypes[mimetype]
-}
-
-func escapeJSON(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	s = strings.ReplaceAll(s, "\n", `\n`)
-	s = strings.ReplaceAll(s, "\r", `\r`)
-	s = strings.ReplaceAll(s, "\t", `\t`)
-	return s
 }
 
 // ConversationsHistoryHandler streams conversation history as CSV
@@ -1810,7 +1827,7 @@ func (ch *ConversationsHandler) convertMessagesFromHistory(ctx context.Context, 
 		userName, realName, ok := resolver.resolve(msg.User)
 
 		if !ok && msg.SubType == "bot_message" {
-			userName, realName, ok = getBotInfo(msg.Username)
+			userName, realName, ok = getBotInfo(msg.BotID, msg.Username)
 		}
 
 		if !ok {
@@ -1840,7 +1857,7 @@ func (ch *ConversationsHandler) convertMessagesFromHistory(ctx context.Context, 
 
 		botName := ""
 		if msg.BotProfile != nil && msg.BotProfile.Name != "" {
-			botName = msg.BotProfile.Name
+			botName = text.SanitizeInline(msg.BotProfile.Name)
 		}
 
 		fileCount := len(msg.Files)
@@ -1893,7 +1910,7 @@ func (ch *ConversationsHandler) convertMessagesFromSearch(ctx context.Context, s
 		userName, realName, ok := resolver.resolve(msg.User)
 
 		if !ok && msg.User == "" && msg.Username != "" {
-			userName, realName, ok = getBotInfo(msg.Username)
+			userName, realName, ok = getBotInfo("", msg.Username)
 		}
 
 		if !ok {
@@ -2382,8 +2399,20 @@ func (r *userResolver) resolve(userID string) (userName, realName string, ok boo
 	return patched.Name, patched.RealName, true
 }
 
-func getBotInfo(botID string) (userName, realName string, ok bool) {
-	return botID, botID, true
+// getBotInfo renders the author of a bot message. The username of a
+// bot_message is chosen by whoever posted it, so it is shown as
+// "bot:<username>" together with the bot ID and is never used as a real
+// name, which would let a bot impersonate a person.
+func getBotInfo(botID, username string) (userName, realName string, ok bool) {
+	name := text.SanitizeInline(username)
+	if name == "" {
+		name = "unknown"
+	}
+	userName = "bot:" + name
+	if botID = text.SanitizeInline(botID); botID != "" {
+		userName += " (" + botID + ")"
+	}
+	return userName, "", true
 }
 
 func limitByNumeric(limit string, defaultLimit int) (int, error) {

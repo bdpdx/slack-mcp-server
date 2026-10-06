@@ -1,6 +1,7 @@
 package text
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/slack-go/slack"
@@ -136,7 +137,7 @@ func TestBlocksToText(t *testing.T) {
 					},
 				},
 			},
-			want: "Click here",
+			want: "Click https://example.com - here",
 		},
 		{
 			name: "rich text link without display text falls back to URL",
@@ -671,6 +672,16 @@ func TestProcessText_LinkNormalization(t *testing.T) {
 			expected: "Check this https://google.com - Google, out",
 		},
 		{
+			name:     "Slack-style link whose text repeats the URL",
+			input:    "see <https://google.com|https://google.com>",
+			expected: "see https://google.com",
+		},
+		{
+			name:     "Slack-style link whose text is a different URL shows the real target",
+			input:    "see <https://evil.example|https://google.com>",
+			expected: "see https://evil.example - https://google.com",
+		},
+		{
 			name:     "HTML anchor at end",
 			input:    `Visit <a href="https://example.com">Example</a>`,
 			expected: "Visit https://example.com - Example",
@@ -975,5 +986,35 @@ func TestBlocksUnfurlAllowed(t *testing.T) {
 	}
 	if !BlocksUnfurlAllowed(image, "true", nil) || !BlocksUnfurlAllowed(nil, "example.com", nil) {
 		t.Fatal("boolean settings and empty blocks defer to IsUnfurlingEnabled")
+	}
+}
+
+func TestStripUnsafeRunesInvisible(t *testing.T) {
+	in := "a\u202Eb\u2066c\u2069d\U000E0041\U000E007Fe\u2060f\u2064g\u180Eh\u200Bi\u200Dj"
+	got := stripUnsafeRunes(in)
+	want := "abcdefghi\u200Dj"
+	if got != want {
+		t.Fatalf("stripUnsafeRunes() = %q, want %q", got, want)
+	}
+}
+
+func TestSanitizeInline(t *testing.T) {
+	got := SanitizeInline("  Alice\n(CEO)\t\u202Eadmin\U000E0041  ")
+	if got != "Alice (CEO) admin" {
+		t.Fatalf("SanitizeInline() = %q", got)
+	}
+}
+
+func TestRichTextLinkShowsTarget(t *testing.T) {
+	blocks := slack.Blocks{BlockSet: []slack.Block{
+		&slack.RichTextBlock{Type: slack.MBTRichText, Elements: []slack.RichTextElement{
+			&slack.RichTextSection{Type: slack.RTESection, Elements: []slack.RichTextSectionElement{
+				&slack.RichTextSectionLinkElement{Type: slack.RTSELink, URL: "https://evil.example", Text: "https://bank.example"},
+			}},
+		}},
+	}}
+	got := BlocksToText(blocks)
+	if !strings.Contains(got, "https://evil.example") {
+		t.Fatalf("BlocksToText() = %q, real target hidden", got)
 	}
 }
