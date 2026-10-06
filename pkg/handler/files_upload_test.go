@@ -2,9 +2,12 @@ package handler
 
 import (
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/korotovsky/slack-mcp-server/pkg/filesdir"
 	"github.com/korotovsky/slack-mcp-server/pkg/toolconfig"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
@@ -79,9 +82,42 @@ func TestUnitParseParamsToolFilesUpload(t *testing.T) {
 		require.ErrorContains(t, err, "must not be empty")
 
 		args["filename"] = "large.txt"
-		args["content"] = strings.Repeat("a", maxFileSizeBytes+1)
+		args["content"] = strings.Repeat("a", maxInlineBytes+1)
 		_, err = handler.parseParamsToolFilesUpload(t.Context(), uploadRequest(args))
-		require.ErrorContains(t, err, "maximum allowed size")
+		require.ErrorContains(t, err, "inline content is limited", "large files go through the files folder")
+
+		delete(args, "content")
+		args["content_base64"] = base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", maxInlineBytes+1)))
+		_, err = handler.parseParamsToolFilesUpload(t.Context(), uploadRequest(args))
+		require.ErrorContains(t, err, "inline content is limited")
+	})
+
+	t.Run("uploads from the files folder only", func(t *testing.T) {
+		root := t.TempDir()
+		dir := filepath.Join(root, "slack-mcp")
+		require.NoError(t, filesdir.Ensure(dir))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "report.pdf"), []byte("%PDF-1.7"), 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(root, "id_ed25519"), []byte("secret"), 0o600))
+		handler.cfg.FilesDir = dir
+		defer func() { handler.cfg.FilesDir = "" }()
+
+		params, err := handler.parseParamsToolFilesUpload(t.Context(), uploadRequest(map[string]any{"channel_id": "D123", "path": "report.pdf"}))
+		require.NoError(t, err)
+		defer params.file.Close()
+		require.Equal(t, "report.pdf", params.filename, "the filename defaults to the file's name")
+		require.Equal(t, 8, params.size)
+		require.Empty(t, params.content)
+
+		_, err = handler.parseParamsToolFilesUpload(t.Context(), uploadRequest(map[string]any{"channel_id": "D123", "path": "../id_ed25519"}))
+		require.ErrorContains(t, err, "outside the files folder")
+		_, err = handler.parseParamsToolFilesUpload(t.Context(), uploadRequest(map[string]any{"channel_id": "D123", "path": filepath.Join(root, "id_ed25519")}))
+		require.ErrorContains(t, err, "outside the files folder")
+		_, err = handler.parseParamsToolFilesUpload(t.Context(), uploadRequest(map[string]any{"channel_id": "D123", "path": "report.pdf", "content": "x"}))
+		require.ErrorContains(t, err, "exactly one")
+
+		handler.cfg.FilesDir = ""
+		_, err = handler.parseParamsToolFilesUpload(t.Context(), uploadRequest(map[string]any{"channel_id": "D123", "path": "report.pdf"}))
+		require.ErrorContains(t, err, "files folder is unavailable")
 	})
 
 	t.Run("requires upload configuration unless explicitly enabled", func(t *testing.T) {

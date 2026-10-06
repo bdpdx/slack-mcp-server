@@ -1,10 +1,16 @@
 package handler
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/korotovsky/slack-mcp-server/pkg/provider"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/slack-go/slack"
 	"github.com/stretchr/testify/assert"
@@ -69,4 +75,55 @@ func TestUnitGetBotInfoNeverImpersonates(t *testing.T) {
 	userName, realName, _ = getBotInfo("", "")
 	assert.Equal(t, "bot:unknown", userName)
 	assert.Empty(t, realName)
+}
+
+// fileClient fakes only the download part of provider.SlackAPI.
+type fileClient struct {
+	provider.SlackAPI
+	body string
+	err  error
+}
+
+func (f fileClient) GetFileContext(_ context.Context, _ string, w io.Writer) error {
+	if _, err := io.WriteString(w, f.body); err != nil {
+		return err
+	}
+	return f.err
+}
+
+func TestUnitSaveAttachmentWritesToTheFilesFolder(t *testing.T) {
+	dir := t.TempDir()
+	handler := newPolicyTestHandler(t, nil)
+	handler.cfg.FilesDir = dir
+	file := &slack.File{ID: "F1", Name: "../report.pdf", Mimetype: "application/pdf"}
+
+	res, err := handler.saveAttachment(t.Context(), fileClient{body: "%PDF-1.7"}, file, "https://files.slack.com/x")
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(res.Content[0].(mcp.TextContent).Text), &got))
+	path := got["path"].(string)
+	assert.Equal(t, filepath.Join(dir, "_report.pdf"), path, "the name is made safe and stays in the folder")
+	assert.EqualValues(t, 8, got["size"])
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "%PDF-1.7", string(data))
+	assert.NotContains(t, got, "content", "a saved file is not returned inline")
+
+	_, err = handler.saveAttachment(t.Context(), fileClient{body: "part", err: errors.New("network down")}, file, "https://files.slack.com/x")
+	require.ErrorContains(t, err, "network down")
+	entries, _ := os.ReadDir(dir)
+	assert.Len(t, entries, 1, "a failed download leaves nothing behind")
+
+	handler.cfg.FilesDir = ""
+	_, err = handler.saveAttachment(t.Context(), fileClient{body: "x"}, file, "https://files.slack.com/x")
+	require.ErrorContains(t, err, "files folder is unavailable")
+}
+
+func TestUnitCappedBuffer(t *testing.T) {
+	b := &cappedBuffer{max: 4}
+	_, err := b.Write([]byte("abcd"))
+	require.NoError(t, err)
+	_, err = b.Write([]byte("e"))
+	assert.ErrorIs(t, err, errInlineTooLarge)
+	assert.Equal(t, "abcd", b.String())
 }

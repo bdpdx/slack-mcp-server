@@ -231,6 +231,9 @@ type Config struct {
 	AllowAsUser    bool
 	AddMessageMark bool
 	Unfurling      string
+	// FilesDir is the folder attachment_get_data saves into and files_upload
+	// reads from (see pkg/filesdir); empty when it could not be set up.
+	FilesDir string
 }
 
 // Load parses the tool configuration from the enabled-tools list and the

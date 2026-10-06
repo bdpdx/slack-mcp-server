@@ -274,19 +274,22 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, cfg *toolc
 
 	if cfg.ToolEnabled(ToolAttachmentGetData) {
 		s.AddTool(mcp.NewTool(ToolAttachmentGetData,
-			mcp.WithDescription("Download an attachment's content by file ID. Returns file metadata and content (text files as-is, binary files as base64). Maximum file size is 64 MiB."),
+			mcp.WithDescription("Download an attachment by file ID. By default returns metadata and content inline (text as-is, binary as base64, images as images), for files up to 1 MiB (images 5 MiB). With save=true, saves the file (up to 64 MiB) into the local files folder and returns its path instead; it never overwrites an existing file."),
 			mcp.WithTitleAnnotation("Get Attachment Data"),
 			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("file_id",
 				mcp.Required(),
 				mcp.Description("The ID of the attachment to download, in format Fxxxxxxxxxx. Attachment IDs (with filenames) can be found in the AttachmentIDs field of message metadata when FileCount > 0."),
 			),
+			mcp.WithBoolean("save",
+				mcp.Description("Save the file into the local files folder (SLACK_MCP_FILES_DIR, default ~/Downloads/slack-mcp) and return its path instead of the content. Use this for large or binary files."),
+			),
 		), conversationsHandler.FilesGetHandler)
 	}
 
 	if cfg.ToolEnabled(ToolFilesUpload) {
 		s.AddTool(mcp.NewTool(ToolFilesUpload,
-			mcp.WithDescription("Upload a file and share it to a Slack channel or DM. Provide either UTF-8 text in content or base64-encoded bytes in content_base64; files are limited to 64 MiB. This write tool is disabled unless explicitly enabled."),
+			mcp.WithDescription("Upload a file and share it to a Slack channel or DM. Provide exactly one of: content (UTF-8 text) or content_base64 (bytes), each up to 1 MiB; or path, a file up to 64 MiB inside the local files folder (SLACK_MCP_FILES_DIR, default ~/Downloads/slack-mcp). To upload any other file, copy it into that folder first. This write tool is disabled unless explicitly enabled."),
 			mcp.WithTitleAnnotation("Upload File"),
 			mcp.WithDestructiveHintAnnotation(true),
 			mcp.WithString("channel_id",
@@ -294,8 +297,10 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, cfg *toolc
 				mcp.Description("Channel or DM ID, or a resolvable channel name such as #general or @username_dm."),
 			),
 			mcp.WithString("filename",
-				mcp.Required(),
-				mcp.Description("Filename to display in Slack, including its extension."),
+				mcp.Description("Filename to display in Slack, including its extension. Required with content or content_base64; defaults to the file's name with path."),
+			),
+			mcp.WithString("path",
+				mcp.Description("A file inside the files folder, relative to it or absolute. Files outside the folder (including via symlinks) are refused. Use instead of content or content_base64."),
 			),
 			mcp.WithString("content",
 				mcp.Description("UTF-8 text file contents. Use either this or content_base64, not both."),

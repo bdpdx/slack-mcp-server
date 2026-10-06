@@ -74,7 +74,8 @@ The env file is bind-mounted read-only and passed with `--env-file`; the contain
 | `SLACK_MCP_DELETE_MESSAGE_TOOL`   | No        | `nil`                     | Channel policy for `conversations_delete_message`, same syntax as `SLACK_MCP_ADD_MESSAGE_TOOL`. Off by default. |
 | `SLACK_MCP_REACTION_TOOL`         | No        | `nil`                     | Channel policy for `reactions_add` and `reactions_remove`, same syntax as `SLACK_MCP_ADD_MESSAGE_TOOL`. Off by default. |
 | `SLACK_MCP_ALLOW_AS_USER`         | No        | `false`                   | Boolean. Allows `as_user=true` on `conversations_add_message`, `reactions_add`/`reactions_remove` and `files_upload`; otherwise such calls are refused. When only a user token (`xoxp`) is configured, every action is necessarily taken as that user regardless of this setting. |
-| `SLACK_MCP_ATTACHMENT_TOOL`       | No        | `false`                   | Boolean. Enables `attachment_get_data`. External files (hosted outside Slack) are refused; downloads are limited to Slack hosts and 64 MiB. |
+| `SLACK_MCP_ATTACHMENT_TOOL`       | No        | `false`                   | Boolean. Enables `attachment_get_data`. External files (hosted outside Slack) are refused; downloads are limited to Slack hosts. Inline results are capped at 1 MiB (images 5 MiB); with `save=true` the file (up to 64 MiB) is saved into the files folder and its path returned. |
+| `SLACK_MCP_FILES_DIR`             | No        | `~/Downloads/slack-mcp`   | The only local folder files move through: `attachment_get_data save=true` writes into it and `files_upload path=` reads only from it. Created (mode 0700) at startup if missing. |
 | `SLACK_MCP_OPEN_CONVERSATION_TOOL`| No        | `false`                   | Boolean. Enables `conversations_open`. |
 | `SLACK_MCP_MARK_TOOL`             | No        | `false`                   | Boolean. Enables `conversations_mark` (registered only with a user token, and always acts as the user). |
 | `SLACK_MCP_JOIN_TOOL`             | No        | `false`                   | Boolean. Enables `conversations_join` and `conversations_leave`. |
@@ -132,7 +133,7 @@ Channel policies are checked against the resolved target: `#name` and `@name` (i
 
 `as_user=true` is refused unless `SLACK_MCP_ALLOW_AS_USER=true`. With only a user token configured, every action is taken as the user.
 
-`files_upload` requires the `files:write` OAuth scope. It accepts one conversation ID, a filename, and either UTF-8 text or base64 file bytes; files are limited to 64 MiB. Its channel allowlist is checked after resolving channel names.
+`files_upload` requires the `files:write` OAuth scope. It accepts one conversation ID, a filename, and either UTF-8 text or base64 file bytes; inline content is limited to 1 MiB, and `path` uploads a file of up to 64 MiB from the files folder. Its channel allowlist is checked after resolving channel names.
 
 
 #### Examples

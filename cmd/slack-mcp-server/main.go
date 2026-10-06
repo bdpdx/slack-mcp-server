@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/korotovsky/slack-mcp-server/pkg/agentchat"
+	"github.com/korotovsky/slack-mcp-server/pkg/filesdir"
 	"github.com/korotovsky/slack-mcp-server/pkg/provider"
 	"github.com/korotovsky/slack-mcp-server/pkg/server"
 	"github.com/korotovsky/slack-mcp-server/pkg/toolconfig"
@@ -88,6 +89,22 @@ func main() {
 			zap.String("context", "console"),
 			zap.Error(err),
 		)
+	}
+
+	// The one folder files move through between Slack and this machine.
+	// Without it the server still runs; saving downloads and uploading from
+	// a path are unavailable.
+	filesDir, err := filesdir.Path(os.Getenv)
+	if err == nil {
+		err = filesdir.Ensure(filesDir)
+	}
+	if err != nil {
+		logger.Warn("files folder unavailable; attachment saving and path uploads are disabled",
+			zap.String("context", "console"),
+			zap.Error(err),
+		)
+	} else {
+		toolCfg.FilesDir = filesDir
 	}
 
 	// Validate the network transport before contacting Slack: sse/http

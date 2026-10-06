@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gocarina/gocsv"
+	"github.com/korotovsky/slack-mcp-server/pkg/filesdir"
 	"github.com/korotovsky/slack-mcp-server/pkg/limiter"
 	"github.com/korotovsky/slack-mcp-server/pkg/provider"
 	"github.com/korotovsky/slack-mcp-server/pkg/server/auth"
@@ -29,6 +32,11 @@ const (
 	defaultConversationsNumericLimit    = 50
 	defaultConversationsExpressionLimit = "1d"
 	maxFileSizeBytes                    = provider.MaxFileDownloadBytes // 64 MiB, for downloads and uploads
+	// Files passed inside a tool call or result are capped far lower: more
+	// would not fit in a model's context. Larger files go through the files
+	// folder (attachment_get_data save=true, files_upload path=...).
+	maxInlineBytes      = 1 << 20 // 1 MiB
+	maxInlineImageBytes = 5 << 20 // images are shown to the model as images
 
 	// Upper bounds for numeric tool inputs.
 	maxConversationsNumericLimit = 999
@@ -140,12 +148,15 @@ type addReactionParams struct {
 
 type filesGetParams struct {
 	fileID string
+	save   bool
 }
 
 type filesUploadParams struct {
 	channel         string
 	filename        string
 	content         string
+	file            *os.File // set instead of content for an upload from the files folder
+	size            int
 	title           string
 	initialComment  string
 	threadTimestamp string
@@ -652,7 +663,6 @@ func (ch *ConversationsHandler) FilesGetHandler(ctx context.Context, request mcp
 
 	// The provider only fetches Slack-hosted URLs and caps the download at
 	// the same size limit, whatever the reported size says.
-	var buf bytes.Buffer
 	downloadURL := fileInfo.URLPrivateDownload
 	if downloadURL == "" {
 		downloadURL = fileInfo.URLPrivate
@@ -661,13 +671,72 @@ func (ch *ConversationsHandler) FilesGetHandler(ctx context.Context, request mcp
 		return nil, errors.New("file has no downloadable URL")
 	}
 
-	err = client.GetFileContext(ctx, downloadURL, &buf)
-	if err != nil {
+	if params.save {
+		return ch.saveAttachment(ctx, client, fileInfo, downloadURL)
+	}
+
+	inlineMax := maxInlineBytes
+	if isImageMimetype(fileInfo.Mimetype) {
+		inlineMax = maxInlineImageBytes
+	}
+	if fileInfo.Size > inlineMax {
+		return nil, fmt.Errorf("file is %d bytes, more than the %d returned inline; call again with save=true to save it to the files folder", fileInfo.Size, inlineMax)
+	}
+	buf := &cappedBuffer{max: inlineMax}
+	if err := client.GetFileContext(ctx, downloadURL, buf); err != nil {
+		if errors.Is(err, errInlineTooLarge) {
+			return nil, fmt.Errorf("file is more than the %d bytes returned inline; call again with save=true to save it to the files folder", inlineMax)
+		}
 		ch.logger.Error("Slack GetFileContext failed", zap.Error(err))
 		return nil, err
 	}
 
 	return attachmentResult(fileInfo, buf.Bytes())
+}
+
+// saveAttachment streams a download into the files folder and returns where
+// it went instead of the content.
+func (ch *ConversationsHandler) saveAttachment(ctx context.Context, client provider.SlackAPI, fileInfo *slack.File, downloadURL string) (*mcp.CallToolResult, error) {
+	if ch.cfg.FilesDir == "" {
+		return nil, errors.New("the files folder is unavailable (see the server log); attachments cannot be saved")
+	}
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(client.GetFileContext(ctx, downloadURL, pw)) }()
+	path, n, err := filesdir.Save(ch.cfg.FilesDir, fileInfo.Name, pr, maxFileSizeBytes)
+	pr.Close()
+	if err != nil {
+		ch.logger.Error("Saving attachment failed", zap.String("file_id", fileInfo.ID), zap.Error(err))
+		return nil, err
+	}
+	result, err := json.Marshal(savedAttachment{
+		attachmentMetadata: attachmentMetadata{FileID: fileInfo.ID, Filename: fileInfo.Name, Mimetype: fileInfo.Mimetype, Size: int(n)},
+		Path:               path,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling saved attachment: %w", err)
+	}
+	return mcp.NewToolResultText(string(result)), nil
+}
+
+var errInlineTooLarge = errors.New("inline size limit exceeded")
+
+// cappedBuffer collects at most max bytes and fails the write beyond that.
+type cappedBuffer struct {
+	bytes.Buffer
+	max int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if b.Len()+len(p) > b.max {
+		return 0, errInlineTooLarge
+	}
+	return b.Buffer.Write(p)
+}
+
+// savedAttachment is the result for an attachment saved to the files folder.
+type savedAttachment struct {
+	attachmentMetadata
+	Path string `json:"path"`
 }
 
 // attachmentMetadata describes a downloaded attachment.
@@ -740,7 +809,7 @@ func (ch *ConversationsHandler) FilesUploadHandler(ctx context.Context, request 
 	if err != nil {
 		return nil, err
 	}
-	file, err := client.UploadFileContext(ctx, slack.UploadFileParameters{
+	upload := slack.UploadFileParameters{
 		Content:         params.content,
 		FileSize:        len([]byte(params.content)),
 		Filename:        params.filename,
@@ -748,7 +817,12 @@ func (ch *ConversationsHandler) FilesUploadHandler(ctx context.Context, request 
 		InitialComment:  params.initialComment,
 		Channel:         params.channel,
 		ThreadTimestamp: params.threadTimestamp,
-	})
+	}
+	if params.file != nil {
+		defer params.file.Close()
+		upload.Content, upload.Reader, upload.FileSize = "", params.file, params.size
+	}
+	file, err := client.UploadFileContext(ctx, upload)
 	if err != nil {
 		ch.logger.Error("Slack file upload failed", zap.String("channel", params.channel), zap.String("filename", params.filename), zap.Error(err))
 		return nil, err
@@ -776,27 +850,60 @@ func (ch *ConversationsHandler) parseParamsToolFilesUpload(ctx context.Context, 
 		return nil, err
 	}
 
+	args := request.GetArguments()
+	textContent, hasText := args["content"]
+	base64Content, hasBase64 := args["content_base64"]
+	pathArg, hasPath := args["path"]
+	sources := 0
+	for _, has := range []bool{hasText, hasBase64, hasPath} {
+		if has {
+			sources++
+		}
+	}
+	if sources != 1 {
+		return nil, errors.New("provide exactly one of content, content_base64 or path")
+	}
+
 	filename := strings.TrimSpace(request.GetString("filename", ""))
-	if filename == "" {
+	if filename == "" && !hasPath {
 		return nil, errors.New("filename is required")
 	}
 	if strings.ContainsAny(filename, `/\\`) || filename == "." || filename == ".." {
 		return nil, errors.New("filename must be a plain filename without path separators")
 	}
 
-	args := request.GetArguments()
-	textContent, hasText := args["content"]
-	base64Content, hasBase64 := args["content_base64"]
-	if hasText == hasBase64 {
-		return nil, errors.New("provide exactly one of content or content_base64")
-	}
 	var content string
-	if hasText {
+	var file *os.File
+	var size int
+	switch {
+	case hasPath:
+		path, _ := pathArg.(string)
+		if strings.TrimSpace(path) == "" {
+			return nil, errors.New("path must name a file in the files folder")
+		}
+		if ch.cfg.FilesDir == "" {
+			return nil, errors.New("the files folder is unavailable (see the server log); files cannot be uploaded from a path")
+		}
+		f, info, err := filesdir.Open(ch.cfg.FilesDir, path, maxFileSizeBytes)
+		if err != nil {
+			if errors.Is(err, filesdir.ErrTooLarge) {
+				return nil, fmt.Errorf("file exceeds the maximum allowed size of %d bytes", maxFileSizeBytes)
+			}
+			return nil, err
+		}
+		file, size = f, int(info.Size())
+		if filename == "" {
+			filename = info.Name()
+		}
+	case hasText:
 		content, _ = textContent.(string)
-	} else {
+	default:
 		encoded, ok := base64Content.(string)
 		if !ok || encoded == "" {
 			return nil, errors.New("content_base64 must be a non-empty base64 string")
+		}
+		if base64.StdEncoding.DecodedLen(len(encoded)) > maxInlineBytes+3 {
+			return nil, fmt.Errorf("inline content is limited to %d bytes; copy the file into the files folder and pass path instead", maxInlineBytes)
 		}
 		decoded, err := base64.StdEncoding.DecodeString(encoded)
 		if err != nil {
@@ -804,16 +911,24 @@ func (ch *ConversationsHandler) parseParamsToolFilesUpload(ctx context.Context, 
 		}
 		content = string(decoded)
 	}
-	if content == "" {
-		return nil, errors.New("file content must not be empty")
+	if file == nil {
+		if content == "" {
+			return nil, errors.New("file content must not be empty")
+		}
+		if len([]byte(content)) > maxInlineBytes {
+			return nil, fmt.Errorf("inline content is limited to %d bytes; copy the file into the files folder and pass path instead", maxInlineBytes)
+		}
 	}
-	if len([]byte(content)) > maxFileSizeBytes {
-		return nil, fmt.Errorf("file size exceeds the maximum allowed size of %d bytes", maxFileSizeBytes)
+	closeOnErr := func(err error) (*filesUploadParams, error) {
+		if file != nil {
+			file.Close()
+		}
+		return nil, err
 	}
 
 	threadTimestamp := request.GetString("thread_ts", "")
 	if threadTimestamp != "" && !strings.Contains(threadTimestamp, ".") {
-		return nil, errors.New("thread_ts must be a valid timestamp in format 1234567890.123456")
+		return closeOnErr(errors.New("thread_ts must be a valid timestamp in format 1234567890.123456"))
 	}
 
 	title := strings.TrimSpace(request.GetString("title", ""))
@@ -825,6 +940,8 @@ func (ch *ConversationsHandler) parseParamsToolFilesUpload(ctx context.Context, 
 		channel:         channel,
 		filename:        filename,
 		content:         content,
+		file:            file,
+		size:            size,
 		title:           title,
 		initialComment:  request.GetString("initial_comment", ""),
 		threadTimestamp: threadTimestamp,
@@ -2161,6 +2278,7 @@ func (ch *ConversationsHandler) parseParamsToolFilesGet(request mcp.CallToolRequ
 
 	return &filesGetParams{
 		fileID: fileID,
+		save:   request.GetBool("save", false),
 	}, nil
 }
 
