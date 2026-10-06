@@ -43,12 +43,8 @@ deps: ## Download dependencies
 	$(GO) mod download
 
 .PHONY: test
-test: ## Run the tests
-	$(GO) test -count=1 -v -run=".*Unit.*" ./...
-
-.PHONY: test-integration
-test-integration: ## Run integration tests
-	$(GO) test -count=1 -v -run=".*Integration.*" ./...
+test: ## Run the tests (all are local; none need Slack tokens or network)
+	$(GO) test -count=1 -race ./...
 
 AGENT_CHAT_BIN ?= $(HOME)/.bin/slack-mcp-server
 CODEX_HOMES ?= $(HOME)/.codex $(HOME)/.codex-rezilient
