@@ -1,12 +1,8 @@
 # Slack MCP Server
-[![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/korotovsky/slack-mcp-server)](https://archestra.ai/mcp-catalog/korotovsky__slack-mcp-server)
 
-Model Context Protocol (MCP) server for Slack Workspaces. The most powerful MCP Slack server — supports Stdio, SSE and HTTP transports, proxy settings, DMs, Group DMs, Smart History fetch (by date or count), works with Slack app tokens (user `xoxp` and/or bot `xoxb`).
+Model Context Protocol (MCP) server for Slack Workspaces. Supports Stdio, SSE and HTTP transports, proxy settings, DMs, Group DMs, Smart History fetch (by date or count), and works with Slack app tokens (user `xoxp` and/or bot `xoxb`). It also provides [Slack Agent Chat](docs/04-slack-agent-chat.md), which pushes messages from private Slack channels into running Codex and Claude Code sessions.
 
-> [!IMPORTANT]  
-> We need your support! Each month, over 30,000 engineers visit this repository, and more than 9,000 are already using it.
-> 
-> If you appreciate the work our [contributors](https://github.com/korotovsky/slack-mcp-server/graphs/contributors) have put into this project, please consider giving the repository a star.
+This is a fork of [korotovsky/slack-mcp-server](https://github.com/korotovsky/slack-mcp-server). It is built from source only: no npm packages, container images, DXT extensions or release binaries are published, and the upstream ones are not used. See [Installation](docs/02-installation.md).
 
 This feature-rich Slack MCP Server has:
 - **OAuth Tokens Only**: Authenticates with Slack app tokens (user `xoxp` and/or bot `xoxb`). Browser session tokens (`xoxc`/`xoxd`) are not supported.
@@ -28,6 +24,22 @@ This feature-rich Slack MCP Server has:
 ### Add Message Demo
 
 ![Add Message](images/feature-2.gif)
+
+## Installation
+
+Build from source (requires Go; see `go.mod` for the version) and register the binary with your MCP client:
+
+```bash
+git clone https://github.com/bdpdx/slack-mcp-server.git
+cd slack-mcp-server
+make build
+mkdir -p ~/.bin && ln -s "$PWD/build/slack-mcp-server" ~/.bin/
+
+claude mcp add -s user slack -- ~/.bin/slack-mcp-server --transport stdio --env-file ~/.claude/slack-mcp-server.env
+codex mcp add slack -- ~/.bin/slack-mcp-server --transport stdio --env-file ~/.codex/slack-mcp-server.env
+```
+
+Each env file holds that client's Slack tokens and settings (mode `0600`). See [Installation](docs/02-installation.md) for details and [Slack Agent Chat](docs/04-slack-agent-chat.md) for the agent-chat setup.
 
 ## Tools
 
@@ -245,6 +257,7 @@ Fetches a CSV directory of all users in the workspace.
 - [Authentication Setup](docs/01-authentication-setup.md)
 - [Installation](docs/02-installation.md)
 - [Configuration and Usage](docs/03-configuration-and-usage.md)
+- [Slack Agent Chat](docs/04-slack-agent-chat.md)
 
 ### Environment Variables (Quick Reference)
 
@@ -283,8 +296,9 @@ Fetches a CSV directory of all users in the workspace.
 ### Debugging Tools
 
 ```bash
-# Run the inspector with stdio transport
-npx @modelcontextprotocol/inspector go run mcp/mcp-server.go --transport stdio
+# Run the MCP inspector against a local build with stdio transport
+make build
+npx @modelcontextprotocol/inspector ./build/slack-mcp-server --transport stdio --env-file ~/.claude/slack-mcp-server.env
 
 # View logs
 tail -n 20 -f ~/Library/Logs/Claude/mcp*.log
@@ -293,8 +307,9 @@ tail -n 20 -f ~/Library/Logs/Claude/mcp*.log
 ## Security
 
 - Never share API tokens
-- Keep .env files secure and private
+- Keep env files private (mode `0600`; the server refuses files other users can read)
+- Report vulnerabilities privately; see [SECURITY.md](SECURITY.md)
 
 ## License
 
-Licensed under MIT - see [LICENSE](LICENSE) file. This is not an official Slack product.
+Licensed under MIT - see [LICENSE](LICENSE) file. Originally written by Dmitrii Korotovskii ([korotovsky/slack-mcp-server](https://github.com/korotovsky/slack-mcp-server)). This is not an official Slack product.
