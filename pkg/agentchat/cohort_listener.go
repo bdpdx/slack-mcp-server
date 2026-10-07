@@ -651,7 +651,7 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 			w = &approvalWait{since: now, posted: true}
 			l.approvalWaits[key] = w
 		} else if w == nil && l.state.Announced[key] {
-			w = &approvalWait{since: now}
+			w = &approvalWait{} // unstarted: the count begins at the next known waiting read
 			l.approvalWaits[key] = w
 		}
 		// owed: a BLOCKED notice may be in Slack (posted, or attempted with
@@ -689,9 +689,10 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 			// answer.
 			seen[key] = owed
 			if owed && w != nil && !w.posted {
-				// Recovery stays owed, but the observed count restarts.
+				// Recovery stays owed; the observed count is unstarted until
+				// the next known waiting read.
 				l.mu.Lock()
-				w.since = now
+				w.since = time.Time{}
 				l.mu.Unlock()
 			}
 			if !seen[key] {
@@ -714,6 +715,13 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 				w = &approvalWait{since: now}
 				l.mu.Lock()
 				l.approvalWaits[key] = w
+				l.mu.Unlock()
+			}
+			if !w.posted && w.since.IsZero() {
+				// The first known, eligible waiting read starts the count;
+				// unknown or ineligible time before it is never counted.
+				l.mu.Lock()
+				w.since = now
 				l.mu.Unlock()
 			}
 			if w.posted || now.Sub(w.since) < defaultApprovalWait {
@@ -749,11 +757,11 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 			l.mu.Unlock()
 		default:
 			// Still waiting but now ineligible: keep the owed recovery; an
-			// unposted retry's observed count restarts.
+			// unposted retry's count is unstarted until it is eligible again.
 			seen[key] = true
 			if !w.posted {
 				l.mu.Lock()
-				w.since = now
+				w.since = time.Time{}
 				l.mu.Unlock()
 			}
 		}

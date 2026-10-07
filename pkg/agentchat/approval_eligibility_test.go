@@ -217,9 +217,11 @@ func TestCohortCodexOwedWaitRestartsCountOnProbeError(t *testing.T) {
 	d.mu.Lock()
 	d.errs = nil
 	d.mu.Unlock()
+	*now = now.Add(3 * time.Minute)
+	l.CohortTick(context.Background()) // the first known waiting read starts the count
 	*now = now.Add(9 * time.Minute)
 	l.CohortTick(context.Background())
-	require.Empty(t, api.posts(), "9 minutes observed since the error: not yet")
+	require.Empty(t, api.posts(), "9 minutes observed since the first known read: not yet")
 	*now = now.Add(time.Minute)
 	l.CohortTick(context.Background())
 	require.Equal(t, []string{"C1|" + blockedNotice("codex-b", "", defaultApprovalWait)}, api.posts())
@@ -266,4 +268,25 @@ func TestCohortCodexUnconfirmedRetryCountResetsOnUnknown(t *testing.T) {
 	restarted.CohortTick(context.Background())
 	require.Empty(t, api.posts(), "recovery owed must not turn an unknown gap into continuous observed waiting")
 	require.True(t, restarted.state.Announced[cohortKey("th1", "proj")], "recovery intent stays durable while the count restarts")
+}
+
+// The count after an unknown read starts at the next known waiting read.
+func TestCohortCodexRetryStartsOnKnownWaitingAfterUnknown(t *testing.T) {
+	l, api, d, now, _ := codexObserverListener(t, "codex-b")
+	d.set("th1", true)
+	l.CohortTick(context.Background())
+	*now = now.Add(10 * time.Minute)
+	api.failPosts = true
+	l.CohortTick(context.Background())
+	api.failPosts = false
+	*now = now.Add(time.Minute)
+	d.errs = map[string]error{"th1": errors.New("unknown observation")}
+	l.CohortTick(context.Background())
+	d.errs = nil
+	*now = now.Add(11 * time.Minute)
+	l.CohortTick(context.Background())
+	require.Empty(t, api.posts(), "first known waiting observation after an unknown gap begins the count, rather than finishing it")
+	*now = now.Add(10 * time.Minute)
+	l.CohortTick(context.Background())
+	require.Len(t, api.posts(), 1, "fresh observed waiting interval eventually announces")
 }
