@@ -93,7 +93,27 @@ func (c *cli) cohort(ctx context.Context, args []string) error {
 			}
 			return tw.Flush()
 		}
-		c.printJSON(map[string]any{"ok": true, "cohort": cohortJSON(resp.Cohort)})
+		holds := map[string][]string{}
+		authority := map[string]map[string]any{}
+		for _, r := range resp.Cohort {
+			if _, seen := authority[r.Project]; seen {
+				continue
+			}
+			if p, err := LoadCohortProjectAt(ctx, r.Root, r.Project, "refs/remotes/origin/main"); err == nil {
+				authority[r.Project] = map[string]any{"gm": p.GM.GM, "term": p.GM.Term, "claim_id": p.GM.ClaimID}
+				hs := []string{}
+				for _, a := range p.Succession {
+					if p.Held(a) {
+						hs = append(hs, a)
+					}
+				}
+				holds[r.Project] = hs
+			} else {
+				authority[r.Project] = map[string]any{"error": err.Error()}
+			}
+		}
+		c.printJSON(map[string]any{"ok": true, "cohort": cohortJSON(resp.Cohort), "authority": authority,
+			"holds": holds, "pending": resp.Watches})
 		return nil
 	}
 	if *project == "" {
@@ -118,8 +138,21 @@ func (c *cli) cohort(ctx context.Context, args []string) error {
 		if dir, err = filepath.EvalSymlinks(dir); err != nil {
 			return exitError{exitCohortInvalid, err}
 		}
-		if _, err := LoadCohortProject(dir, *project); err != nil {
+		// The root must be a project-state checkout with a fetched origin/main:
+		// that is where GM authority and holds are read from.
+		if _, err := gitIn(ctx, dir, nil, nil, "rev-parse", "--verify", "-q", "refs/remotes/origin/main"); err != nil {
+			return exitError{exitCohortInvalid, fmt.Errorf("%s is not a project-state checkout with origin/main", dir)}
+		}
+		if _, err := LoadCohortProjectAt(ctx, dir, *project, "refs/remotes/origin/main"); err != nil {
 			return exitError{exitCohortInvalid, err}
+		}
+		// An agent registers as itself: --agent must be this home's bot.
+		me, err := c.identity(ctx)
+		if err != nil {
+			return exitError{exitCohortNoSession, err}
+		}
+		if me.agentName != *agent {
+			return exitError{exitCohortInvalid, fmt.Errorf("--agent %s is not this home's agent (%s)", *agent, me.agentName)}
 		}
 		channel, _, err := c.resolveChannel(ctx, *project)
 		if err != nil {
@@ -165,7 +198,16 @@ func (c *cli) cohort(ctx context.Context, args []string) error {
 		}
 		return exitError{code, errors.New(resp.Error)}
 	}
-	c.printJSON(map[string]any{"ok": true, "cohort": cohortJSON(resp.Cohort)})
+	out := map[string]any{"ok": true, "cohort": cohortJSON(resp.Cohort)}
+	if req.Op == "cohort-register" && len(resp.Cohort) == 1 {
+		r := resp.Cohort[0]
+		out["registered"], out["project"], out["agent"], out["session"] = true, r.Project, r.Agent, r.SessionID
+		out["next_checkpoint_due"] = r.nextCheckpoint()
+		if p, err := LoadCohortProjectAt(ctx, r.Root, r.Project, "refs/remotes/origin/main"); err == nil {
+			out["gm"], out["term"] = p.GM.GM, p.GM.Term
+		}
+	}
+	c.printJSON(out)
 	return nil
 }
 

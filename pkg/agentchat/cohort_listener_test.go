@@ -13,13 +13,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// cohortFixture is a listener whose sessions s2 (codex-b) and s3 (codex-r)
-// watch project channel C1 ("proj"), with claude as GM.
+// cohortFixture is two homes, one per agent as in real use: listener l
+// serves codex-b (session s2) and l3 serves codex-r (session s3). Both watch
+// project channel C1 ("proj"), whose GM is claude.
 type cohortFixture struct {
 	t    *testing.T
 	api  *fakeSlack
 	d    *fakeDeliverer
-	l    *Listener
+	l    *Listener // codex-b's home
+	l3   *Listener // codex-r's home
 	root string
 	now  time.Time
 }
@@ -27,24 +29,56 @@ type cohortFixture struct {
 func newCohortFixture(t *testing.T) *cohortFixture {
 	f := &cohortFixture{t: t, api: newFakeSlack(), d: &fakeDeliverer{}, root: t.TempDir(), now: time.Unix(1_800_000_000, 0)}
 	writeProject(t, f.root, "proj", "<!-- cohort-succession: claude, codex-b, codex-r -->\n")
-	f.l = newTestListener(t, f.api, f.d)
-	f.l.Now = func() time.Time { return f.now }
-	for _, s := range []struct{ session, agent string }{{"s2", "codex-b"}, {"s3", "codex-r"}} {
-		require.NoError(t, f.l.Subscribe(context.Background(), claudeSub(s.session), 0))
-		f.register(s.session, s.agent)
+	f.l = newTestListenerAs(t, f.api, f.d, Identity{UserID: "UCB", BotID: "BCB"})
+	f.l3 = newTestListenerAs(t, f.api, f.d, Identity{UserID: "UCR", BotID: "BCR"})
+	for _, h := range []struct {
+		l              *Listener
+		session, agent string
+	}{{f.l, "s2", "codex-b"}, {f.l3, "s3", "codex-r"}} {
+		h.l.Now = func() time.Time { return f.now }
+		require.NoError(t, h.l.Subscribe(context.Background(), claudeSub(h.session), 0))
+		resp := h.l.Control(context.Background(), ControlRequest{Op: "cohort-register", SessionID: h.session,
+			Cohort: &CohortReg{Project: "proj", Agent: h.agent, Root: f.root, Channel: "C1"}})
+		require.True(t, resp.OK, resp.Error)
 	}
 	return f
 }
 
-func (f *cohortFixture) register(session, agent string) {
-	resp := f.l.Control(context.Background(), ControlRequest{Op: "cohort-register", SessionID: session,
-		Cohort: &CohortReg{Project: "proj", Agent: agent, Root: f.root, Channel: "C1"}})
-	require.True(f.t, resp.OK, resp.Error)
-}
-
 func (f *cohortFixture) at(d time.Duration) { f.now = time.Unix(1_800_000_000, 0).Add(d) }
 
-func (f *cohortFixture) tick() { f.l.CohortTick(context.Background()) }
+func (f *cohortFixture) homes() []*Listener { return []*Listener{f.l, f.l3} }
+
+// handle delivers a Slack message to both homes, as Socket Mode would.
+func (f *cohortFixture) handle(_ context.Context, m Message) {
+	for _, l := range f.homes() {
+		l.HandleMessage(context.Background(), m)
+	}
+}
+
+func (f *cohortFixture) tick() {
+	for _, l := range f.homes() {
+		l.CohortTick(context.Background())
+	}
+}
+
+// status merges both homes' registrations.
+func (f *cohortFixture) status() []CohortReg {
+	var out []CohortReg
+	for _, l := range f.homes() {
+		out = append(out, l.Control(context.Background(), ControlRequest{Op: "cohort-status"}).Cohort...)
+	}
+	return out
+}
+
+func (f *cohortFixture) watchCount() int {
+	n := 0
+	for _, l := range f.homes() {
+		l.mu.Lock()
+		n += len(l.state.GMWatches)
+		l.mu.Unlock()
+	}
+	return n
+}
 
 func (f *cohortFixture) notices(session string) []string {
 	f.d.mu.Lock()
@@ -70,16 +104,14 @@ func TestCohortRegisterValidates(t *testing.T) {
 		resp := f.l.Control(context.Background(), req)
 		assert.False(t, resp.OK, "case %d should fail", i)
 	}
-	resp := f.l.Control(context.Background(), ControlRequest{Op: "cohort-status"})
-	require.True(t, resp.OK)
-	assert.Len(t, resp.Cohort, 2)
+	assert.Len(t, f.status(), 2)
 }
 
 // An @mention of the GM left unanswered for 15 minutes tells the first
 // successor, then 10 minutes later the next one.
 func TestCohortUnansweredMentionEscalates(t *testing.T) {
 	f := newCohortFixture(t)
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
 
 	f.at(14 * time.Minute)
 	f.tick()
@@ -101,9 +133,9 @@ func TestCohortUnansweredMentionEscalates(t *testing.T) {
 
 func TestCohortGMAnswerClearsTheWatch(t *testing.T) {
 	f := newCohortFixture(t)
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000200", User: "UCL", Text: "something unrelated"})
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000300", User: "UCL", ThreadTS: "1800000000.000100", Text: "decided: yes"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000200", User: "UCL", Text: "something unrelated"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000300", User: "UCL", ThreadTS: "1800000000.000100", Text: "decided: yes"})
 	f.at(30 * time.Minute)
 	f.tick()
 	assert.Empty(t, f.notices("s2"), "a reply in the mention's thread answers it")
@@ -111,8 +143,8 @@ func TestCohortGMAnswerClearsTheWatch(t *testing.T) {
 
 func TestCohortUnrelatedGMPostIsNotAnAnswer(t *testing.T) {
 	f := newCohortFixture(t)
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000200", User: "UCL", Text: "something unrelated"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000200", User: "UCL", Text: "something unrelated"})
 	f.at(15 * time.Minute)
 	f.tick()
 	assert.Len(t, f.notices("s2"), 1)
@@ -122,7 +154,7 @@ func TestCohortUnrelatedGMPostIsNotAnAnswer(t *testing.T) {
 // telling anyone, the listener checks the thread and the GM's ✅ in Slack.
 func TestCohortAnswerFoundInSlackBeforeNotifying(t *testing.T) {
 	f := newCohortFixture(t)
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
 	parent := msg("1800000000.000100", "UBR", "<@UCL> please decide")
 	parent.Reactions = []slack.ItemReaction{{Name: "white_check_mark", Users: []string{"UCL"}}}
 	f.api.replies["C1|1800000000.000100"] = []slack.Message{parent}
@@ -131,7 +163,7 @@ func TestCohortAnswerFoundInSlackBeforeNotifying(t *testing.T) {
 	assert.Empty(t, f.notices("s2"), "the GM's ✅ (chat ack) answers it")
 
 	f2 := newCohortFixture(t)
-	f2.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f2.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
 	parent = msg("1800000000.000100", "UBR", "<@UCL> please decide")
 	parent.Reactions = []slack.ItemReaction{{Name: "eyes", Users: []string{"UCL"}}}
 	f2.api.replies["C1|1800000000.000100"] = []slack.Message{parent}
@@ -142,7 +174,7 @@ func TestCohortAnswerFoundInSlackBeforeNotifying(t *testing.T) {
 
 func TestCohortBlockedGMIsUnavailableAtOnce(t *testing.T) {
 	f := newCohortFixture(t)
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UCL",
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UCL",
 		Text: blockedNotice("claude", "Bash", defaultApprovalWait)})
 	f.at(time.Minute)
 	f.tick()
@@ -151,9 +183,9 @@ func TestCohortBlockedGMIsUnavailableAtOnce(t *testing.T) {
 
 	// The GM posting again means it got unstuck.
 	g := newCohortFixture(t)
-	g.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UCL",
+	g.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UCL",
 		Text: blockedNotice("claude", "Bash", defaultApprovalWait)})
-	g.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000200", User: "UCL", Text: "approved; continuing"})
+	g.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000200", User: "UCL", Text: "approved; continuing"})
 	g.at(time.Minute)
 	g.tick()
 	assert.Empty(t, g.notices("s2"))
@@ -163,7 +195,7 @@ func TestCohortSkipsHeldSuccessorAndHeldGM(t *testing.T) {
 	f := newCohortFixture(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(f.root, "proj", "holds"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "holds", "codex-b"), nil, 0o644))
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
 	f.at(15 * time.Minute)
 	f.tick()
 	assert.Empty(t, f.notices("s2"), "a held agent is never asked to take over")
@@ -172,7 +204,7 @@ func TestCohortSkipsHeldSuccessorAndHeldGM(t *testing.T) {
 	g := newCohortFixture(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(g.root, "proj", "holds"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(g.root, "proj", "holds", "claude"), nil, 0o644))
-	g.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	g.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
 	g.at(15 * time.Minute)
 	g.tick()
 	assert.Empty(t, g.notices("s2"), "a GM the user paused is not an outage")
@@ -181,7 +213,7 @@ func TestCohortSkipsHeldSuccessorAndHeldGM(t *testing.T) {
 // A notice about a former GM never evicts the new one.
 func TestCohortStaleWatchDroppedOnTermChange(t *testing.T) {
 	f := newCohortFixture(t)
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
 	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "gm.json"), []byte(`{"term":1,"gm":"codex-b","claim_id":"x"}`), 0o644))
 	f.at(30 * time.Minute)
 	f.tick()
@@ -193,7 +225,7 @@ func TestCohortOffDutyAgentSkippedButStillCounted(t *testing.T) {
 	f := newCohortFixture(t)
 	resp := f.l.Control(context.Background(), ControlRequest{Op: "cohort-duty", SessionID: "s2", Text: "off", Cohort: &CohortReg{Project: "proj"}})
 	require.True(t, resp.OK, resp.Error)
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
 	f.at(15 * time.Minute)
 	f.tick()
 	assert.Empty(t, f.notices("s2"))
@@ -241,7 +273,7 @@ func TestCohortUnregisteredSessionGetsNothing(t *testing.T) {
 func TestCohortLeaveAndUnsubscribeRemoveRegistration(t *testing.T) {
 	f := newCohortFixture(t)
 	require.True(t, f.l.Control(context.Background(), ControlRequest{Op: "cohort-leave", SessionID: "s2", Cohort: &CohortReg{Project: "proj"}}).OK)
-	f.l.Unsubscribe("s3", "")
+	f.l3.Unsubscribe("s3", "")
 	f.at(3 * time.Hour)
 	f.tick()
 	assert.Empty(t, f.notices("s2"))
@@ -251,8 +283,8 @@ func TestCohortLeaveAndUnsubscribeRemoveRegistration(t *testing.T) {
 // Registrations and pending watches survive a listener restart.
 func TestCohortStateSurvivesRestart(t *testing.T) {
 	f := newCohortFixture(t)
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
-	l2, err := NewListener(f.api, f.d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", f.l.StateFile, f.l.Log)
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	l2, err := NewListener(f.api, f.d, Identity{UserID: "UCB", BotID: "BCB"}, "UBR", f.l.StateFile, f.l.Log)
 	require.NoError(t, err)
 	l2.Now = func() time.Time { return f.now }
 	f.l = l2
@@ -267,14 +299,14 @@ func TestCohortStateSurvivesRestart(t *testing.T) {
 func TestCohortMentionInsideAThreadIsAnswered(t *testing.T) {
 	f := newCohortFixture(t)
 	root := "1800000000.000050"
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", ThreadTS: root, User: "UBR", Text: "<@UCL> please decide"})
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000200", ThreadTS: root, User: "UCL", Text: "decided"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", ThreadTS: root, User: "UBR", Text: "<@UCL> please decide"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000200", ThreadTS: root, User: "UCL", Text: "decided"})
 	f.at(30 * time.Minute)
 	f.tick()
 	assert.Empty(t, f.notices("s2"), "the GM's reply in the same thread answers a mention made in that thread")
 
 	g := newCohortFixture(t)
-	g.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", ThreadTS: root, User: "UBR", Text: "<@UCL> please decide"})
+	g.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", ThreadTS: root, User: "UBR", Text: "<@UCL> please decide"})
 	g.api.replies["C1|"+root] = []slack.Message{msg(root, "UBR", "root"), msg("1800000000.000100", "UBR", "<@UCL> please decide"), msg("1800000000.000200", "UCL", "decided")}
 	g.at(15 * time.Minute)
 	g.tick()
@@ -283,7 +315,7 @@ func TestCohortMentionInsideAThreadIsAnswered(t *testing.T) {
 
 func TestCohortGMPostMentioningSenderFoundInSlack(t *testing.T) {
 	f := newCohortFixture(t)
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
 	f.api.history["C1"] = []slack.Message{msg("1800000000.000300", "UCL", "<@UBR> decided: yes")}
 	f.at(15 * time.Minute)
 	f.tick()
@@ -297,29 +329,28 @@ func TestCohortReadErrorKeepsRegistrations(t *testing.T) {
 	require.NoError(t, os.Remove(md))
 	f.at(time.Minute)
 	f.tick()
-	resp := f.l.Control(context.Background(), ControlRequest{Op: "cohort-status"})
-	assert.Len(t, resp.Cohort, 2, "a transiently unreadable project deregisters nobody")
+	assert.Len(t, f.status(), 2, "a transiently unreadable project deregisters nobody")
 	require.NoError(t, os.WriteFile(md, data, 0o644))
 
 	require.NoError(t, os.WriteFile(md, []byte("<!-- cohort-succession: claude, codex-r -->\n"), 0o644))
 	f.tick()
-	resp = f.l.Control(context.Background(), ControlRequest{Op: "cohort-status"})
-	require.Len(t, resp.Cohort, 1, "an agent removed from the roster is dropped")
-	assert.Equal(t, "codex-r", resp.Cohort[0].Agent)
+	st := f.status()
+	require.Len(t, st, 1, "an agent removed from the roster is dropped")
+	assert.Equal(t, "codex-r", st[0].Agent)
 }
 
 func TestCohortGMIdentityIsTheBotNotTheName(t *testing.T) {
 	f := newCohortFixture(t)
 	f.api.users["UHU"] = &slack.User{ID: "UHU", Name: "claude", Profile: slack.UserProfile{DisplayName: "claude"}}
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000200", User: "UHU", ThreadTS: "1800000000.000100", Text: "decided"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000200", User: "UHU", ThreadTS: "1800000000.000100", Text: "decided"})
 	f.at(15 * time.Minute)
 	f.tick()
 	assert.Len(t, f.notices("s2"), 1, "a person named like the GM does not answer for it")
 
 	g := newCohortFixture(t)
 	g.api.users["UHU"] = &slack.User{ID: "UHU", Name: "claude", Profile: slack.UserProfile{DisplayName: "claude"}}
-	g.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UHU", Text: blockedNotice("claude", "Bash", defaultApprovalWait)})
+	g.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UHU", Text: blockedNotice("claude", "Bash", defaultApprovalWait)})
 	g.at(time.Minute)
 	g.tick()
 	assert.Empty(t, g.notices("s2"), "nor can they fake a BLOCKED")
@@ -327,18 +358,15 @@ func TestCohortGMIdentityIsTheBotNotTheName(t *testing.T) {
 
 func TestCohortOldWatchesArePruned(t *testing.T) {
 	f := newCohortFixture(t)
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
 	f.at(25 * time.Hour)
 	f.tick()
-	f.l.mu.Lock()
-	n := len(f.l.state.GMWatches)
-	f.l.mu.Unlock()
-	assert.Zero(t, n)
+	assert.Zero(t, f.watchCount())
 }
 
 func TestCohortHoldChangeMidEscalationTellsEachAgentOnce(t *testing.T) {
 	f := newCohortFixture(t)
-	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
 	f.at(15 * time.Minute)
 	f.tick()
 	require.Len(t, f.notices("s2"), 1)
@@ -368,4 +396,21 @@ func TestCohortHeldAgentGetsNoCheckpoint(t *testing.T) {
 	g.at(2 * time.Hour)
 	g.tick()
 	assert.Empty(t, g.notices("s2"), "unreadable authority: fail closed")
+}
+
+// A home registers only its own agent.
+func TestCohortRegisterRefusesAnotherAgentsName(t *testing.T) {
+	f := newCohortFixture(t)
+	resp := f.l.Control(context.Background(), ControlRequest{Op: "cohort-register", SessionID: "s2",
+		Cohort: &CohortReg{Project: "proj", Agent: "codex-r", Root: f.root, Channel: "C1"}})
+	assert.False(t, resp.OK)
+	assert.Contains(t, resp.Error, "this home's agent is codex-b")
+}
+
+func TestCohortStatusReportsPendingDeadlines(t *testing.T) {
+	f := newCohortFixture(t)
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	resp := f.l.Control(context.Background(), ControlRequest{Op: "cohort-status", Cohort: &CohortReg{Project: "proj"}})
+	require.Len(t, resp.Watches, 1)
+	assert.Equal(t, "claude", resp.Watches[0].GM)
 }

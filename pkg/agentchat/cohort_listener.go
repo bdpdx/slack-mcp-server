@@ -110,6 +110,9 @@ func (l *Listener) projectView(ctx context.Context, root, project string, fresh 
 // cohortControl answers the cohort-* control ops.
 func (l *Listener) cohortControl(ctx context.Context, req ControlRequest) ControlResponse {
 	var view *CohortProject
+	if req.Op == "cohort-register" && l.Self.UserID != "" {
+		l.selfName = l.name(ctx, l.Self.UserID)
+	}
 	if req.Op == "cohort-register" && req.Cohort != nil && req.Cohort.Root != "" {
 		// Read the project as the tick will, before taking l.mu: it may run git.
 		p, err := l.projectView(ctx, req.Cohort.Root, req.Cohort.Project, true)
@@ -121,9 +124,17 @@ func (l *Listener) cohortControl(ctx context.Context, req ControlRequest) Contro
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if req.Op == "cohort-status" {
-		return ControlResponse{OK: true, Cohort: l.cohortRegs(func(r *CohortReg) bool {
-			return req.Cohort == nil || req.Cohort.Project == "" || r.Project == req.Cohort.Project
-		})}
+		want := func(project string) bool {
+			return req.Cohort == nil || req.Cohort.Project == "" || project == req.Cohort.Project
+		}
+		var watches []GMWatch
+		for _, w := range l.state.GMWatches {
+			if want(w.Project) {
+				watches = append(watches, *w)
+			}
+		}
+		sort.Slice(watches, func(i, j int) bool { return TSLess(watches[i].TS, watches[j].TS) })
+		return ControlResponse{OK: true, Watches: watches, Cohort: l.cohortRegs(func(r *CohortReg) bool { return want(r.Project) })}
 	}
 	if req.Cohort == nil || req.Cohort.Project == "" || req.SessionID == "" {
 		return ControlResponse{Error: "a session and a project are required"}
@@ -187,6 +198,9 @@ func (l *Listener) validateRegistration(session string, in *CohortReg, p *Cohort
 	}
 	if !p.InRoster(in.Agent) {
 		return nil, fmt.Errorf("%s is not in %s's succession order", in.Agent, in.Project)
+	}
+	if self := l.selfName; self != "" && self != in.Agent {
+		return nil, fmt.Errorf("this home's agent is %s, not %s", self, in.Agent)
 	}
 	return &CohortReg{Project: in.Project, Agent: in.Agent, SessionID: session, Root: in.Root, Channel: in.Channel, RegisteredAt: l.Now()}, nil
 }

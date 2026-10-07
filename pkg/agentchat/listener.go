@@ -69,6 +69,7 @@ type Listener struct {
 	queues    map[string]chan []pending // per-session delivery queues (Async)
 	approvals map[string]*approval      // approval-hook requests by approval ID
 	views     cohortViews               // project views for cohort tracking
+	selfName  string                    // this home's agent name (cohort registration)
 }
 
 // queueDepth bounds each session's pending deliveries. Overflow is dropped;

@@ -36,6 +36,7 @@ type ControlResponse struct {
 	Decision string          `json:"decision,omitempty"` // for op "approval"
 	Text     string          `json:"text,omitempty"`     // for op "approval": the reason
 	Cohort   []CohortReg     `json:"cohort,omitempty"`   // for cohort-* ops
+	Watches  []GMWatch       `json:"watches,omitempty"`  // for cohort-status: pending deadlines
 }
 
 // SessionStatus describes one subscribed session.

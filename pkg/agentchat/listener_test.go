@@ -117,7 +117,11 @@ func (d *fakeDeliverer) Alive(_ context.Context, sub *Subscription) (bool, error
 }
 
 func newTestListener(t *testing.T, api *fakeSlack, d *fakeDeliverer) *Listener {
-	l, err := NewListener(api, d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
+	return newTestListenerAs(t, api, d, Identity{UserID: "UCL", BotID: "BCL"})
+}
+
+func newTestListenerAs(t *testing.T, api *fakeSlack, d *fakeDeliverer, self Identity) *Listener {
+	l, err := NewListener(api, d, self, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
 	require.NoError(t, err)
 	l.Now = func() time.Time { return time.Unix(2000, 0) }
 	return l
