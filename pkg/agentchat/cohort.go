@@ -211,12 +211,13 @@ func (r *CohortReg) CheckpointDue(now time.Time) bool {
 	return r.CheckpointNotified.Before(latest)
 }
 
-// gitIn runs git in dir and returns its trimmed stdout. It never prompts:
-// a git that wants credentials fails instead of hanging the listener.
+// gitIn runs git in dir and returns its trimmed stdout. It never prompts
+// on the terminal; callers bound network operations with ctx. (It leaves
+// the user's ssh configuration alone.)
 func gitIn(ctx context.Context, dir string, env []string, stdin []byte, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -oBatchMode=yes"), env...)
+	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), env...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
