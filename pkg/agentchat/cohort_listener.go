@@ -640,12 +640,16 @@ func (l *Listener) claimCheck(ctx context.Context, req ControlRequest) ControlRe
 		return ControlResponse{Error: "this session is off duty"}
 	}
 	// Fresh native liveness, not the saved subscription; unknown is not alive.
-	if alive, err := l.Deliverer.Alive(ctx, sub); err != nil || !alive {
-		return ControlResponse{Error: "this session's liveness cannot be confirmed"}
+	alive, err := l.Deliverer.Alive(ctx, sub)
+	if err != nil {
+		return ControlResponse{Error: "this session's liveness cannot be confirmed: " + err.Error(), Unavailable: true}
+	}
+	if !alive {
+		return ControlResponse{Error: "this session is no longer running"}
 	}
 	p, err := l.projectView(ctx, r.Root, r.Project, true)
 	if err != nil {
-		return ControlResponse{Error: "the project is unreadable: " + err.Error()}
+		return ControlResponse{Error: "the project is unreadable: " + err.Error(), Unavailable: true}
 	}
 	switch {
 	case p.Held(r.Agent):
@@ -680,11 +684,14 @@ func (l *Listener) claimCheck(ctx context.Context, req ControlRequest) ControlRe
 		// lookup refuses rather than assumes.
 		answered, err := l.answeredInSlackErr(ctx, w)
 		if err != nil {
-			return ControlResponse{Error: "cannot confirm the deadline is still unanswered: " + err.Error()}
+			return ControlResponse{Error: "cannot confirm the deadline is still unanswered: " + err.Error(), Unavailable: true}
 		}
 		if answered {
 			l.mu.Lock()
 			delete(l.state.GMWatches, watchKey(w.Channel, w.TS))
+			if err := l.state.Save(l.StateFile); err != nil {
+				l.Log.Error("saving state failed", zap.Error(err))
+			}
 			l.mu.Unlock()
 			continue
 		}

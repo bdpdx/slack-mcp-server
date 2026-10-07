@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -174,4 +175,41 @@ func TestGMAdmissionRecheckedOnRebuild(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ClaimRefused, r.Outcome, "the rebuild re-ran admission and it no longer holds")
 	assert.Equal(t, 2, calls)
+}
+
+// A claim that lands while admission runs on a later attempt is a win, even
+// though admission now refuses.
+func TestGMAdmissionRefusalDoesNotMaskLandedClaim(t *testing.T) {
+	remote, clones := gmRepo(t, 1)
+	hook := filepath.Join(remote, "hooks", "pre-receive")
+	shaFile := filepath.Join(t.TempDir(), "sha")
+	marker := filepath.Join(t.TempDir(), "once")
+	script := "#!/bin/sh\nread old new ref\nif [ ! -e " + marker + " ]; then touch " + marker + "; echo $new > " + shaFile + "; exit 1; fi\nexit 0\n"
+	require.NoError(t, os.WriteFile(hook, []byte(script), 0o755))
+	c := newClaimer(clones[0], "codex-b")
+	calls := 0
+	c.Admit = func(context.Context) error {
+		calls++
+		if calls == 1 {
+			return nil
+		}
+		// The declined first push lands late, mid-admission.
+		sha, err := os.ReadFile(shaFile)
+		require.NoError(t, err)
+		gitT(t, clones[0], "push", "-q", "origin", string(sha[:40])+":refs/heads/main")
+		return errors.New("the expected authority moved: term 1, not 0")
+	}
+	r, err := c.Claim(context.Background(), 0, "claude", "x")
+	require.NoError(t, err)
+	assert.Equal(t, ClaimWon, r.Outcome)
+	assert.Equal(t, remoteGM(t, remote), r.State)
+}
+
+func TestGMAdmissionUnavailableIsNotLost(t *testing.T) {
+	_, clones := gmRepo(t, 1)
+	c := newClaimer(clones[0], "codex-b")
+	c.Admit = func(context.Context) error { return fmt.Errorf("%w: slack ratelimited", ErrAdmitUnavailable) }
+	r, err := c.Claim(context.Background(), 0, "claude", "x")
+	require.NoError(t, err)
+	assert.Equal(t, ClaimUnavailable, r.Outcome)
 }

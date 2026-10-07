@@ -206,6 +206,27 @@ func newClaimID() string {
 	return hex.EncodeToString(b)
 }
 
+// ErrAdmitUnavailable marks an Admit refusal for missing evidence, which a
+// claim reports as unavailable rather than lost.
+var ErrAdmitUnavailable = errors.New("admission evidence unavailable")
+
+// landed reports whether the remote now carries one of this call's minted
+// claims.
+func (a *GMAuthority) landed(ctx context.Context, minted map[string]GMState) (ClaimResult, bool) {
+	tip, err := a.fetchTip(ctx)
+	if err != nil {
+		return ClaimResult{}, false
+	}
+	p, err := a.at(ctx, tip)
+	if err != nil {
+		return ClaimResult{}, false
+	}
+	if st, ok := minted[p.GM.ClaimID]; ok && st == p.GM {
+		return ClaimResult{Outcome: ClaimWon, State: p.GM}, true
+	}
+	return ClaimResult{}, false
+}
+
 // transition runs one guarded gm.json change: valid(p) checks the state at
 // the captured tip (returning a non-empty outcome to stop) and next builds
 // the new state from it.
@@ -237,7 +258,18 @@ func (a *GMAuthority) transition(ctx context.Context, valid func(*CohortProject)
 		}
 		if a.Admit != nil {
 			if err := a.Admit(ctx); err != nil {
-				return ClaimResult{Outcome: ClaimRefused, State: p.GM, Reason: err.Error()}, nil
+				// Our claim may have landed while admission ran (and may
+				// be why it now refuses): look again before reporting.
+				if len(minted) > 0 {
+					if r, ok := a.landed(ctx, minted); ok {
+						return r, nil
+					}
+				}
+				outcome := ClaimRefused
+				if errors.Is(err, ErrAdmitUnavailable) {
+					outcome = ClaimUnavailable
+				}
+				return ClaimResult{Outcome: outcome, State: p.GM, Reason: err.Error()}, nil
 			}
 		}
 		if outcome, reason := valid(p); outcome != "" {

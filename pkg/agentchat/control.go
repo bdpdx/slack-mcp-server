@@ -39,6 +39,9 @@ type ControlResponse struct {
 	Text     string          `json:"text,omitempty"`     // for op "approval": the reason
 	Cohort   []CohortReg     `json:"cohort,omitempty"`   // for cohort-* ops
 	Watches  []GMWatch       `json:"watches,omitempty"`  // for cohort-status: pending deadlines
+	// Unavailable marks a cohort-claim-check refusal for missing evidence
+	// (an unreadable lookup), as opposed to a definite no.
+	Unavailable bool `json:"unavailable,omitempty"`
 }
 
 // SessionStatus describes one subscribed session.

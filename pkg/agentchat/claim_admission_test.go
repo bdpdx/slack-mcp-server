@@ -37,6 +37,7 @@ func TestClaimCheckFailsClosedWhenSlackIsUnreadable(t *testing.T) {
 	f.api.failReads = true
 	got := f.l.Control(context.Background(), ControlRequest{Op: "cohort-claim-check", SessionID: "s2", Cohort: &CohortReg{Project: "proj", Agent: "codex-b"}, Expect: &GMState{Term: 0, GM: "claude"}})
 	assert.False(t, got.OK, "no evidence the deadline is still unanswered: refuse")
+	assert.True(t, got.Unavailable, "for missing evidence, not a definite no")
 }
 
 func TestClaimCheckUserDirectedSkipsOnlyTheDeadline(t *testing.T) {
