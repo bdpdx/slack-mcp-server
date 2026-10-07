@@ -100,7 +100,22 @@ func TestGMClaimRaceHasExactlyOneWinner(t *testing.T) {
 		var wg sync.WaitGroup
 		results := make([]ClaimResult, 2)
 		errs := make([]error, 2)
-		for i, c := range []*GMAuthority{newClaimer(a, "codex-b"), newClaimer(b, "codex-r")} {
+		claimers := []*GMAuthority{newClaimer(a, "codex-b"), newClaimer(b, "codex-r")}
+		if !shared { // separate clones: make both build from the same tip before either pushes
+			var built sync.WaitGroup
+			built.Add(2)
+			for _, c := range claimers {
+				once := false
+				c.beforePush = func() {
+					if !once {
+						once = true
+						built.Done()
+						built.Wait()
+					}
+				}
+			}
+		}
+		for i, c := range claimers {
 			wg.Add(1)
 			go func(i int, c *GMAuthority) {
 				defer wg.Done()

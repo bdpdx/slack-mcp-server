@@ -54,6 +54,16 @@ func (c *cli) gm(ctx context.Context, args []string) error {
 	if args[0] != "status" && *agent == "" {
 		return fmt.Errorf("gm %s needs --agent", args[0])
 	}
+	if args[0] == "claim" || args[0] == "release" {
+		// This home's bot announces the outcome, so it must be the claimant.
+		me, err := c.identity(ctx)
+		if err != nil {
+			return exitError{exitGMUnavailable, err}
+		}
+		if me.agentName != *agent {
+			return exitError{exitGMLost, fmt.Errorf("--agent %s is not this home's agent (%s)", *agent, me.agentName)}
+		}
+	}
 	switch args[0] {
 	case "status":
 		st, err := a.Status(ctx)
@@ -106,10 +116,12 @@ func (c *cli) gm(ctx context.Context, args []string) error {
 func (c *cli) claimExit(ctx context.Context, r ClaimResult, project, announce string) error {
 	switch r.Outcome {
 	case ClaimWon:
-		if channel, _, err := c.resolveChannel(ctx, project); err == nil {
-			if _, _, err := c.bot.PostMessageContext(ctx, channel, slack.MsgOptionText(slackEscaper.Replace(announce), false)); err != nil {
-				fmt.Fprintf(c.stderr, "slack-agent-chat: the claim holds, but announcing it failed: %v\n", err)
-			}
+		channel, _, err := c.resolveChannel(ctx, project)
+		if err == nil {
+			_, _, err = c.bot.PostMessageContext(ctx, channel, slack.MsgOptionText(slackEscaper.Replace(announce), false))
+		}
+		if err != nil {
+			fmt.Fprintf(c.stderr, "slack-agent-chat: the claim holds, but announcing it in #%s failed: %v\n", project, err)
 		}
 		return nil
 	case ClaimUnavailable:

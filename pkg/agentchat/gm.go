@@ -40,7 +40,8 @@ type ClaimResult struct {
 
 var (
 	errUncertain = errors.New("push result uncertain")
-	errRejected  = errors.New("push rejected")
+	errRejected  = errors.New("push rejected") // main moved: not a fast-forward
+	errDeclined  = errors.New("push declined") // a hook or branch rule refused it
 )
 
 const claimAttempts = 5
@@ -145,7 +146,9 @@ func (a *GMAuthority) push(ctx context.Context, commit string) error {
 	_, err := a.git(ctx, nil, nil, "push", "-q", "origin", commit+":refs/heads/main")
 	if err != nil {
 		s := err.Error()
-		if strings.Contains(s, "rejected") || strings.Contains(s, "non-fast-forward") || strings.Contains(s, "fetch first") {
+		if strings.Contains(s, "remote rejected") || strings.Contains(s, "declined") {
+			err = fmt.Errorf("%w: %v", errDeclined, err)
+		} else if strings.Contains(s, "rejected") || strings.Contains(s, "non-fast-forward") || strings.Contains(s, "fetch first") {
 			err = errRejected
 		} else {
 			err = fmt.Errorf("%w: %v", errUncertain, err)
@@ -197,6 +200,8 @@ func (a *GMAuthority) transition(ctx context.Context, valid func(*CohortProject)
 		return ClaimResult{}, err
 	}
 	defer unlock()
+	minted := map[string]bool{} // every claim ID this call has tried to publish
+	var declined error          // the last push a hook or branch rule refused
 	for attempt := 0; attempt < claimAttempts; attempt++ {
 		tip, err := a.fetchTip(ctx)
 		if err != nil {
@@ -206,10 +211,17 @@ func (a *GMAuthority) transition(ctx context.Context, valid func(*CohortProject)
 		if err != nil {
 			return ClaimResult{Outcome: ClaimUnavailable, Reason: err.Error()}, nil
 		}
+		// A push this call gave up on may have landed after all: the
+		// remote carrying one of our claim IDs is a win, never a loss and
+		// never a reason to mint another term.
+		if minted[p.GM.ClaimID] {
+			return ClaimResult{Outcome: ClaimWon, State: p.GM}, nil
+		}
 		if outcome, reason := valid(p); outcome != "" {
 			return ClaimResult{Outcome: outcome, State: p.GM, Reason: reason}, nil
 		}
 		claimID := newClaimID()
+		minted[claimID] = true
 		st := next(p, claimID)
 		commit, err := a.commitState(ctx, tip, st, fmt.Sprintf("%s: GM term %d: %s (%s)", a.Project, st.Term, st.GM, msg))
 		if err != nil {
@@ -234,9 +246,16 @@ func (a *GMAuthority) transition(ctx context.Context, valid func(*CohortProject)
 			// The remote shows no trace of the uncertain push: it did not land.
 		case errors.Is(perr, errRejected):
 			// main moved: re-fetch and revalidate; a changed term ends it there.
+		case errors.Is(perr, errDeclined):
+			// A hook or branch rule refused it. Retry: if it landed after
+			// all, the next attempt finds our claim ID on the remote.
+			declined = perr
 		default:
 			return ClaimResult{}, perr
 		}
+	}
+	if declined != nil {
+		return ClaimResult{Outcome: ClaimUnavailable, Reason: "the remote declined the push: " + declined.Error()}, nil
 	}
 	return ClaimResult{Outcome: ClaimUnavailable, Reason: "main kept moving; gave up after retries"}, nil
 }
@@ -271,6 +290,9 @@ func (a *GMAuthority) Release(ctx context.Context, term int, claimID, to string)
 		}
 		if !p.InRoster(to) || p.Held(to) {
 			return ClaimRefused, to + " is not an eligible GM"
+		}
+		if to == a.Agent {
+			return ClaimRefused, a.Agent + " already holds GM"
 		}
 		return "", ""
 	}, func(p *CohortProject, id string) GMState {
