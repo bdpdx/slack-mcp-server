@@ -524,8 +524,20 @@ func (l *Listener) CohortTick(ctx context.Context) {
 		sends = append(sends, send{reg: r, text: checkpointNotice(r)})
 	}
 
+	l.checkApprovalWaits(ctx, regs, subs, now)
+
 	delivered := map[int]bool{}
 	for i, s := range sends {
+		// A watch retired since the snapshot (an UNBLOCKED notice this
+		// tick) no longer escalates.
+		if s.watch != "" {
+			l.mu.Lock()
+			_, live := l.state.GMWatches[s.watch]
+			l.mu.Unlock()
+			if !live {
+				continue
+			}
+		}
 		sub := subs[s.reg.SessionID]
 		if sub == nil || l.deliverCohort(ctx, sub, s.watch+"|"+s.mark+"|"+NowTS(now), s.text) != nil {
 			continue
@@ -563,6 +575,270 @@ func (l *Listener) CohortTick(ctx context.Context) {
 			l.Log.Error("saving state failed", zap.Error(err))
 		}
 	}
+}
+
+// errApprovalUnobservable means a session's runtime does not expose whether
+// it is waiting on an approval.
+var errApprovalUnobservable = errors.New("approval waits are not observable for this session")
+
+// approvalProber is implemented by deliverers that can tell whether a
+// session is stuck on an approval prompt (Codex, through thread/read).
+type approvalProber interface {
+	WaitingOnApproval(ctx context.Context, sub *Subscription) (bool, error)
+}
+
+// approvalProbeTimeout bounds one thread/read, so a stuck daemon cannot
+// stall the cohort tick.
+const approvalProbeTimeout = 10 * time.Second
+
+// warnUnobservable logs, once per session, that its Codex daemon does not
+// report approval waits, so no BLOCKED notice can be posted for it.
+func (l *Listener) warnUnobservable(session string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.unobservable == nil {
+		l.unobservable = map[string]bool{}
+	}
+	if l.unobservable[session] {
+		return
+	}
+	l.unobservable[session] = true
+	l.Log.Warn("this Codex daemon does not report approval waits; no BLOCKED notice can be posted for the session", zap.String("session", session))
+}
+
+type approvalWait struct {
+	since  time.Time
+	posted bool
+}
+
+// checkApprovalWaits posts BLOCKED for a registered session that has been
+// waiting on an approval for the approval-hook's wait (10 minutes): the
+// Codex counterpart of the Claude hook's notice. Each wait posts once; a
+// cleared flag or a failed observation resets it, so nothing is ever posted
+// on a guess. The count starts when this listener first sees the wait.
+func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, subs map[string]*Subscription, now time.Time) {
+	prober, ok := l.Deliverer.(approvalProber)
+	if !ok {
+		return
+	}
+	// One probe per session per tick, however many projects it is in; each
+	// registration keeps its own wait, so every project channel hears.
+	type probe struct {
+		waiting bool
+		err     error
+	}
+	probes := map[string]probe{}
+	seen := map[string]bool{}
+	for _, r := range regs {
+		sub := subs[r.SessionID]
+		if sub == nil || sub.Kind != KindCodex {
+			continue
+		}
+		key := cohortKey(r.SessionID, r.Project)
+		l.mu.Lock()
+		if l.approvalWaits == nil {
+			l.approvalWaits = map[string]*approvalWait{}
+		}
+		w := l.approvalWaits[key]
+		// The wait is memory-only; after a restart, durable evidence
+		// rebuilds it. Our own bot's saved BLOCKED watch proves delivery:
+		// the session is not announced again. The announcement record alone
+		// only means a notice may be in Slack: recovery stays owed, but a
+		// session still waiting starts a fresh observed count and is
+		// announced again after it (a duplicate beats a missing notice).
+		// Neither is read as proof of a continuous wait.
+		if w == nil && l.ownBlockedWatchLocked(r) {
+			w = &approvalWait{since: now, posted: true}
+			l.approvalWaits[key] = w
+		} else if w == nil && l.state.Announced[key] {
+			w = &approvalWait{} // unstarted: the count begins at the next known waiting read
+			l.approvalWaits[key] = w
+		}
+		// owed: a BLOCKED notice may be in Slack (posted, or attempted with
+		// an uncertain result), so a known clear must announce recovery.
+		owed := (w != nil && w.posted) || l.state.Announced[key]
+		l.mu.Unlock()
+		// Only an agent the cohort could act on is announced: on duty, on
+		// the roster, not held, in a readable project. Anything else drops
+		// a pending count (a notice already posted keeps its recovery).
+		p, err := l.projectView(ctx, r.Root, r.Project, false)
+		if err != nil || r.OffDuty || !p.InRoster(r.Agent) || p.Held(r.Agent) {
+			if !owed {
+				l.mu.Lock()
+				delete(l.approvalWaits, key)
+				l.mu.Unlock()
+				continue
+			}
+		} else {
+			seen[key] = true
+		}
+		pr, done := probes[r.SessionID]
+		if !done {
+			pctx, cancel := context.WithTimeout(ctx, approvalProbeTimeout)
+			pr.waiting, pr.err = prober.WaitingOnApproval(pctx, sub)
+			cancel()
+			probes[r.SessionID] = pr
+			if errors.Is(pr.err, errApprovalUnobservable) {
+				l.warnUnobservable(r.SessionID)
+			}
+		}
+		switch {
+		case pr.err != nil:
+			// Unknown: never post on a guess, and never assert recovery.
+			// A pending count restarts; a posted notice waits for a known
+			// answer.
+			seen[key] = owed
+			if owed && w != nil && !w.posted {
+				// Recovery stays owed; the observed count is unstarted until
+				// the next known waiting read.
+				l.mu.Lock()
+				w.since = time.Time{}
+				l.mu.Unlock()
+			}
+			if !seen[key] {
+				l.mu.Lock()
+				delete(l.approvalWaits, key)
+				l.mu.Unlock()
+			}
+		case !pr.waiting:
+			if owed {
+				seen[key] = !l.postUnblocked(ctx, r, key)
+				if seen[key] {
+					continue // retry the recovery notice next tick
+				}
+			}
+			l.mu.Lock()
+			delete(l.approvalWaits, key)
+			l.mu.Unlock()
+		case seen[key]:
+			if w == nil {
+				w = &approvalWait{since: now}
+				l.mu.Lock()
+				l.approvalWaits[key] = w
+				l.mu.Unlock()
+			}
+			if !w.posted && w.since.IsZero() {
+				// The first known, eligible waiting read starts the count;
+				// unknown or ineligible time before it is never counted.
+				l.mu.Lock()
+				w.since = now
+				l.mu.Unlock()
+			}
+			if w.posted || now.Sub(w.since) < defaultApprovalWait {
+				continue
+			}
+			// Our own notice already reached Slack (its event created our
+			// watch): that is delivery, so do not post a duplicate.
+			l.mu.Lock()
+			delivered := l.ownBlockedWatchLocked(r)
+			if delivered {
+				w.posted = true
+			}
+			l.mu.Unlock()
+			if delivered {
+				continue
+			}
+			// Record the announcement before making it: a crash after
+			// Slack accepts the post must still leave a recovery owed.
+			l.mu.Lock()
+			l.state.Announced[key] = true
+			err := l.state.Save(l.StateFile)
+			l.mu.Unlock()
+			if err != nil {
+				l.Log.Error("saving state failed; BLOCKED not posted", zap.Error(err))
+				continue
+			}
+			if _, _, err := l.API.PostMessageContext(ctx, r.Channel, slack.MsgOptionText(blockedNotice(r.Agent, "", defaultApprovalWait), false)); err != nil {
+				l.Log.Warn("posting a Codex BLOCKED notice failed", zap.String("session", r.SessionID), zap.Error(err))
+				continue
+			}
+			l.mu.Lock()
+			w.posted = true
+			l.mu.Unlock()
+		default:
+			// Still waiting but now ineligible: keep the owed recovery; an
+			// unposted retry's count is unstarted until it is eligible again.
+			seen[key] = true
+			if !w.posted {
+				l.mu.Lock()
+				w.since = time.Time{}
+				l.mu.Unlock()
+			}
+		}
+	}
+	// A registration that is gone takes its wait with it, so a later
+	// registration starts fresh.
+	l.mu.Lock()
+	for key := range l.approvalWaits {
+		if !seen[key] {
+			delete(l.approvalWaits, key)
+		}
+	}
+	// A durable announcement outlives its in-memory wait only while its
+	// registration does.
+	pruned := false
+	for key := range l.state.Announced {
+		if _, ok := l.state.Cohort[key]; !ok {
+			delete(l.state.Announced, key)
+			pruned = true
+		}
+	}
+	if pruned {
+		if err := l.state.Save(l.StateFile); err != nil {
+			l.Log.Error("saving state failed", zap.Error(err))
+		}
+	}
+	for session := range l.unobservable {
+		if _, ok := probes[session]; !ok {
+			delete(l.unobservable, session)
+		}
+	}
+	l.mu.Unlock()
+}
+
+// ownBlockedWatchLocked reports whether a durable BLOCKED watch in r's
+// channel comes from this listener's own bot as r's agent. l.mu is held.
+func (l *Listener) ownBlockedWatchLocked(r CohortReg) bool {
+	for _, w := range l.state.GMWatches {
+		if w.Blocked && w.Channel == r.Channel && w.GM == r.Agent && w.GMID == l.Self.UserID {
+			return true
+		}
+	}
+	return false
+}
+
+// unblockedNotice is posted when a Codex session that was announced BLOCKED
+// is known to have its approval answered. It is a later, non-BLOCKED post
+// from the agent's own bot, which every listener's trackCohort already takes
+// as the end of a BLOCKED GM watch.
+func unblockedNotice(agent string) string {
+	return "UNBLOCKED: " + slackEscaper.Replace(agent) + " is no longer waiting for approval."
+}
+
+// postUnblocked announces r's recovery and retires this listener's own
+// BLOCKED watches for it at once (the others retire theirs from the Slack
+// event). It reports whether the notice was posted.
+func (l *Listener) postUnblocked(ctx context.Context, r CohortReg, key string) bool {
+	if _, _, err := l.API.PostMessageContext(ctx, r.Channel, slack.MsgOptionText(unblockedNotice(r.Agent), false)); err != nil {
+		l.Log.Warn("posting a Codex UNBLOCKED notice failed", zap.String("session", r.SessionID), zap.Error(err))
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	changed := l.state.Announced[key]
+	delete(l.state.Announced, key)
+	for k, w := range l.state.GMWatches {
+		if w.Blocked && w.Channel == r.Channel && w.GM == r.Agent {
+			delete(l.state.GMWatches, k)
+			changed = true
+		}
+	}
+	if changed {
+		if err := l.state.Save(l.StateFile); err != nil {
+			l.Log.Error("saving state failed", zap.Error(err))
+		}
+	}
+	return true
 }
 
 // deliverCohort pushes a listener-generated notice (not a Slack message) into

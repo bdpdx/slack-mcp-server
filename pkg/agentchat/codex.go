@@ -197,3 +197,40 @@ func CodexThreadAlive(ctx context.Context, socket, threadID string) (bool, error
 	}
 	return status != "notLoaded", nil
 }
+
+// CodexWaitingOnApproval reads a thread's status with thread/read, the same
+// metadata-only call CodexThreadAlive makes; it never resumes, attaches to
+// or answers anything. waiting reports an active thread flagged
+// waitingOnApproval; known reports whether the daemon exposes the flags at
+// all (older daemons omit them, and then waiting cannot be observed).
+func CodexWaitingOnApproval(ctx context.Context, socket, threadID string) (waiting, known bool, err error) {
+	c, err := dialCodex(ctx, socket)
+	if err != nil {
+		return false, false, err
+	}
+	defer c.ws.Close()
+	var read struct {
+		Thread struct {
+			Status struct {
+				Type        string    `json:"type"`
+				ActiveFlags *[]string `json:"activeFlags"`
+			} `json:"status"`
+		} `json:"thread"`
+	}
+	if err := c.call(ctx, "thread/read", map[string]any{"threadId": threadID, "includeTurns": false}, &read); err != nil {
+		return false, false, err
+	}
+	st := read.Thread.Status
+	if st.Type != "active" {
+		return false, true, nil
+	}
+	if st.ActiveFlags == nil {
+		return false, false, nil
+	}
+	for _, f := range *st.ActiveFlags {
+		if f == "waitingOnApproval" {
+			return true, true, nil
+		}
+	}
+	return false, true, nil
+}

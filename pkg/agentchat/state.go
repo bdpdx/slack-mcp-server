@@ -42,6 +42,10 @@ type State struct {
 	// the pending GM-availability watches by channel|ts (see cohort.go).
 	Cohort    map[string]*CohortReg `json:"cohort,omitempty"`
 	GMWatches map[string]*GMWatch   `json:"gm_watches,omitempty"`
+	// Announced holds the Codex registrations (session|project) whose
+	// BLOCKED notice may be in Slack: recorded before the post, so a known
+	// clear after any restart still announces recovery.
+	Announced map[string]bool `json:"announced,omitempty"`
 }
 
 // LoadState reads path; a missing file yields empty state.
@@ -67,6 +71,9 @@ func LoadState(path string) (*State, error) {
 	}
 	if s.Cohort == nil {
 		s.Cohort = map[string]*CohortReg{}
+	}
+	if s.Announced == nil {
+		s.Announced = map[string]bool{}
 	}
 	if s.GMWatches == nil {
 		s.GMWatches = map[string]*GMWatch{}
