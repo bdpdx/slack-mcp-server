@@ -90,7 +90,7 @@ func TestCohortUnansweredMentionEscalates(t *testing.T) {
 	f.tick()
 	require.Len(t, f.notices("s2"), 1, "the first successor is told once")
 	assert.Contains(t, f.notices("s2")[0], "GM claude")
-	assert.Contains(t, f.notices("s2")[0], "chat gm claim --project proj --expect-term 0 --expect-gm claude")
+	assert.Contains(t, f.notices("s2")[0], "chat gm claim --project proj --agent codex-b --expect-term 0 --expect-gm claude")
 	assert.Empty(t, f.notices("s3"))
 
 	f.at(25 * time.Minute)
@@ -259,4 +259,97 @@ func TestCohortStateSurvivesRestart(t *testing.T) {
 	f.at(15 * time.Minute)
 	f.tick()
 	assert.Len(t, f.notices("s2"), 1)
+}
+
+// Review fixes (PR #6, Fable): mentions inside threads, read errors, GM
+// identity, pruning, and holds changing mid-escalation.
+
+func TestCohortMentionInsideAThreadIsAnswered(t *testing.T) {
+	f := newCohortFixture(t)
+	root := "1800000000.000050"
+	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", ThreadTS: root, User: "UBR", Text: "<@UCL> please decide"})
+	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000200", ThreadTS: root, User: "UCL", Text: "decided"})
+	f.at(30 * time.Minute)
+	f.tick()
+	assert.Empty(t, f.notices("s2"), "the GM's reply in the same thread answers a mention made in that thread")
+
+	g := newCohortFixture(t)
+	g.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", ThreadTS: root, User: "UBR", Text: "<@UCL> please decide"})
+	g.api.replies["C1|"+root] = []slack.Message{msg(root, "UBR", "root"), msg("1800000000.000100", "UBR", "<@UCL> please decide"), msg("1800000000.000200", "UCL", "decided")}
+	g.at(15 * time.Minute)
+	g.tick()
+	assert.Empty(t, g.notices("s2"), "found in Slack via the thread root when the live event was missed")
+}
+
+func TestCohortGMPostMentioningSenderFoundInSlack(t *testing.T) {
+	f := newCohortFixture(t)
+	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.api.history["C1"] = []slack.Message{msg("1800000000.000300", "UCL", "<@UBR> decided: yes")}
+	f.at(15 * time.Minute)
+	f.tick()
+	assert.Empty(t, f.notices("s2"))
+}
+
+func TestCohortReadErrorKeepsRegistrations(t *testing.T) {
+	f := newCohortFixture(t)
+	md := filepath.Join(f.root, "proj", "PROJECT.md")
+	data, _ := os.ReadFile(md)
+	require.NoError(t, os.Remove(md))
+	f.at(time.Minute)
+	f.tick()
+	resp := f.l.Control(context.Background(), ControlRequest{Op: "cohort-status"})
+	assert.Len(t, resp.Cohort, 2, "a transiently unreadable project deregisters nobody")
+	require.NoError(t, os.WriteFile(md, data, 0o644))
+
+	require.NoError(t, os.WriteFile(md, []byte("<!-- cohort-succession: claude, codex-r -->\n"), 0o644))
+	f.tick()
+	resp = f.l.Control(context.Background(), ControlRequest{Op: "cohort-status"})
+	require.Len(t, resp.Cohort, 1, "an agent removed from the roster is dropped")
+	assert.Equal(t, "codex-r", resp.Cohort[0].Agent)
+}
+
+func TestCohortGMIdentityIsTheBotNotTheName(t *testing.T) {
+	f := newCohortFixture(t)
+	f.api.users["UHU"] = &slack.User{ID: "UHU", Name: "claude", Profile: slack.UserProfile{DisplayName: "claude"}}
+	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000200", User: "UHU", ThreadTS: "1800000000.000100", Text: "decided"})
+	f.at(15 * time.Minute)
+	f.tick()
+	assert.Len(t, f.notices("s2"), 1, "a person named like the GM does not answer for it")
+
+	g := newCohortFixture(t)
+	g.api.users["UHU"] = &slack.User{ID: "UHU", Name: "claude", Profile: slack.UserProfile{DisplayName: "claude"}}
+	g.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UHU", Text: blockedNotice("claude", "Bash", defaultApprovalWait)})
+	g.at(time.Minute)
+	g.tick()
+	assert.Empty(t, g.notices("s2"), "nor can they fake a BLOCKED")
+}
+
+func TestCohortOldWatchesArePruned(t *testing.T) {
+	f := newCohortFixture(t)
+	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.at(25 * time.Hour)
+	f.tick()
+	f.l.mu.Lock()
+	n := len(f.l.state.GMWatches)
+	f.l.mu.Unlock()
+	assert.Zero(t, n)
+}
+
+func TestCohortHoldChangeMidEscalationTellsEachAgentOnce(t *testing.T) {
+	f := newCohortFixture(t)
+	f.l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.at(15 * time.Minute)
+	f.tick()
+	require.Len(t, f.notices("s2"), 1)
+	// codex-b goes on hold: the list shifts, and codex-r becomes step 0.
+	require.NoError(t, os.MkdirAll(filepath.Join(f.root, "proj", "holds"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "holds", "codex-b"), nil, 0o644))
+	f.at(16 * time.Minute)
+	f.tick()
+	assert.Len(t, f.notices("s3"), 1)
+	require.NoError(t, os.Remove(filepath.Join(f.root, "proj", "holds", "codex-b")))
+	f.at(17 * time.Minute)
+	f.tick()
+	assert.Len(t, f.notices("s2"), 1, "codex-b was already told; the hold lifting does not repeat it")
 }

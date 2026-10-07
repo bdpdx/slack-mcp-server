@@ -1,10 +1,13 @@
 package agentchat
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -206,4 +209,54 @@ func (r *CohortReg) CheckpointDue(now time.Time) bool {
 	}
 	latest := anchor.Add(periods * checkpointInterval)
 	return r.CheckpointNotified.Before(latest)
+}
+
+// gitIn runs git in dir and returns its trimmed stdout.
+func gitIn(ctx context.Context, dir string, env []string, stdin []byte, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git %s: %v: %s", args[0], err, strings.TrimSpace(errb.String()))
+	}
+	return strings.TrimSpace(out.String()), nil
+}
+
+// LoadCohortProjectAt reads project as of a commit in the project-state
+// repo at root: PROJECT.md's succession order, gm.json and holds/.
+func LoadCohortProjectAt(ctx context.Context, root, project, commit string) (*CohortProject, error) {
+	if !projectName.MatchString(project) {
+		return nil, fmt.Errorf("%q is not a project name", project)
+	}
+	md, err := gitIn(ctx, root, nil, nil, "show", commit+":"+project+"/PROJECT.md")
+	if err != nil {
+		return nil, err
+	}
+	order, err := ParseSuccession(md)
+	if err != nil {
+		return nil, err
+	}
+	p := &CohortProject{Name: project, Root: root, Succession: order, GM: GMState{GM: order[0]}, holds: map[string]bool{}}
+	if _, err := gitIn(ctx, root, nil, nil, "cat-file", "-e", commit+":"+project+"/gm.json"); err == nil {
+		data, err := gitIn(ctx, root, nil, nil, "show", commit+":"+project+"/gm.json")
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(data), &p.GM); err != nil {
+			return nil, fmt.Errorf("gm.json at %s: %w", commit, err)
+		}
+	}
+	if list, err := gitIn(ctx, root, nil, nil, "ls-tree", "--name-only", commit, project+"/holds/"); err == nil {
+		for _, line := range strings.Split(list, "\n") {
+			if line != "" {
+				p.holds[filepath.Base(line)] = true
+			}
+		}
+	}
+	return p, nil
 }

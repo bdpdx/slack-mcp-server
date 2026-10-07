@@ -6,10 +6,23 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/slack-go/slack"
 	"go.uber.org/zap"
+)
+
+const (
+	// cohortViewTTL bounds how stale a project view used for live messages
+	// may be; each tick reads a fresh one.
+	cohortViewTTL = time.Minute
+	// cohortFetchInterval is how often the listener fetches a project-state
+	// checkout so it sees GM claims and holds published from other machines.
+	cohortFetchInterval = 2 * time.Minute
+	// watchMaxAge drops a GM watch nobody resolved, so state cannot grow
+	// without bound.
+	watchMaxAge = 24 * time.Hour
 )
 
 // GMWatch is one pending sign that a project's GM may be unavailable: an
@@ -19,7 +32,8 @@ import (
 type GMWatch struct {
 	Project  string    `json:"project"`
 	Channel  string    `json:"channel"`
-	TS       string    `json:"ts"`
+	TS       string    `json:"ts"`               // the mention or BLOCKED message
+	Thread   string    `json:"thread"`           // its thread root (TS for a top-level message)
 	Sender   string    `json:"sender,omitempty"` // who mentioned the GM (name)
 	SenderID string    `json:"sender_id,omitempty"`
 	GM       string    `json:"gm"`
@@ -27,12 +41,66 @@ type GMWatch struct {
 	Term     int       `json:"term"`
 	Seen     time.Time `json:"seen"` // escalation counts from here
 	Blocked  bool      `json:"blocked,omitempty"`
-	// Notified records the sessions this listener has told, by
-	// session|step, so each one is told once.
+	// Notified records whom this listener has told, by session|agent (a
+	// successor is told once, whatever step it falls at) or session|final.
 	Notified map[string]bool `json:"notified,omitempty"`
 }
 
 func watchKey(channel, ts string) string { return channel + "|" + ts }
+
+// cohortViews caches project views for the live message path.
+type cohortViews struct {
+	mu      sync.Mutex
+	views   map[string]cohortView
+	fetched map[string]time.Time // root → last fetch
+}
+
+type cohortView struct {
+	p  *CohortProject
+	at time.Time
+}
+
+// projectView reads project as the listener should trust it: from the
+// project-state checkout's origin/main, fetched at most every
+// cohortFetchInterval, so claims and holds published elsewhere count before
+// anyone pulls; or from the working tree when root is not such a checkout.
+// fresh skips the cache.
+func (l *Listener) projectView(ctx context.Context, root, project string, fresh bool) (*CohortProject, error) {
+	l.views.mu.Lock()
+	if l.views.views == nil {
+		l.views.views, l.views.fetched = map[string]cohortView{}, map[string]time.Time{}
+	}
+	key := root + "|" + project
+	if v, ok := l.views.views[key]; ok && !fresh && l.Now().Sub(v.at) < cohortViewTTL {
+		l.views.mu.Unlock()
+		return v.p, nil
+	}
+	needFetch := l.Now().Sub(l.views.fetched[root]) >= cohortFetchInterval
+	l.views.mu.Unlock()
+
+	var p *CohortProject
+	var err error
+	if _, gerr := gitIn(ctx, root, nil, nil, "rev-parse", "--verify", "-q", "refs/remotes/origin/main"); gerr == nil {
+		if needFetch {
+			if _, ferr := gitIn(ctx, root, nil, nil, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main"); ferr != nil {
+				l.Log.Warn("fetching project-state failed; using the last fetch", zap.String("root", root), zap.Error(ferr))
+			}
+			l.views.mu.Lock()
+			l.views.fetched[root] = l.Now()
+			l.views.mu.Unlock()
+		}
+		p, err = LoadCohortProjectAt(ctx, root, project, "refs/remotes/origin/main")
+	} else {
+		p, err = LoadCohortProject(root, project)
+	}
+	if err != nil {
+		return nil, err
+	}
+	l.views.mu.Lock()
+	l.views.views[key] = cohortView{p, l.Now()}
+	l.views.mu.Unlock()
+	return p, nil
+}
 
 // cohortControl answers the cohort-* control ops.
 func (l *Listener) cohortControl(req ControlRequest) ControlResponse {
@@ -127,10 +195,17 @@ func (l *Listener) cohortRegs(keep func(*CohortReg) bool) []CohortReg {
 	return out
 }
 
+// isAgentNamed reports whether id is a bot user shown as name. GM identity
+// is the GM agent's bot, never a person who happens to share its name.
+func (l *Listener) isAgentNamed(ctx context.Context, id, name string) bool {
+	return id != "" && l.isAgent(ctx, id) && l.name(ctx, id) == name
+}
+
 // trackCohort updates the GM watches for a message in a registered
 // project's channel: an @mention of the GM starts a watch, and the GM's own
-// posts answer (a reply in the mention's thread, or one that @mentions the
-// sender) or report BLOCKED. Any other GM post does not answer a mention.
+// posts answer (a reply in the mention's thread after it, or a post that
+// @mentions the sender) or report BLOCKED. Any other GM post does not answer
+// a mention.
 func (l *Listener) trackCohort(ctx context.Context, m Message) {
 	l.mu.Lock()
 	var reg *CohortReg
@@ -145,41 +220,53 @@ func (l *Listener) trackCohort(ctx context.Context, m Message) {
 	if reg == nil || m.User == "" {
 		return
 	}
-	p, err := LoadCohortProject(reg.Root, reg.Project)
+	p, err := l.projectView(ctx, reg.Root, reg.Project, false)
 	if err != nil {
 		return
 	}
 	gm := p.GM.GM
-	sender := l.name(ctx, m.User)
-	var mentions []string // user IDs the message @mentions that are the GM
-	for _, sm := range idMention.FindAllStringSubmatch(m.Text, -1) {
-		if sm[1] != m.User && l.name(ctx, sm[1]) == gm {
-			mentions = append(mentions, sm[1])
+	fromGM := l.isAgentNamed(ctx, m.User, gm)
+	var mentions []string // user IDs the message @mentions that are the GM's bot
+	if !fromGM {
+		for _, sm := range idMention.FindAllStringSubmatch(m.Text, -1) {
+			if sm[1] != m.User && l.isAgentNamed(ctx, sm[1], gm) {
+				mentions = append(mentions, sm[1])
+			}
 		}
 	}
-	blocked := strings.HasPrefix(m.Text, blockedPrefix(gm))
+	sender := l.name(ctx, m.User)
+	blocked := fromGM && strings.HasPrefix(m.Text, blockedPrefix(gm))
+	thread := m.ThreadTS
+	if thread == "" {
+		thread = m.TS
+	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	changed := false
-	if sender == gm {
+	if fromGM {
 		for k, w := range l.state.GMWatches {
-			if w.Channel != m.Channel || w.GM != gm {
+			if w.Channel != m.Channel || w.GM != gm || !TSLess(w.TS, m.TS) {
 				continue
 			}
-			answered := w.Blocked && !blocked || !w.Blocked && (m.ThreadTS == w.TS || mentionsUser(m.Text, w.SenderID))
+			var answered bool
+			if w.Blocked {
+				answered = !blocked // any later GM post means it got unstuck
+			} else {
+				answered = m.ThreadTS == w.Thread || mentionsUser(m.Text, w.SenderID)
+			}
 			if answered {
 				delete(l.state.GMWatches, k)
 				changed = true
 			}
 		}
 		if blocked {
-			l.state.GMWatches[watchKey(m.Channel, m.TS)] = &GMWatch{Project: reg.Project, Channel: m.Channel, TS: m.TS,
+			l.state.GMWatches[watchKey(m.Channel, m.TS)] = &GMWatch{Project: reg.Project, Channel: m.Channel, TS: m.TS, Thread: thread,
 				GM: gm, GMID: m.User, Term: p.GM.Term, Seen: l.Now().Add(-gmAnswerDeadline), Blocked: true}
 			changed = true
 		}
 	} else if len(mentions) > 0 {
-		l.state.GMWatches[watchKey(m.Channel, m.TS)] = &GMWatch{Project: reg.Project, Channel: m.Channel, TS: m.TS,
+		l.state.GMWatches[watchKey(m.Channel, m.TS)] = &GMWatch{Project: reg.Project, Channel: m.Channel, TS: m.TS, Thread: thread,
 			Sender: sender, SenderID: m.User, GM: gm, GMID: mentions[0], Term: p.GM.Term, Seen: l.Now()}
 		changed = true
 	}
@@ -204,41 +291,51 @@ func mentionsUser(text, userID string) bool {
 	return false
 }
 
-// answeredInSlack checks Slack itself, which every home sees, for an answer
-// the live stream may have missed: the GM's reply in the mention's thread or
-// its ✅ (chat ack) on the mention; for a BLOCKED watch, any later GM post.
-// A failed lookup counts as no answer.
-func (l *Listener) answeredInSlack(ctx context.Context, w *GMWatch) bool {
-	if w.Blocked {
-		resp, err := l.API.GetConversationHistoryContext(ctx, &slack.GetConversationHistoryParameters{ChannelID: w.Channel, Oldest: w.TS, Limit: 100})
-		if err != nil {
-			return false
+func hasCheckFrom(m slack.Message, user string) bool {
+	for _, r := range m.Reactions {
+		if r.Name == "white_check_mark" || r.Name == "heavy_check_mark" {
+			for _, u := range r.Users {
+				if u == user {
+					return true
+				}
+			}
 		}
+	}
+	return false
+}
+
+// answeredInSlack checks Slack itself, which every home sees, for an answer
+// the live stream may have missed. For a mention: the GM's reply in its
+// thread after it, its ✅ (chat ack) on the mention, or a later top-level GM
+// post @mentioning the sender. For a BLOCKED watch: any later GM post. A
+// failed lookup counts as no answer.
+func (l *Listener) answeredInSlack(ctx context.Context, w *GMWatch) bool {
+	later := func(m slack.Message) bool { return m.User == w.GMID && TSLess(w.TS, m.Timestamp) }
+	resp, err := l.API.GetConversationHistoryContext(ctx, &slack.GetConversationHistoryParameters{ChannelID: w.Channel, Oldest: w.TS, Limit: 200})
+	if err == nil {
 		for _, m := range resp.Messages {
-			if m.User == w.GMID && m.Timestamp != w.TS {
+			if later(m) && (w.Blocked || mentionsUser(m.Text, w.SenderID)) {
 				return true
 			}
 		}
+	}
+	if w.Blocked {
 		return false
 	}
-	msgs, _, _, err := l.API.GetConversationRepliesContext(ctx, &slack.GetConversationRepliesParameters{ChannelID: w.Channel, Timestamp: w.TS})
+	thread := w.Thread
+	if thread == "" {
+		thread = w.TS
+	}
+	msgs, _, _, err := l.API.GetConversationRepliesContext(ctx, &slack.GetConversationRepliesParameters{ChannelID: w.Channel, Timestamp: thread})
 	if err != nil {
 		return false
 	}
-	for i, m := range msgs {
-		if i > 0 && m.User == w.GMID {
+	for _, m := range msgs {
+		if m.Timestamp == w.TS && hasCheckFrom(m, w.GMID) {
 			return true
 		}
-		if m.Timestamp == w.TS {
-			for _, r := range m.Reactions {
-				if r.Name == "white_check_mark" || r.Name == "heavy_check_mark" {
-					for _, u := range r.Users {
-						if u == w.GMID {
-							return true
-						}
-					}
-				}
-			}
+		if later(m) {
+			return true
 		}
 	}
 	return false
@@ -263,26 +360,36 @@ func (l *Listener) CohortTick(ctx context.Context) {
 		}
 	}
 	l.mu.Unlock()
-	sort.Slice(watches, func(i, j int) bool { return watches[i].TS < watches[j].TS })
+	sort.Slice(watches, func(i, j int) bool { return TSLess(watches[i].TS, watches[j].TS) })
 
-	projects := map[string]*CohortProject{}
-	load := func(root, name string) *CohortProject {
-		k := root + "|" + name
-		if p, ok := projects[k]; ok {
-			return p
-		}
-		p, err := LoadCohortProject(root, name)
-		if err != nil {
-			l.Log.Warn("cohort project unreadable", zap.String("project", name), zap.Error(err))
-			p = nil
-		}
-		projects[k] = p
-		return p
+	type loaded struct {
+		p   *CohortProject
+		err error
 	}
+	projects := map[string]loaded{}
+	load := func(root, name string) (*CohortProject, error) {
+		k := root + "|" + name
+		if v, ok := projects[k]; ok {
+			return v.p, v.err
+		}
+		p, err := l.projectView(ctx, root, name, true)
+		if err != nil {
+			l.Log.Warn("cohort project unreadable; skipping it this tick", zap.String("project", name), zap.Error(err))
+		}
+		projects[k] = loaded{p, err}
+		return p, err
+	}
+	// A registration is dropped only for a definite reason (its session is
+	// gone, or its agent left the roster), never for a read error.
 	var dropRegs []string
-	for _, r := range regs { // registrations must stay valid: live session, agent still on the roster
-		p := load(r.Root, r.Project)
-		if subs[r.SessionID] == nil || p == nil || !p.InRoster(r.Agent) {
+	live := map[string]bool{} // projects with at least one registration
+	for _, r := range regs {
+		if subs[r.SessionID] == nil {
+			dropRegs = append(dropRegs, cohortKey(r.SessionID, r.Project))
+			continue
+		}
+		live[r.Project] = true
+		if p, err := load(r.Root, r.Project); err == nil && !p.InRoster(r.Agent) {
 			dropRegs = append(dropRegs, cohortKey(r.SessionID, r.Project))
 		}
 	}
@@ -296,19 +403,23 @@ func (l *Listener) CohortTick(ctx context.Context) {
 	var dropWatches []string
 	for i := range watches {
 		w := &watches[i]
+		key := watchKey(w.Channel, w.TS)
+		if !live[w.Project] || now.Sub(w.Seen) > watchMaxAge {
+			dropWatches = append(dropWatches, key)
+			continue
+		}
 		var p *CohortProject
 		for _, r := range regs {
 			if r.Project == w.Project {
-				p = load(r.Root, r.Project)
+				p, _ = load(r.Root, r.Project)
 				break
 			}
 		}
 		if p == nil {
-			dropWatches = append(dropWatches, watchKey(w.Channel, w.TS)) // no registered agent here any more
-			continue
+			continue // unreadable this tick
 		}
 		if p.GM.Term != w.Term || p.GM.GM != w.GM {
-			dropWatches = append(dropWatches, watchKey(w.Channel, w.TS)) // a stale notice never evicts the new GM
+			dropWatches = append(dropWatches, key) // a stale notice never evicts the new GM
 			continue
 		}
 		step := EscalationStep(w.Seen, now)
@@ -319,13 +430,13 @@ func (l *Listener) CohortTick(ctx context.Context) {
 		var text, mark string
 		succ := p.Successors()
 		if step < len(succ) {
-			mark = fmt.Sprintf("step%d", step)
+			mark = "agent:" + succ[step]
 			for _, r := range regs {
 				if r.Project == w.Project && r.Agent == succ[step] && !r.OffDuty {
 					targets = append(targets, r)
 				}
 			}
-			text = successorNotice(w, p, step)
+			text = successorNotice(w, p, step, succ[step])
 		} else {
 			mark = "final"
 			for _, r := range regs {
@@ -345,15 +456,15 @@ func (l *Listener) CohortTick(ctx context.Context) {
 			continue
 		}
 		if l.answeredInSlack(ctx, w) {
-			dropWatches = append(dropWatches, watchKey(w.Channel, w.TS))
+			dropWatches = append(dropWatches, key)
 			continue
 		}
 		for _, r := range due {
-			sends = append(sends, send{r, r.SessionID + "|" + mark, text, watchKey(w.Channel, w.TS)})
+			sends = append(sends, send{r, r.SessionID + "|" + mark, text, key})
 		}
 	}
 	for _, r := range regs {
-		if !r.OffDuty && r.CheckpointDue(now) {
+		if !r.OffDuty && subs[r.SessionID] != nil && r.CheckpointDue(now) {
 			sends = append(sends, send{reg: r, text: checkpointNotice(r)})
 		}
 	}
@@ -422,11 +533,15 @@ func watchReason(w *GMWatch) string {
 	return fmt.Sprintf("%s @mentioned it at ts %s and it has not answered for %s", w.Sender, w.TS, gmAnswerDeadline)
 }
 
-func successorNotice(w *GMWatch, p *CohortProject, step int) string {
-	return fmt.Sprintf("%s #%s: GM %s is unavailable: %s. You are next in the succession order (term %d, step %d).\n"+
-		"If you can act now, claim with `slack-mcp-server chat gm claim --project %s --expect-term %d --expect-gm %s` and follow projects/README.md. "+
+func successorNotice(w *GMWatch, p *CohortProject, step int, agent string) string {
+	earlier := ""
+	if step > 0 {
+		earlier = " Earlier successors had their turn; one may not have been told if its listener was down, so check the channel for an ACTING GM post first."
+	}
+	return fmt.Sprintf("%s #%s: GM %s is unavailable: %s. You are next in the succession order (term %d, step %d).%s\n"+
+		"If you can act now, claim with `slack-mcp-server chat gm claim --project %s --agent %s --expect-term %d --expect-gm %s` and follow projects/README.md. "+
 		"If you cannot, do nothing: the next successor is told in %s.",
-		cohortMarker, p.Name, w.GM, watchReason(w), w.Term, step+1, p.Name, w.Term, w.GM, successorAckWindow)
+		cohortMarker, p.Name, w.GM, watchReason(w), w.Term, step+1, earlier, p.Name, agent, w.Term, w.GM, successorAckWindow)
 }
 
 func exhaustedNotice(w *GMWatch, p *CohortProject) string {

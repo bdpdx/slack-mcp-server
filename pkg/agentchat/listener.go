@@ -68,6 +68,7 @@ type Listener struct {
 	sessLock  map[string]*sync.Mutex    // serializes deliveries per session
 	queues    map[string]chan []pending // per-session delivery queues (Async)
 	approvals map[string]*approval      // approval-hook requests by approval ID
+	views     cohortViews               // project views for cohort tracking
 }
 
 // queueDepth bounds each session's pending deliveries. Overflow is dropped;
