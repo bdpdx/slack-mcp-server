@@ -296,7 +296,7 @@ func TestCohortStateSurvivesRestart(t *testing.T) {
 	assert.Len(t, f.notices("s2"), 1)
 }
 
-// Review fixes (PR #6, Fable): mentions inside threads, read errors, GM
+// Review fixes: mentions inside threads, read errors, GM
 // identity, pruning, and holds changing mid-escalation.
 
 func TestCohortMentionInsideAThreadIsAnswered(t *testing.T) {
@@ -453,4 +453,24 @@ func TestCohortConcurrentRegistrations(t *testing.T) {
 	}
 	wg.Wait()
 	assert.Len(t, f.status(), 2)
+}
+
+func TestCohortClaimCheck(t *testing.T) {
+	f := newCohortFixture(t)
+	check := func(l *Listener, session, agent string, term int, gm string) ControlResponse {
+		return l.Control(context.Background(), ControlRequest{Op: "cohort-claim-check", SessionID: session,
+			Cohort: &CohortReg{Project: "proj", Agent: agent}, Expect: &GMState{Term: term, GM: gm}})
+	}
+	assert.False(t, check(f.l, "s2", "codex-b", 0, "claude").OK, "no deadline yet")
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.at(15 * time.Minute)
+	assert.True(t, check(f.l, "s2", "codex-b", 0, "claude").OK, "codex-b's slot (step 1) has come")
+	assert.False(t, check(f.l3, "s3", "codex-r", 0, "claude").OK, "codex-r's slot has not")
+	assert.False(t, check(f.l, "s2", "codex-b", 3, "claude").OK, "wrong expected term")
+	assert.False(t, check(f.l, "s2", "codex-r", 0, "claude").OK, "registered as another agent")
+	f.at(25 * time.Minute)
+	assert.True(t, check(f.l3, "s3", "codex-r", 0, "claude").OK)
+	assert.True(t, check(f.l, "s2", "codex-b", 0, "claude").OK, "an earlier successor stays eligible")
+	require.True(t, f.l.Control(context.Background(), ControlRequest{Op: "cohort-duty", SessionID: "s2", Text: "off", Cohort: &CohortReg{Project: "proj"}}).OK)
+	assert.False(t, check(f.l, "s2", "codex-b", 0, "claude").OK, "off duty")
 }

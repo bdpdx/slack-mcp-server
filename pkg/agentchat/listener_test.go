@@ -24,6 +24,7 @@ type fakeSlack struct {
 	replies   map[string][]slack.Message // key channel|thread_ts
 	replyPage int                        // when > 0, replies are served this many per page
 	reactions []string                   // name|channel|ts
+	failReads bool                       // history and replies fail
 }
 
 func newFakeSlack() *fakeSlack {
@@ -57,6 +58,9 @@ func (f *fakeSlack) GetConversationInfoContext(_ context.Context, in *slack.GetC
 	return ch, nil
 }
 func (f *fakeSlack) GetConversationHistoryContext(_ context.Context, p *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+	if f.failReads {
+		return nil, errors.New("ratelimited")
+	}
 	var out []slack.Message
 	for _, m := range f.history[p.ChannelID] { // stored newest first, like Slack
 		if p.Oldest == "" || TSLess(p.Oldest, m.Timestamp) {
@@ -69,6 +73,9 @@ func (f *fakeSlack) GetConversationHistoryContext(_ context.Context, p *slack.Ge
 	return &slack.GetConversationHistoryResponse{Messages: out}, nil
 }
 func (f *fakeSlack) GetConversationRepliesContext(_ context.Context, p *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error) {
+	if f.failReads {
+		return nil, false, "", errors.New("ratelimited")
+	}
 	all := f.replies[p.ChannelID+"|"+p.Timestamp]
 	if f.replyPage <= 0 {
 		return all, false, "", nil

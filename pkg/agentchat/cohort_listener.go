@@ -351,17 +351,25 @@ func hasCheckFrom(m slack.Message, user string) bool {
 // post @mentioning the sender. For a BLOCKED watch: any later GM post. A
 // failed lookup counts as no answer.
 func (l *Listener) answeredInSlack(ctx context.Context, w *GMWatch) bool {
+	answered, _ := l.answeredInSlackErr(ctx, w)
+	return answered
+}
+
+// answeredInSlackErr is answeredInSlack that reports a failed lookup, for
+// callers that must fail closed.
+func (l *Listener) answeredInSlackErr(ctx context.Context, w *GMWatch) (bool, error) {
 	later := func(m slack.Message) bool { return m.User == w.GMID && TSLess(w.TS, m.Timestamp) }
 	resp, err := l.API.GetConversationHistoryContext(ctx, &slack.GetConversationHistoryParameters{ChannelID: w.Channel, Oldest: w.TS, Limit: 200})
-	if err == nil {
-		for _, m := range resp.Messages {
-			if later(m) && (w.Blocked || mentionsUser(m.Text, w.SenderID)) {
-				return true
-			}
+	if err != nil {
+		return false, err
+	}
+	for _, m := range resp.Messages {
+		if later(m) && (w.Blocked || mentionsUser(m.Text, w.SenderID)) {
+			return true, nil
 		}
 	}
 	if w.Blocked {
-		return false
+		return false, nil
 	}
 	thread := w.Thread
 	if thread == "" {
@@ -369,17 +377,17 @@ func (l *Listener) answeredInSlack(ctx context.Context, w *GMWatch) bool {
 	}
 	msgs, _, _, err := l.API.GetConversationRepliesContext(ctx, &slack.GetConversationRepliesParameters{ChannelID: w.Channel, Timestamp: thread})
 	if err != nil {
-		return false
+		return false, err
 	}
 	for _, m := range msgs {
 		if m.Timestamp == w.TS && hasCheckFrom(m, w.GMID) {
-			return true
+			return true, nil
 		}
 		if later(m) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // CohortTick runs the cohort deadlines: GM watches that have come due notify
@@ -599,4 +607,95 @@ func exhaustedNotice(w *GMWatch, p *CohortProject) string {
 func checkpointNotice(r CohortReg) string {
 	return fmt.Sprintf("%s #%s: 2-hour checkpoint due. Run your context self-check (silent if fine) and post your drift line with "+
 		"`slack-mcp-server chat cohort checkpoint --project %s --drift \"<line>\"`.", cohortMarker, r.Project, r.Project)
+}
+
+// claimCheck is the listener-side eligibility gate for `chat gm claim`: the
+// session is registered as that agent and on duty, the agent is not held,
+// the authority is still the expected GM and term, and a GM deadline for
+// them has come due with this agent's successor slot reached.
+func (l *Listener) claimCheck(ctx context.Context, req ControlRequest) ControlResponse {
+	if req.Cohort == nil || req.Expect == nil || req.SessionID == "" {
+		return ControlResponse{Error: "a session, project, agent and expected authority are required"}
+	}
+	l.mu.Lock()
+	reg := l.state.Cohort[cohortKey(req.SessionID, req.Cohort.Project)]
+	var r CohortReg
+	if reg != nil {
+		r = *reg
+	}
+	sub := l.state.Subscriptions[req.SessionID]
+	var watches []GMWatch
+	for _, w := range l.state.GMWatches {
+		if w.Project == req.Cohort.Project {
+			watches = append(watches, *w)
+		}
+	}
+	l.mu.Unlock()
+	switch {
+	case reg == nil || sub == nil:
+		return ControlResponse{Error: "this session is not registered in " + req.Cohort.Project}
+	case r.Agent != req.Cohort.Agent:
+		return ControlResponse{Error: fmt.Sprintf("this session is registered as %s, not %s", r.Agent, req.Cohort.Agent)}
+	case r.OffDuty:
+		return ControlResponse{Error: "this session is off duty"}
+	}
+	// Fresh native liveness, not the saved subscription; unknown is not alive.
+	alive, err := l.Deliverer.Alive(ctx, sub)
+	if err != nil {
+		return ControlResponse{Error: "this session's liveness cannot be confirmed: " + err.Error(), Unavailable: true}
+	}
+	if !alive {
+		return ControlResponse{Error: "this session is no longer running"}
+	}
+	p, err := l.projectView(ctx, r.Root, r.Project, true)
+	if err != nil {
+		return ControlResponse{Error: "the project is unreadable: " + err.Error(), Unavailable: true}
+	}
+	switch {
+	case p.Held(r.Agent):
+		return ControlResponse{Error: r.Agent + " is on hold"}
+	case p.GM.Term != req.Expect.Term || p.GM.GM != req.Expect.GM:
+		return ControlResponse{Error: fmt.Sprintf("the authority is term %d (%s), not the expected term %d (%s)", p.GM.Term, p.GM.GM, req.Expect.Term, req.Expect.GM)}
+	}
+	if req.UserDirected {
+		return ControlResponse{OK: true, Text: "user-directed: deadline check skipped"}
+	}
+	succ := p.Successors()
+	now := l.Now()
+	for i := range watches {
+		w := &watches[i]
+		if w.GM != p.GM.GM || w.Term != p.GM.Term {
+			continue
+		}
+		step := EscalationStep(w.Seen, now)
+		if step < 0 {
+			continue
+		}
+		slot := false
+		for j, a := range succ {
+			if a == r.Agent && j <= step {
+				slot = true
+			}
+		}
+		if !slot {
+			continue
+		}
+		// The deadline must still be unanswered now, on evidence: a failed
+		// lookup refuses rather than assumes.
+		answered, err := l.answeredInSlackErr(ctx, w)
+		if err != nil {
+			return ControlResponse{Error: "cannot confirm the deadline is still unanswered: " + err.Error(), Unavailable: true}
+		}
+		if answered {
+			l.mu.Lock()
+			delete(l.state.GMWatches, watchKey(w.Channel, w.TS))
+			if err := l.state.Save(l.StateFile); err != nil {
+				l.Log.Error("saving state failed", zap.Error(err))
+			}
+			l.mu.Unlock()
+			continue
+		}
+		return ControlResponse{OK: true, Text: fmt.Sprintf("deadline %s, step %d", w.TS, step+1)}
+	}
+	return ControlResponse{Error: fmt.Sprintf("no GM deadline for %s (term %d) has reached %s's slot", p.GM.GM, p.GM.Term, r.Agent)}
 }

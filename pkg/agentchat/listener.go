@@ -705,6 +705,8 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 		return ControlResponse{OK: true, Decision: decision, Text: reason}
 	case "cohort-register", "cohort-leave", "cohort-duty", "cohort-checkpoint", "cohort-status":
 		return l.cohortControl(ctx, req)
+	case "cohort-claim-check":
+		return l.claimCheck(ctx, req)
 	case "status":
 		// Names save each hook a conversations.info call per channel.
 		sessions := l.Status()

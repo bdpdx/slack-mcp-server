@@ -25,7 +25,9 @@ type ControlRequest struct {
 	TS           string        `json:"ts,omitempty"`
 	Text         string        `json:"text,omitempty"`
 	Approval     string        `json:"approval,omitempty"`
-	Cohort       *CohortReg    `json:"cohort,omitempty"` // cohort-* ops
+	Cohort       *CohortReg    `json:"cohort,omitempty"`        // cohort-* ops
+	Expect       *GMState      `json:"expect,omitempty"`        // cohort-claim-check: the GM and term the claim expects
+	UserDirected bool          `json:"user_directed,omitempty"` // cohort-claim-check: the user ordered it; skip only the deadline
 }
 
 // ControlResponse is the listener's reply.
@@ -37,6 +39,9 @@ type ControlResponse struct {
 	Text     string          `json:"text,omitempty"`     // for op "approval": the reason
 	Cohort   []CohortReg     `json:"cohort,omitempty"`   // for cohort-* ops
 	Watches  []GMWatch       `json:"watches,omitempty"`  // for cohort-status: pending deadlines
+	// Unavailable marks a cohort-claim-check refusal for missing evidence
+	// (an unreadable lookup), as opposed to a definite no.
+	Unavailable bool `json:"unavailable,omitempty"`
 }
 
 // SessionStatus describes one subscribed session.
