@@ -40,6 +40,18 @@ func TestPermissionDecisionOutput(t *testing.T) {
 	assert.JSONEq(t, `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"The user denied this in Slack: wrong branch"}}}`, string(data))
 }
 
+// The project-channel notice names the agent, the tool and the wait, and
+// never the tool's input: peers need to know an agent is stuck, not what it
+// was about to run.
+func TestBlockedNotice(t *testing.T) {
+	assert.Equal(t, "BLOCKED: claude has waited 10m0s for approval of Bash; it is now waiting at the terminal.",
+		blockedNotice("claude", "Bash", defaultApprovalWait))
+	assert.Equal(t, "BLOCKED: codex-b has waited 10m0s for approval of a tool; it is now waiting at the terminal.",
+		blockedNotice("codex-b", "", defaultApprovalWait))
+	assert.Equal(t, "BLOCKED: claude has waited 10m0s for approval of Bash &lt;x&gt;; it is now waiting at the terminal.",
+		blockedNotice("claude", "Bash <x>", defaultApprovalWait), "Slack markup is escaped")
+}
+
 func TestApprovalOutcome(t *testing.T) {
 	assert.Equal(t, "✅ Allowed.", approvalOutcome(decisionAllow, "", defaultApprovalWait))
 	assert.Equal(t, "❌ Denied: a &lt;b&gt;", approvalOutcome(decisionDeny, "a <b>", defaultApprovalWait))

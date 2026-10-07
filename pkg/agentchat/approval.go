@@ -122,6 +122,18 @@ func approvalOutcome(decision, reason string, wait time.Duration) string {
 	return fmt.Sprintf("⏱ No answer after %s; answer it in the terminal.", wait)
 }
 
+// blockedNotice is what the project channel sees when an approval request
+// goes unanswered: the agent is now stuck at the terminal, and its peers
+// need to know (a silently blocked GM otherwise stalls the whole cohort). It
+// names the tool but never its input.
+func blockedNotice(agent, tool string, wait time.Duration) string {
+	if tool == "" {
+		tool = "a tool"
+	}
+	return fmt.Sprintf("BLOCKED: %s has waited %s for approval of %s; it is now waiting at the terminal.",
+		slackEscaper.Replace(agent), wait, slackEscaper.Replace(tool))
+}
+
 // permissionDecision is the hook output answering the host's prompt.
 func permissionDecision(decision, reason string) map[string]any {
 	d := map[string]any{"behavior": decision}
@@ -184,10 +196,25 @@ func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration
 		)); err != nil {
 		fmt.Fprintf(c.stderr, "slack-agent-chat: updating approval request: %v\n", err)
 	}
+	if decision == "" && ctx.Err() == nil {
+		c.postBlocked(finish, c.hookSession(ev), me.agentName, ev.ToolName, wait)
+	}
 	if decision == decisionAllow || decision == decisionDeny {
 		c.printJSON(permissionDecision(decision, reason))
 	}
 	return 0
+}
+
+// postBlocked tells the session's project channel that the agent is stuck
+// waiting at the terminal, after the Slack wait ran out.
+func (c *cli) postBlocked(ctx context.Context, session, agent, tool string, wait time.Duration) {
+	project, name, err := c.watchedProject(ctx, session)
+	if err != nil {
+		return
+	}
+	if _, _, err := c.bot.PostMessageContext(ctx, project, slack.MsgOptionText(blockedNotice(agent, tool, wait), false)); err != nil {
+		fmt.Fprintf(c.stderr, "slack-agent-chat: posting blocked notice to #%s: %v\n", name, err)
+	}
 }
 
 // waitForApproval polls the listener for the owner's answer until one
