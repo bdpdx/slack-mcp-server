@@ -206,11 +206,12 @@ func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration
 }
 
 // postBlocked tells the session's project channel that the agent is stuck
-// waiting at the terminal, after the Slack wait ran out.
+// waiting at the terminal, after the Slack wait ran out. Only sessions
+// registered in that project's cohort do; others keep the plain behavior.
 func (c *cli) postBlocked(ctx context.Context, session, agent, tool string, wait time.Duration) {
 	project, name, err := c.watchedProject(ctx, session)
-	if err != nil {
-		return
+	if err != nil || !c.registeredIn(ctx, session, project) {
+		return // only cohort sessions announce that they are blocked
 	}
 	if _, _, err := c.bot.PostMessageContext(ctx, project, slack.MsgOptionText(blockedNotice(agent, tool, wait), false)); err != nil {
 		fmt.Fprintf(c.stderr, "slack-agent-chat: posting blocked notice to #%s: %v\n", name, err)

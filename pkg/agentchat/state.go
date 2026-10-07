@@ -38,6 +38,10 @@ type State struct {
 	JoinTS        map[string]string        `json:"join_ts"`
 	Subscriptions map[string]*Subscription `json:"subscriptions"`
 	Delivered     map[string]int64         `json:"delivered"`
+	// Cohort holds cohort registrations by session|project, and GMWatches
+	// the pending GM-availability watches by channel|ts (see cohort.go).
+	Cohort    map[string]*CohortReg `json:"cohort,omitempty"`
+	GMWatches map[string]*GMWatch   `json:"gm_watches,omitempty"`
 }
 
 // LoadState reads path; a missing file yields empty state.
@@ -60,6 +64,12 @@ func LoadState(path string) (*State, error) {
 	}
 	if s.Delivered == nil {
 		s.Delivered = map[string]int64{}
+	}
+	if s.Cohort == nil {
+		s.Cohort = map[string]*CohortReg{}
+	}
+	if s.GMWatches == nil {
+		s.GMWatches = map[string]*GMWatch{}
 	}
 	return s, nil
 }
