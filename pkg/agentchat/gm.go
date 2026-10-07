@@ -1,7 +1,6 @@
 package agentchat
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -9,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -60,18 +58,7 @@ type GMAuthority struct {
 }
 
 func (a *GMAuthority) git(ctx context.Context, env []string, stdin []byte, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = a.Root
-	cmd.Env = append(append(os.Environ(), a.Env...), env...)
-	if stdin != nil {
-		cmd.Stdin = bytes.NewReader(stdin)
-	}
-	var out, errb bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errb
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %s: %v: %s", args[0], err, strings.TrimSpace(errb.String()))
-	}
-	return strings.TrimSpace(out.String()), nil
+	return gitIn(ctx, a.Root, append(append([]string{}, a.Env...), env...), stdin, args...)
 }
 
 // lock serializes this checkout's claim operations, across processes and
@@ -105,28 +92,7 @@ func (a *GMAuthority) fetchTip(ctx context.Context) (string, error) {
 
 // at reads the project as of commit: succession order, GM state, holds.
 func (a *GMAuthority) at(ctx context.Context, commit string) (*CohortProject, error) {
-	md, err := a.git(ctx, nil, nil, "show", commit+":"+a.Project+"/PROJECT.md")
-	if err != nil {
-		return nil, err
-	}
-	order, err := ParseSuccession(md)
-	if err != nil {
-		return nil, err
-	}
-	p := &CohortProject{Name: a.Project, Root: a.Root, Succession: order, GM: GMState{GM: order[0]}, holds: map[string]bool{}}
-	if data, err := a.git(ctx, nil, nil, "show", commit+":"+a.Project+"/gm.json"); err == nil {
-		if err := json.Unmarshal([]byte(data), &p.GM); err != nil {
-			return nil, fmt.Errorf("gm.json at %s: %w", commit, err)
-		}
-	}
-	if list, err := a.git(ctx, nil, nil, "ls-tree", "--name-only", commit, a.Project+"/holds/"); err == nil {
-		for _, line := range strings.Split(list, "\n") {
-			if line != "" {
-				p.holds[filepath.Base(line)] = true
-			}
-		}
-	}
-	return p, nil
+	return LoadCohortProjectAt(ctx, a.Root, a.Project, commit)
 }
 
 // Status returns the current GM state on the remote.

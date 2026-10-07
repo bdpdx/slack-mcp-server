@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -219,4 +220,29 @@ func TestGMReleaseRequiresCurrentAuthority(t *testing.T) {
 	_, clones := gmRepo(t, 1)
 	_, err := newClaimer(clones[0], "codex-b").Release(context.Background(), 0, "", "claude")
 	assert.Error(t, err, "only the current GM, with its term and claim ID, can hand back")
+}
+
+// The listener reads authority from project-state's origin/main, so a claim
+// pushed from another machine retires stale watches before anyone pulls.
+func TestCohortListenerSeesRemoteClaimBeforePull(t *testing.T) {
+	_, clones := gmRepo(t, 2)
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	now := time.Unix(1_800_000_000, 0)
+	l.Now = func() time.Time { return now }
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s2"), 0))
+	resp := l.Control(context.Background(), ControlRequest{Op: "cohort-register", SessionID: "s2",
+		Cohort: &CohortReg{Project: "proj", Agent: "codex-b", Root: clones[0], Channel: "C1"}})
+	require.True(t, resp.OK, resp.Error)
+
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	_, err := newClaimer(clones[1], "codex-r").Claim(context.Background(), 0, "claude", "elsewhere")
+	require.NoError(t, err)
+	assert.NoFileExists(t, filepath.Join(clones[0], "proj", "gm.json"), "clone 0 has not pulled")
+
+	now = now.Add(30 * time.Minute)
+	l.CohortTick(context.Background())
+	for _, g := range d.got {
+		assert.NotContains(t, g.text, "[cohort]", "the watch on the old GM was retired by the remote claim")
+	}
 }
