@@ -76,9 +76,23 @@ func (a *GMAuthority) lock(ctx context.Context) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		f.Close()
-		return nil, err
+	// Poll a non-blocking lock so ctx can cancel the wait: a stuck holder
+	// must never recreate an unbounded stall.
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			f.Close()
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			f.Close()
+			return nil, fmt.Errorf("waiting for the claim lock: %w", ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
 }
@@ -162,7 +176,7 @@ func (a *GMAuthority) push(ctx context.Context, commit string) error {
 
 // receipt reports whether the remote now carries our claim: its gm.json has
 // our claim ID and our commit is on main.
-func (a *GMAuthority) receipt(ctx context.Context, commit, claimID string) (bool, GMState, error) {
+func (a *GMAuthority) receipt(ctx context.Context, commit string, want GMState) (bool, GMState, error) {
 	tip, err := a.fetchTip(ctx)
 	if err != nil {
 		return false, GMState{}, err
@@ -171,8 +185,8 @@ func (a *GMAuthority) receipt(ctx context.Context, commit, claimID string) (bool
 	if err != nil {
 		return false, GMState{}, err
 	}
-	if p.GM.ClaimID != claimID {
-		return false, p.GM, nil
+	if p.GM.ClaimID != want.ClaimID || p.GM.Term != want.Term || p.GM.GM != want.GM {
+		return false, p.GM, nil // the exact term, GM and claim ID, not just the ID
 	}
 	if commit != "" {
 		if _, err := a.git(ctx, nil, nil, "merge-base", "--is-ancestor", commit, tip); err != nil {
@@ -197,11 +211,11 @@ func (a *GMAuthority) transition(ctx context.Context, valid func(*CohortProject)
 	}
 	unlock, err := a.lock(ctx)
 	if err != nil {
-		return ClaimResult{}, err
+		return ClaimResult{Outcome: ClaimUnavailable, Reason: err.Error()}, nil
 	}
 	defer unlock()
-	minted := map[string]bool{} // every claim ID this call has tried to publish
-	var declined error          // the last push a hook or branch rule refused
+	minted := map[string]GMState{} // every state this call has tried to publish, by claim ID
+	var declined error             // the last push a hook or branch rule refused
 	for attempt := 0; attempt < claimAttempts; attempt++ {
 		tip, err := a.fetchTip(ctx)
 		if err != nil {
@@ -214,15 +228,15 @@ func (a *GMAuthority) transition(ctx context.Context, valid func(*CohortProject)
 		// A push this call gave up on may have landed after all: the
 		// remote carrying one of our claim IDs is a win, never a loss and
 		// never a reason to mint another term.
-		if minted[p.GM.ClaimID] {
+		if st, ok := minted[p.GM.ClaimID]; ok && st == p.GM {
 			return ClaimResult{Outcome: ClaimWon, State: p.GM}, nil
 		}
 		if outcome, reason := valid(p); outcome != "" {
 			return ClaimResult{Outcome: outcome, State: p.GM, Reason: reason}, nil
 		}
 		claimID := newClaimID()
-		minted[claimID] = true
 		st := next(p, claimID)
+		minted[claimID] = st
 		commit, err := a.commitState(ctx, tip, st, fmt.Sprintf("%s: GM term %d: %s (%s)", a.Project, st.Term, st.GM, msg))
 		if err != nil {
 			return ClaimResult{}, err
@@ -233,7 +247,7 @@ func (a *GMAuthority) transition(ctx context.Context, valid func(*CohortProject)
 		perr := a.push(ctx, commit)
 		switch {
 		case perr == nil, errors.Is(perr, errUncertain):
-			ok, cur, err := a.receipt(ctx, commit, claimID)
+			ok, cur, err := a.receipt(ctx, commit, st)
 			if err != nil {
 				return ClaimResult{Outcome: ClaimUnavailable, State: st, Reason: "push result unknown and the remote is unreadable: " + err.Error()}, nil
 			}
@@ -279,6 +293,26 @@ func (a *GMAuthority) Claim(ctx context.Context, expectTerm int, expectGM, reaso
 	}, func(p *CohortProject, id string) GMState {
 		return GMState{Term: p.GM.Term + 1, GM: a.Agent, ClaimID: id, Since: time.Now().Format(time.RFC3339), Reason: reason}
 	}, "claim: "+reason)
+}
+
+// Init publishes term 1 for a project that has no gm.json yet, so its first
+// GM (the first in the succession order) holds a claim ID to verify GM-file
+// writes with. Only that agent can, and only once.
+func (a *GMAuthority) Init(ctx context.Context) (ClaimResult, error) {
+	return a.transition(ctx, func(p *CohortProject) (ClaimOutcome, string) {
+		if p.GM.Term != 0 || p.GM.ClaimID != "" {
+			return ClaimLost, fmt.Sprintf("the project already has term %d (%s)", p.GM.Term, p.GM.GM)
+		}
+		if p.GM.GM != a.Agent {
+			return ClaimRefused, fmt.Sprintf("%s is the project's first GM, not %s", p.GM.GM, a.Agent)
+		}
+		if p.Held(a.Agent) {
+			return ClaimRefused, a.Agent + " is on hold"
+		}
+		return "", ""
+	}, func(p *CohortProject, id string) GMState {
+		return GMState{Term: 1, GM: a.Agent, ClaimID: id, Since: time.Now().Format(time.RFC3339), Reason: "first GM"}
+	}, "init")
 }
 
 // Release hands GM authority to another agent. Only the current GM, naming

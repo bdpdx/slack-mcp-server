@@ -2,9 +2,11 @@ package agentchat
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -84,4 +86,61 @@ func TestGMReleaseToSelfIsRefused(t *testing.T) {
 	r, err := newClaimer(clones[0], "codex-b").Release(context.Background(), won.State.Term, won.State.ClaimID, "codex-b")
 	assert.Error(t, err)
 	assert.Equal(t, ClaimRefused, r.Outcome)
+}
+
+func TestGMInitGivesTheFirstGMATerm(t *testing.T) {
+	remote, clones := gmRepo(t, 1)
+	r, err := newClaimer(clones[0], "codex-b").Init(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, ClaimRefused, r.Outcome, "only the first in the succession order")
+	r, err = newClaimer(clones[0], "claude").Init(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, ClaimWon, r.Outcome)
+	assert.Equal(t, GMState{Term: 1, GM: "claude", ClaimID: r.State.ClaimID, Since: r.State.Since, Reason: "first GM"}, remoteGM(t, remote))
+	ok, _, err := newClaimer(clones[0], "claude").Verify(context.Background(), 1, r.State.ClaimID)
+	require.NoError(t, err)
+	assert.True(t, ok, "the first GM can now fence its GM-file writes")
+	r, err = newClaimer(clones[0], "claude").Init(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, ClaimLost, r.Outcome, "only once")
+}
+
+func TestGMLockWaitHonorsCancellation(t *testing.T) {
+	_, clones := gmRepo(t, 1)
+	held := newClaimer(clones[0], "codex-b")
+	unlock, err := held.lock(context.Background())
+	require.NoError(t, err)
+	defer unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	r, err := newClaimer(clones[0], "codex-r").Claim(ctx, 0, "claude", "x")
+	require.NoError(t, err)
+	assert.Equal(t, ClaimUnavailable, r.Outcome)
+	assert.Less(t, time.Since(start), 5*time.Second, "a held lock cannot stall a claim past its deadline")
+}
+
+// The receipt needs the exact proposed term, GM and claim ID.
+func TestGMReceiptRequiresExactState(t *testing.T) {
+	remote, clones := gmRepo(t, 2)
+	c := newClaimer(clones[0], "codex-b")
+	c.pushErr = func(err error) error {
+		if err != nil {
+			return err
+		}
+		// Someone rewrites gm.json on top, keeping our claim ID but changing the GM.
+		other := clones[1]
+		gitT(t, other, "pull", "-q", "origin", "main")
+		var g GMState
+		require.NoError(t, json.Unmarshal([]byte(gitT(t, remote, "show", "main:proj/gm.json")), &g))
+		g.GM = "codex-r"
+		data, _ := json.Marshal(g)
+		require.NoError(t, os.WriteFile(filepath.Join(other, "proj", "gm.json"), data, 0o644))
+		gitT(t, other, "commit", "-qam", "tamper")
+		gitT(t, other, "push", "-q", "origin", "HEAD:main")
+		return nil
+	}
+	r, err := c.Claim(context.Background(), 0, "claude", "x")
+	require.NoError(t, err)
+	assert.NotEqual(t, ClaimWon, r.Outcome)
 }

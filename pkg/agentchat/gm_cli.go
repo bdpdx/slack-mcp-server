@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/slack-go/slack"
 )
@@ -32,6 +33,7 @@ func (c *cli) gm(ctx context.Context, args []string) error {
 	claimID := fs.String("claim-id", "", "verify, release: this agent's claim ID")
 	to := fs.String("to", "", "release: the agent to hand GM to")
 	reason := fs.String("reason", "GM unavailable", "claim: why")
+	userDirected := fs.Bool("user-directed", false, "claim: the user told this agent to take over (skips the deadline check; say so in --reason)")
 	if _, err := parseArgs(fs, args[1:]); err != nil {
 		return err
 	}
@@ -54,8 +56,13 @@ func (c *cli) gm(ctx context.Context, args []string) error {
 	if args[0] != "status" && *agent == "" {
 		return fmt.Errorf("gm %s needs --agent", args[0])
 	}
-	if args[0] == "claim" || args[0] == "release" {
-		// This home's bot announces the outcome, so it must be the claimant.
+	// Every gm operation is bounded: a stuck lock or network must never
+	// become an unbounded stall.
+	ctx, cancel := context.WithTimeout(ctx, gmCommandTimeout)
+	defer cancel()
+	if args[0] != "status" {
+		// This home's bot announces the outcome and fences its own writes, so
+		// it must be the agent named.
 		me, err := c.identity(ctx)
 		if err != nil {
 			return exitError{exitGMUnavailable, err}
@@ -85,9 +92,23 @@ func (c *cli) gm(ctx context.Context, args []string) error {
 			return exitError{exitGMLost, fmt.Errorf("%s no longer holds term %d; stop GM work", *agent, *term)}
 		}
 		return nil
+	case "init":
+		r, err := a.Init(ctx)
+		if err != nil {
+			return exitError{exitGMUnavailable, err}
+		}
+		c.printJSON(r)
+		return c.claimExit(ctx, r, *project, fmt.Sprintf("GM term 1 (claim %s): %s is the first GM", r.State.ClaimID, *agent))
 	case "claim":
 		if *expectTerm < 0 || *expectGM == "" {
 			return errors.New("gm claim needs --expect-term and --expect-gm from the notice")
+		}
+		if !*userDirected {
+			if err := c.claimEligible(ctx, *project, *agent, *expectTerm, *expectGM); err != nil {
+				return exitError{exitGMLost, err}
+			}
+		} else if *reason == "GM unavailable" {
+			return errors.New("a --user-directed claim needs --reason naming the user's instruction")
 		}
 		r, err := a.Claim(ctx, *expectTerm, *expectGM, *reason)
 		if err != nil {
@@ -109,6 +130,28 @@ func (c *cli) gm(ctx context.Context, args []string) error {
 			r.State.Term, r.State.ClaimID, *agent, *to))
 	}
 	return fmt.Errorf("unknown gm command %q", args[0])
+}
+
+// gmCommandTimeout bounds each chat gm command.
+const gmCommandTimeout = 2 * time.Minute
+
+// claimEligible asks this home's listener whether this session may claim:
+// registered as agent, on duty, not held, and a matching GM deadline due
+// with its successor slot reached.
+func (c *cli) claimEligible(ctx context.Context, project, agent string, term int, gm string) error {
+	sub, err := detectSession(os.Getenv)
+	if err != nil {
+		return err
+	}
+	resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "cohort-claim-check", SessionID: sub.SessionID,
+		Cohort: &CohortReg{Project: project, Agent: agent}, Expect: &GMState{Term: term, GM: gm}})
+	if err != nil {
+		return errors.New("no slack-agent-chat listener is running")
+	}
+	if !resp.OK {
+		return fmt.Errorf("not eligible to claim: %s", resp.Error)
+	}
+	return nil
 }
 
 // claimExit maps an outcome to the exit status, announcing a win in the

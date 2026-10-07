@@ -600,3 +600,62 @@ func checkpointNotice(r CohortReg) string {
 	return fmt.Sprintf("%s #%s: 2-hour checkpoint due. Run your context self-check (silent if fine) and post your drift line with "+
 		"`slack-mcp-server chat cohort checkpoint --project %s --drift \"<line>\"`.", cohortMarker, r.Project, r.Project)
 }
+
+// claimCheck is the listener-side eligibility gate for `chat gm claim`: the
+// session is registered as that agent and on duty, the agent is not held,
+// the authority is still the expected GM and term, and a GM deadline for
+// them has come due with this agent's successor slot reached.
+func (l *Listener) claimCheck(ctx context.Context, req ControlRequest) ControlResponse {
+	if req.Cohort == nil || req.Expect == nil || req.SessionID == "" {
+		return ControlResponse{Error: "a session, project, agent and expected authority are required"}
+	}
+	l.mu.Lock()
+	reg := l.state.Cohort[cohortKey(req.SessionID, req.Cohort.Project)]
+	var r CohortReg
+	if reg != nil {
+		r = *reg
+	}
+	sub := l.state.Subscriptions[req.SessionID]
+	var watches []GMWatch
+	for _, w := range l.state.GMWatches {
+		if w.Project == req.Cohort.Project {
+			watches = append(watches, *w)
+		}
+	}
+	l.mu.Unlock()
+	switch {
+	case reg == nil || sub == nil:
+		return ControlResponse{Error: "this session is not registered in " + req.Cohort.Project}
+	case r.Agent != req.Cohort.Agent:
+		return ControlResponse{Error: fmt.Sprintf("this session is registered as %s, not %s", r.Agent, req.Cohort.Agent)}
+	case r.OffDuty:
+		return ControlResponse{Error: "this session is off duty"}
+	}
+	p, err := l.projectView(ctx, r.Root, r.Project, true)
+	if err != nil {
+		return ControlResponse{Error: "the project is unreadable: " + err.Error()}
+	}
+	switch {
+	case p.Held(r.Agent):
+		return ControlResponse{Error: r.Agent + " is on hold"}
+	case p.GM.Term != req.Expect.Term || p.GM.GM != req.Expect.GM:
+		return ControlResponse{Error: fmt.Sprintf("the authority is term %d (%s), not the expected term %d (%s)", p.GM.Term, p.GM.GM, req.Expect.Term, req.Expect.GM)}
+	}
+	succ := p.Successors()
+	now := l.Now()
+	for _, w := range watches {
+		if w.GM != p.GM.GM || w.Term != p.GM.Term {
+			continue
+		}
+		step := EscalationStep(w.Seen, now)
+		if step < 0 {
+			continue
+		}
+		for i, a := range succ {
+			if a == r.Agent && i <= step {
+				return ControlResponse{OK: true, Text: fmt.Sprintf("deadline %s, step %d", w.TS, step+1)}
+			}
+		}
+	}
+	return ControlResponse{Error: fmt.Sprintf("no GM deadline for %s (term %d) has reached %s's slot", p.GM.GM, p.GM.Term, r.Agent)}
+}

@@ -145,11 +145,14 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
                     record a checkpoint and post the drift line
   cohort status [--project P] [--format json|table]
                     list this home's cohort registrations
-  gm status|claim|verify|release --project P [--agent NAME]
+  gm status|init|claim|verify|release --project P [--agent NAME]
                     the project's GM authority (gm.json on project-state's
-                    origin/main). claim --expect-term T --expect-gm G takes
-                    over by compare-and-swap (exit 4 lost or refused, 5
-                    authority unavailable); verify --term T --claim-id ID
+                    origin/main). init gives a new project's first GM term
+                    1. claim --expect-term T --expect-gm G takes over by
+                    compare-and-swap, only when this home's listener has a
+                    due deadline reaching this agent's slot (or with
+                    --user-directed --reason R); exit 4 lost or refused, 5
+                    authority unavailable. verify --term T --claim-id ID
                     before each GM-file write (exit 4: stop); release --term
                     T --claim-id ID --to AGENT hands GM back
   capabilities      print this build's cohort capabilities as JSON

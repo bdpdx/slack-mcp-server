@@ -26,6 +26,7 @@ type ControlRequest struct {
 	Text         string        `json:"text,omitempty"`
 	Approval     string        `json:"approval,omitempty"`
 	Cohort       *CohortReg    `json:"cohort,omitempty"` // cohort-* ops
+	Expect       *GMState      `json:"expect,omitempty"` // cohort-claim-check: the GM and term the claim expects
 }
 
 // ControlResponse is the listener's reply.
