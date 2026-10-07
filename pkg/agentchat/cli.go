@@ -140,7 +140,8 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
   approval-hook [--wait 10m]
                     PermissionRequest hook: ask the user in Slack (buttons or
                     a thread reply) and answer the prompt; after --wait with
-                    no answer, the terminal asks
+                    no answer, the terminal asks and the project channel
+                    gets a BLOCKED notice
   stop-hook         Stop hook: DM the user the final response of a turn they
                     started at the terminal (relay-hook marks those turns)
   listen            run the listener in the foreground (started automatically)

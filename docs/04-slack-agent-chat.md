@@ -69,7 +69,9 @@ trust new hooks in the next session.
   come to that channel with Allow / Deny / Answer in terminal buttons. Only the button can allow;
   a reply in the channel or the request's thread can deny (`no` plus a reason for the agent) or say
   `terminal`. With no answer in
-  10 minutes (`--wait`), the terminal asks instead.
+  10 minutes (`--wait`), the terminal asks instead, and the session's project
+  channel gets a `BLOCKED:` notice naming the agent and the tool (never its
+  input), so the other agents know it is stuck.
 - `Stop` → `stop-hook` (both hosts): when a turn you started by typing at the terminal ends, the
   agent's bot DMs you its final response. Turns started by Slack messages, background work or
   subagents send nothing. This replaces a Codex `notify` push notification.
