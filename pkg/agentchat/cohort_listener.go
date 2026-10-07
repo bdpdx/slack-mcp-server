@@ -645,7 +645,7 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 		// posted notice, so a known clear still announces recovery. It is
 		// never read as proof of a continuous wait (no new count starts
 		// from it, and a still-waiting session is not announced again).
-		if w == nil && l.ownBlockedWatchLocked(r) {
+		if w == nil && (l.state.Announced[key] || l.ownBlockedWatchLocked(r)) {
 			w = &approvalWait{since: now, posted: true}
 			l.approvalWaits[key] = w
 		}
@@ -687,7 +687,7 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 			}
 		case !pr.waiting:
 			if w != nil && w.posted {
-				seen[key] = !l.postUnblocked(ctx, r)
+				seen[key] = !l.postUnblocked(ctx, r, key)
 				if seen[key] {
 					continue // retry the recovery notice next tick
 				}
@@ -703,6 +703,16 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 				l.mu.Unlock()
 			}
 			if w.posted || now.Sub(w.since) < defaultApprovalWait {
+				continue
+			}
+			// Record the announcement before making it: a crash after
+			// Slack accepts the post must still leave a recovery owed.
+			l.mu.Lock()
+			l.state.Announced[key] = true
+			err := l.state.Save(l.StateFile)
+			l.mu.Unlock()
+			if err != nil {
+				l.Log.Error("saving state failed; BLOCKED not posted", zap.Error(err))
 				continue
 			}
 			if _, _, err := l.API.PostMessageContext(ctx, r.Channel, slack.MsgOptionText(blockedNotice(r.Agent, "", defaultApprovalWait), false)); err != nil {
@@ -724,6 +734,20 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 	for key := range l.approvalWaits {
 		if !seen[key] {
 			delete(l.approvalWaits, key)
+		}
+	}
+	// A durable announcement outlives its in-memory wait only while its
+	// registration does.
+	pruned := false
+	for key := range l.state.Announced {
+		if _, ok := l.state.Cohort[key]; !ok {
+			delete(l.state.Announced, key)
+			pruned = true
+		}
+	}
+	if pruned {
+		if err := l.state.Save(l.StateFile); err != nil {
+			l.Log.Error("saving state failed", zap.Error(err))
 		}
 	}
 	for session := range l.unobservable {
@@ -756,14 +780,15 @@ func unblockedNotice(agent string) string {
 // postUnblocked announces r's recovery and retires this listener's own
 // BLOCKED watches for it at once (the others retire theirs from the Slack
 // event). It reports whether the notice was posted.
-func (l *Listener) postUnblocked(ctx context.Context, r CohortReg) bool {
+func (l *Listener) postUnblocked(ctx context.Context, r CohortReg, key string) bool {
 	if _, _, err := l.API.PostMessageContext(ctx, r.Channel, slack.MsgOptionText(unblockedNotice(r.Agent), false)); err != nil {
 		l.Log.Warn("posting a Codex UNBLOCKED notice failed", zap.String("session", r.SessionID), zap.Error(err))
 		return false
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	changed := false
+	changed := l.state.Announced[key]
+	delete(l.state.Announced, key)
 	for k, w := range l.state.GMWatches {
 		if w.Blocked && w.Channel == r.Channel && w.GM == r.Agent {
 			delete(l.state.GMWatches, k)

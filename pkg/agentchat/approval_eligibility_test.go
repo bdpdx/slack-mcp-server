@@ -138,3 +138,23 @@ func TestCohortCodexRecoverySurvivesRestart(t *testing.T) {
 	require.Len(t, api.posts(), 2)
 	require.Equal(t, "C1|"+unblockedNotice("codex-b"), api.posts()[1])
 }
+
+// A crash after Slack accepts BLOCKED, before this listener sees its own
+// event, still leaves the recovery owed.
+func TestCohortCodexRecoveryOwedBeforeOwnSlackEvent(t *testing.T) {
+	l, api, d, now, _ := codexObserverListener(t, "codex-b")
+	d.set("th1", true)
+	l.CohortTick(context.Background())
+	*now = now.Add(10 * time.Minute)
+	l.CohortTick(context.Background())
+	require.Len(t, api.posts(), 1, "Slack accepted BLOCKED; peers can now observe it")
+	// Crash after PostMessage returned but before this listener receives its own event.
+	restarted, err := NewListener(api, d, Identity{UserID: "UCB", BotID: "BCB"}, "UBR", l.StateFile, l.Log)
+	require.NoError(t, err)
+	restarted.Now = func() time.Time { return *now }
+	d.set("th1", false)
+	*now = now.Add(time.Minute)
+	restarted.CohortTick(context.Background())
+	require.Len(t, api.posts(), 2, "accepted BLOCKED needs recovery even before own event was saved")
+	require.Equal(t, "C1|"+unblockedNotice("codex-b"), api.posts()[1])
+}
