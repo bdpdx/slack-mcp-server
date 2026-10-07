@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -211,20 +212,32 @@ func newClaimID() string {
 var ErrAdmitUnavailable = errors.New("admission evidence unavailable")
 
 // landed reports whether the remote now carries one of this call's minted
-// claims.
-func (a *GMAuthority) landed(ctx context.Context, minted map[string]GMState) (ClaimResult, bool) {
+// claimants, so a caller can reconcile later. An unreadable remote is an
+// error: it cannot prove the claim did not land.
+func (a *GMAuthority) landed(ctx context.Context, minted map[string]GMState) (ClaimResult, bool, error) {
 	tip, err := a.fetchTip(ctx)
 	if err != nil {
-		return ClaimResult{}, false
+		return ClaimResult{}, false, err
 	}
 	p, err := a.at(ctx, tip)
 	if err != nil {
-		return ClaimResult{}, false
+		return ClaimResult{}, false, err
 	}
 	if st, ok := minted[p.GM.ClaimID]; ok && st == p.GM {
-		return ClaimResult{Outcome: ClaimWon, State: p.GM}, true
+		return ClaimResult{Outcome: ClaimWon, State: p.GM}, true, nil
 	}
-	return ClaimResult{}, false
+	return ClaimResult{}, false, nil
+}
+
+// mintedIDs lists this call's claim IDs, for a reason that leaves the outcome
+// open.
+func mintedIDs(minted map[string]GMState) string {
+	ids := make([]string, 0, len(minted))
+	for id := range minted {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, ", ")
 }
 
 // transition runs one guarded gm.json change: valid(p) checks the state at
@@ -240,6 +253,7 @@ func (a *GMAuthority) transition(ctx context.Context, valid func(*CohortProject)
 	}
 	defer unlock()
 	minted := map[string]GMState{} // every state this call has tried to publish, by claim ID
+	var last GMState               // the latest of them
 	var declined error             // the last push a hook or branch rule refused
 	for attempt := 0; attempt < claimAttempts; attempt++ {
 		tip, err := a.fetchTip(ctx)
@@ -261,7 +275,12 @@ func (a *GMAuthority) transition(ctx context.Context, valid func(*CohortProject)
 				// Our claim may have landed while admission ran (and may
 				// be why it now refuses): look again before reporting.
 				if len(minted) > 0 {
-					if r, ok := a.landed(ctx, minted); ok {
+					r, ok, lerr := a.landed(ctx, minted)
+					if lerr != nil {
+						return ClaimResult{Outcome: ClaimUnavailable, State: last,
+							Reason: fmt.Sprintf("admission refused (%v), and the remote is unreadable, so claim %s may have landed: %v", err, mintedIDs(minted), lerr)}, nil
+					}
+					if ok {
 						return r, nil
 					}
 				}
@@ -278,6 +297,7 @@ func (a *GMAuthority) transition(ctx context.Context, valid func(*CohortProject)
 		claimID := newClaimID()
 		st := next(p, claimID)
 		minted[claimID] = st
+		last = st
 		commit, err := a.commitState(ctx, tip, st, fmt.Sprintf("%s: GM term %d: %s (%s)", a.Project, st.Term, st.GM, msg))
 		if err != nil {
 			return ClaimResult{}, err

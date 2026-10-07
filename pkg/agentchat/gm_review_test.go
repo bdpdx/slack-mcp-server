@@ -213,3 +213,33 @@ func TestGMAdmissionUnavailableIsNotLost(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ClaimUnavailable, r.Outcome)
 }
+
+// Codex-b's probe: an unreadable reconciliation cannot prove a loss.
+func TestGMUnreadableLateClaimStaysUncertain(t *testing.T) {
+	remote, clones := gmRepo(t, 1)
+	hook := filepath.Join(remote, "hooks", "pre-receive")
+	shaFile := filepath.Join(t.TempDir(), "sha")
+	marker := filepath.Join(t.TempDir(), "once")
+	script := "#!/bin/sh\nread old new ref\nif [ ! -e " + marker + " ]; then touch " + marker + "; echo $new > " + shaFile + "; exit 1; fi\nexit 0\n"
+	require.NoError(t, os.WriteFile(hook, []byte(script), 0o755))
+	c := newClaimer(clones[0], "codex-b")
+	calls := 0
+	c.Admit = func(context.Context) error {
+		calls++
+		if calls == 1 {
+			return nil
+		}
+		// The declined first push lands late, mid-admission.
+		sha, err := os.ReadFile(shaFile)
+		require.NoError(t, err)
+		gitT(t, clones[0], "push", "-q", "origin", string(sha[:40])+":refs/heads/main")
+		gitT(t, clones[0], "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+		return errors.New("the expected authority moved: term 1, not 0")
+	}
+	r, err := c.Claim(context.Background(), 0, "claude", "x")
+	require.NoError(t, err)
+	assert.Equal(t, ClaimUnavailable, r.Outcome, "unreadable reconciliation cannot prove this call did not acquire authority")
+	assert.Equal(t, "codex-b", remoteGM(t, remote).GM, "the remote really did accept the claim")
+	assert.Equal(t, remoteGM(t, remote), r.State, "the result carries the minted state for later reconciliation")
+	assert.Contains(t, r.Reason, r.State.ClaimID)
+}
