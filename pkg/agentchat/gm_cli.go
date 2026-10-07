@@ -1,0 +1,120 @@
+package agentchat
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/slack-go/slack"
+)
+
+// Exit statuses of `chat gm`, matching the claim outcomes.
+const (
+	exitGMLost        = 4 // lost, refused, or the caller no longer holds the term
+	exitGMUnavailable = 5 // the authority could not be read or written
+)
+
+func (c *cli) gm(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: gm status|claim|verify|release")
+	}
+	fs := flag.NewFlagSet("gm", flag.ContinueOnError)
+	fs.SetOutput(c.stderr)
+	project := fs.String("project", "", "project name")
+	agent := fs.String("agent", "", "this agent's Slack name")
+	root := fs.String("project-root", "", "the rezilient-project-state checkout (default: from the projects/ symlink)")
+	expectTerm := fs.Int("expect-term", -1, "claim: the term the deadline notice named")
+	expectGM := fs.String("expect-gm", "", "claim: the GM the deadline notice named")
+	term := fs.Int("term", -1, "verify, release: the term this agent holds")
+	claimID := fs.String("claim-id", "", "verify, release: this agent's claim ID")
+	to := fs.String("to", "", "release: the agent to hand GM to")
+	reason := fs.String("reason", "GM unavailable", "claim: why")
+	if _, err := parseArgs(fs, args[1:]); err != nil {
+		return err
+	}
+	if *project == "" {
+		return fmt.Errorf("gm %s needs --project", args[0])
+	}
+	dir := *root
+	if dir == "" {
+		wd, _ := os.Getwd()
+		var err error
+		if dir, err = projectStateRoot(wd); err != nil {
+			return exitError{exitGMUnavailable, err}
+		}
+	}
+	dir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return exitError{exitGMUnavailable, err}
+	}
+	a := &GMAuthority{Root: dir, Project: *project, Agent: *agent}
+	if args[0] != "status" && *agent == "" {
+		return fmt.Errorf("gm %s needs --agent", args[0])
+	}
+	switch args[0] {
+	case "status":
+		st, err := a.Status(ctx)
+		if err != nil {
+			return exitError{exitGMUnavailable, err}
+		}
+		c.printJSON(st)
+		return nil
+	case "verify":
+		if *term < 0 || *claimID == "" {
+			return errors.New("gm verify needs --term and --claim-id")
+		}
+		ok, st, err := a.Verify(ctx, *term, *claimID)
+		if err != nil {
+			return exitError{exitGMUnavailable, err}
+		}
+		c.printJSON(map[string]any{"holds": ok, "state": st})
+		if !ok {
+			return exitError{exitGMLost, fmt.Errorf("%s no longer holds term %d; stop GM work", *agent, *term)}
+		}
+		return nil
+	case "claim":
+		if *expectTerm < 0 || *expectGM == "" {
+			return errors.New("gm claim needs --expect-term and --expect-gm from the notice")
+		}
+		r, err := a.Claim(ctx, *expectTerm, *expectGM, *reason)
+		if err != nil {
+			return exitError{exitGMUnavailable, err}
+		}
+		c.printJSON(r)
+		return c.claimExit(ctx, r, *project, fmt.Sprintf("ACTING GM term %d (claim %s): %s takes over from %s: %s",
+			r.State.Term, r.State.ClaimID, *agent, *expectGM, *reason))
+	case "release":
+		if *term < 0 || *claimID == "" || *to == "" {
+			return errors.New("gm release needs --term, --claim-id and --to")
+		}
+		r, err := a.Release(ctx, *term, *claimID, *to)
+		c.printJSON(r)
+		if err != nil && r.Outcome == "" {
+			return exitError{exitGMUnavailable, err}
+		}
+		return c.claimExit(ctx, r, *project, fmt.Sprintf("GM term %d (claim %s): %s hands GM back to %s",
+			r.State.Term, r.State.ClaimID, *agent, *to))
+	}
+	return fmt.Errorf("unknown gm command %q", args[0])
+}
+
+// claimExit maps an outcome to the exit status, announcing a win in the
+// project channel (the receipt is already on the remote).
+func (c *cli) claimExit(ctx context.Context, r ClaimResult, project, announce string) error {
+	switch r.Outcome {
+	case ClaimWon:
+		if channel, _, err := c.resolveChannel(ctx, project); err == nil {
+			if _, _, err := c.bot.PostMessageContext(ctx, channel, slack.MsgOptionText(slackEscaper.Replace(announce), false)); err != nil {
+				fmt.Fprintf(c.stderr, "slack-agent-chat: the claim holds, but announcing it failed: %v\n", err)
+			}
+		}
+		return nil
+	case ClaimUnavailable:
+		return exitError{exitGMUnavailable, errors.New(r.Reason)}
+	default:
+		return exitError{exitGMLost, fmt.Errorf("%s: %s", r.Outcome, r.Reason)}
+	}
+}

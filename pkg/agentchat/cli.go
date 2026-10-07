@@ -145,6 +145,13 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
                     record a checkpoint and post the drift line
   cohort status [--project P] [--format json|table]
                     list this home's cohort registrations
+  gm status|claim|verify|release --project P [--agent NAME]
+                    the project's GM authority (gm.json on project-state's
+                    origin/main). claim --expect-term T --expect-gm G takes
+                    over by compare-and-swap (exit 4 lost or refused, 5
+                    authority unavailable); verify --term T --claim-id ID
+                    before each GM-file write (exit 4: stop); release --term
+                    T --claim-id ID --to AGENT hands GM back
   capabilities      print this build's cohort capabilities as JSON
   relay-hook        UserPromptSubmit hook for %agents prompts (reads stdin)
   ask-hook          Claude PreToolUse hook for AskUserQuestion: ask in Slack
@@ -235,6 +242,8 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = c.ack(ctx, rest[1:])
 	case "cohort":
 		err = c.cohort(ctx, rest[1:])
+	case "gm":
+		err = c.gm(ctx, rest[1:])
 	case "capabilities":
 		err = c.capabilities()
 	case "relay-hook":

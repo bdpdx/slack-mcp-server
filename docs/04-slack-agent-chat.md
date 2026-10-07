@@ -127,3 +127,31 @@ Nothing here applies to a session that does not register.
   with `chat cohort checkpoint --drift LINE`. Missed periods coalesce into
   one notice.
 - `chat capabilities` prints the supported features for setup scripts.
+
+## GM authority (`chat gm`)
+
+The cohort's current GM is `projects/P/gm.json` on the project-state repo's
+`origin/main`: `{term, gm, claim_id, since, reason, handoff_of}`. With no
+gm.json, the first agent in the succession order is GM at term 0.
+
+- `chat gm claim --project P --agent NAME --expect-term T --expect-gm G`
+  takes over when a deadline notice says the GM is unavailable:
+  1. It fetches and checks that the remote still has term T and GM G, that
+     NAME is on the roster, and that NAME isn't held.
+  2. It builds a commit changing only gm.json (term T+1, a new claim ID).
+     The commit's single parent is the tip it checked, and it's built in a
+     private index, never the working branch.
+  3. It pushes without force. A rejected push means main moved: it
+     revalidates and rebuilds, but never over another claim.
+  4. The claim holds only once the remote gm.json shows its claim ID on
+     main; then it announces `ACTING GM term T+1 (claim ID)`.
+  5. An uncertain push is settled by looking for the claim ID, never by
+     minting another term.
+
+  Exit statuses: 0 won, 4 lost or refused, 5 authority unavailable (then
+  nobody claims; keep doing your own work and retry).
+- `chat gm verify --term T --claim-id ID` before every GM-file write. Exit
+  4 means the term ended: stop, and don't rebase the work across it.
+- `chat gm release --term T --claim-id ID --to AGENT` hands GM back as
+  another guarded term+1, recording `handoff_of`.
+- `chat gm status` prints the current state.
