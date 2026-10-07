@@ -176,3 +176,24 @@ func TestCohortCodexUncertainBlockedPostOwesRecovery(t *testing.T) {
 	l.CohortTick(context.Background())
 	require.Len(t, api.posts(), 1, "and only once")
 }
+
+// An announcement record alone is not proof of delivery: after a restart a
+// session still waiting is announced again after a fresh observed count.
+func TestCohortCodexAnnouncementIntentRetriesAfterRestart(t *testing.T) {
+	l, api, d, now, _ := codexObserverListener(t, "codex-b")
+	d.set("th1", true)
+	l.CohortTick(context.Background())
+	*now = now.Add(10 * time.Minute)
+	api.failPosts = true
+	l.CohortTick(context.Background())
+	require.Empty(t, api.posts(), "no BLOCKED notice reached Slack")
+	require.True(t, l.state.Announced[cohortKey("th1", "proj")])
+	restarted, err := NewListener(api, d, Identity{UserID: "UCB", BotID: "BCB"}, "UBR", l.StateFile, l.Log)
+	require.NoError(t, err)
+	restarted.Now = func() time.Time { return *now }
+	api.failPosts = false
+	restarted.CohortTick(context.Background())
+	*now = now.Add(10 * time.Minute)
+	restarted.CohortTick(context.Background())
+	require.NotEmpty(t, api.posts(), "an uncertain intent must not suppress BLOCKED forever while the thread keeps waiting")
+}

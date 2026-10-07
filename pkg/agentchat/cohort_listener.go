@@ -640,13 +640,18 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 			l.approvalWaits = map[string]*approvalWait{}
 		}
 		w := l.approvalWaits[key]
-		// The wait is memory-only, but the BLOCKED watch our own bot's
-		// notice created is durable: after a restart it stands for the
-		// posted notice, so a known clear still announces recovery. It is
-		// never read as proof of a continuous wait (no new count starts
-		// from it, and a still-waiting session is not announced again).
-		if w == nil && (l.state.Announced[key] || l.ownBlockedWatchLocked(r)) {
+		// The wait is memory-only; after a restart, durable evidence
+		// rebuilds it. Our own bot's saved BLOCKED watch proves delivery:
+		// the session is not announced again. The announcement record alone
+		// only means a notice may be in Slack: recovery stays owed, but a
+		// session still waiting starts a fresh observed count and is
+		// announced again after it (a duplicate beats a missing notice).
+		// Neither is read as proof of a continuous wait.
+		if w == nil && l.ownBlockedWatchLocked(r) {
 			w = &approvalWait{since: now, posted: true}
+			l.approvalWaits[key] = w
+		} else if w == nil && l.state.Announced[key] {
+			w = &approvalWait{since: now}
 			l.approvalWaits[key] = w
 		}
 		// owed: a BLOCKED notice may be in Slack (posted, or attempted with
