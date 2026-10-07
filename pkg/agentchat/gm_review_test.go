@@ -214,7 +214,7 @@ func TestGMAdmissionUnavailableIsNotLost(t *testing.T) {
 	assert.Equal(t, ClaimUnavailable, r.Outcome)
 }
 
-// Codex-b's probe: an unreadable reconciliation cannot prove a loss.
+// An unreadable reconciliation cannot prove a loss.
 func TestGMUnreadableLateClaimStaysUncertain(t *testing.T) {
 	remote, clones := gmRepo(t, 1)
 	hook := filepath.Join(remote, "hooks", "pre-receive")
