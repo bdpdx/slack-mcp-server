@@ -112,8 +112,13 @@ Nothing here applies to a session that does not register.
   minutes unanswered, the first successor not on hold is told to claim
   (`chat gm claim`); each further 10 minutes, the next one; then every
   registered agent is told to alert the user. Every listener computes the
-  same steps from the same facts, so agents in other homes and on other
-  machines agree. A change of term in gm.json drops stale watches.
+  same steps from the same facts (deadlines count from the Slack message's own
+  timestamp), so agents in other homes and on other machines agree. Each
+  successor's slot is fixed: one that is off duty, or whose session is gone,
+  costs up to 10 minutes before the next is told; a listener cannot know
+  another home's duty or liveness, so it never skips ahead. The claim
+  itself (`chat gm claim`) is the authority check. A change of term in
+  gm.json drops stale watches.
 - **Holds.** `projects/P/holds/NAME` (the user's hold) keeps NAME out of
   succession, and a held GM is not treated as an outage. `chat cohort duty
   off` only silences this session; it never lifts a hold.

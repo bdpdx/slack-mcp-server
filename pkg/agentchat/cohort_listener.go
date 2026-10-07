@@ -51,6 +51,14 @@ type GMWatch struct {
 
 func watchKey(channel, ts string) string { return channel + "|" + ts }
 
+// tsTime is the instant a Slack timestamp names. Deadlines count from the
+// message itself, not from when this listener saw it, so a reconnect, a
+// backlog or a slow machine never restarts the clock.
+func tsTime(ts string) time.Time {
+	sec, micro := splitTS(ts)
+	return time.Unix(sec, micro*1000)
+}
+
 // cohortViews caches project views for the live message path.
 type cohortViews struct {
 	mu      sync.Mutex
@@ -110,8 +118,13 @@ func (l *Listener) projectView(ctx context.Context, root, project string, fresh 
 // cohortControl answers the cohort-* control ops.
 func (l *Listener) cohortControl(ctx context.Context, req ControlRequest) ControlResponse {
 	var view *CohortProject
-	if req.Op == "cohort-register" && l.Self.UserID != "" {
-		l.selfName = l.name(ctx, l.Self.UserID)
+	self := ""
+	if req.Op == "cohort-register" {
+		// The socket is the enforcement point: an agent registers only as
+		// this home's bot, and an unresolvable bot refuses the registration.
+		if self = l.name(ctx, l.Self.UserID); self == "" || l.Self.UserID == "" {
+			return ControlResponse{Error: "cannot resolve this home's agent; registration refused"}
+		}
 	}
 	if req.Op == "cohort-register" && req.Cohort != nil && req.Cohort.Root != "" {
 		// Read the project as the tick will, before taking l.mu: it may run git.
@@ -143,7 +156,7 @@ func (l *Listener) cohortControl(ctx context.Context, req ControlRequest) Contro
 	reg := l.state.Cohort[key]
 	switch req.Op {
 	case "cohort-register":
-		next, err := l.validateRegistration(req.SessionID, req.Cohort, view)
+		next, err := l.validateRegistration(req.SessionID, req.Cohort, view, self)
 		if err != nil {
 			return ControlResponse{Error: err.Error()}
 		}
@@ -185,7 +198,7 @@ func (l *Listener) cohortControl(ctx context.Context, req ControlRequest) Contro
 
 // validateRegistration checks a registration against the live subscription
 // and the project files. Call with l.mu held.
-func (l *Listener) validateRegistration(session string, in *CohortReg, p *CohortProject) (*CohortReg, error) {
+func (l *Listener) validateRegistration(session string, in *CohortReg, p *CohortProject, self string) (*CohortReg, error) {
 	sub := l.state.Subscriptions[session]
 	if sub == nil {
 		return nil, errors.New("this session is not watching any channel; run watch start first")
@@ -199,7 +212,7 @@ func (l *Listener) validateRegistration(session string, in *CohortReg, p *Cohort
 	if !p.InRoster(in.Agent) {
 		return nil, fmt.Errorf("%s is not in %s's succession order", in.Agent, in.Project)
 	}
-	if self := l.selfName; self != "" && self != in.Agent {
+	if self != in.Agent {
 		return nil, fmt.Errorf("this home's agent is %s, not %s", self, in.Agent)
 	}
 	return &CohortReg{Project: in.Project, Agent: in.Agent, SessionID: session, Root: in.Root, Channel: in.Channel, RegisteredAt: l.Now()}, nil
@@ -290,12 +303,12 @@ func (l *Listener) trackCohort(ctx context.Context, m Message) {
 		}
 		if blocked {
 			l.state.GMWatches[watchKey(m.Channel, m.TS)] = &GMWatch{Project: reg.Project, Channel: m.Channel, TS: m.TS, Thread: thread,
-				GM: gm, GMID: m.User, Term: p.GM.Term, Seen: l.Now().Add(-gmAnswerDeadline), Blocked: true}
+				GM: gm, GMID: m.User, Term: p.GM.Term, Seen: tsTime(m.TS).Add(-gmAnswerDeadline), Blocked: true}
 			changed = true
 		}
 	} else if len(mentions) > 0 {
 		l.state.GMWatches[watchKey(m.Channel, m.TS)] = &GMWatch{Project: reg.Project, Channel: m.Channel, TS: m.TS, Thread: thread,
-			Sender: sender, SenderID: m.User, GM: gm, GMID: mentions[0], Term: p.GM.Term, Seen: l.Now()}
+			Sender: sender, SenderID: m.User, GM: gm, GMID: mentions[0], Term: p.GM.Term, Seen: tsTime(m.TS)}
 		changed = true
 	}
 	if changed {

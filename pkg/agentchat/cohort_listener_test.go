@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,7 +45,9 @@ func newCohortFixture(t *testing.T) *cohortFixture {
 	return f
 }
 
-func (f *cohortFixture) at(d time.Duration) { f.now = time.Unix(1_800_000_000, 0).Add(d) }
+// at sets the clock to d after the base time, plus a second so deadlines
+// counted from messages stamped just after the base have passed.
+func (f *cohortFixture) at(d time.Duration) { f.now = time.Unix(1_800_000_000, 0).Add(d + time.Second) }
 
 func (f *cohortFixture) homes() []*Listener { return []*Listener{f.l, f.l3} }
 
@@ -413,4 +416,41 @@ func TestCohortStatusReportsPendingDeadlines(t *testing.T) {
 	resp := f.l.Control(context.Background(), ControlRequest{Op: "cohort-status", Cohort: &CohortReg{Project: "proj"}})
 	require.Len(t, resp.Watches, 1)
 	assert.Equal(t, "claude", resp.Watches[0].GM)
+}
+
+// A mention seen late (a reconnect, a backlog) keeps its original deadline.
+func TestCohortDeadlineCountsFromTheMessageNotReceipt(t *testing.T) {
+	f := newCohortFixture(t)
+	f.at(14 * time.Minute) // the listener only sees the message now
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100", User: "UBR", Text: "<@UCL> please decide"})
+	f.at(15 * time.Minute)
+	f.tick()
+	assert.Len(t, f.notices("s2"), 1, "15 minutes from the message, not from receipt")
+}
+
+func TestCohortRegisterFailsClosedWithoutIdentity(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListenerAs(t, api, d, Identity{UserID: "UNOBODY", BotID: "BX"})
+	root := t.TempDir()
+	writeProject(t, root, "proj", "<!-- cohort-succession: claude, codex-b -->\n")
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s2"), 0))
+	resp := l.Control(context.Background(), ControlRequest{Op: "cohort-register", SessionID: "s2",
+		Cohort: &CohortReg{Project: "proj", Agent: "codex-b", Root: root, Channel: "C1"}})
+	assert.False(t, resp.OK)
+	assert.Contains(t, resp.Error, "cannot resolve")
+}
+
+func TestCohortConcurrentRegistrations(t *testing.T) {
+	f := newCohortFixture(t)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			f.l.Control(context.Background(), ControlRequest{Op: "cohort-register", SessionID: "s2",
+				Cohort: &CohortReg{Project: "proj", Agent: "codex-b", Root: f.root, Channel: "C1"}})
+		}()
+	}
+	wg.Wait()
+	assert.Len(t, f.status(), 2)
 }
