@@ -227,7 +227,7 @@ func TestGMReleaseRequiresCurrentAuthority(t *testing.T) {
 func TestCohortListenerSeesRemoteClaimBeforePull(t *testing.T) {
 	_, clones := gmRepo(t, 2)
 	api, d := newFakeSlack(), &fakeDeliverer{}
-	l := newTestListener(t, api, d)
+	l := newTestListenerAs(t, api, d, Identity{UserID: "UCB", BotID: "BCB"})
 	now := time.Unix(1_800_000_000, 0)
 	l.Now = func() time.Time { return now }
 	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s2"), 0))
