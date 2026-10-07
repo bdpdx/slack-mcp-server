@@ -611,44 +611,141 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 	if !ok {
 		return
 	}
+	// One probe per session per tick, however many projects it is in; each
+	// registration keeps its own wait, so every project channel hears.
+	type probe struct {
+		waiting bool
+		err     error
+	}
+	probes := map[string]probe{}
+	seen := map[string]bool{}
 	for _, r := range regs {
 		sub := subs[r.SessionID]
 		if sub == nil || sub.Kind != KindCodex {
 			continue
 		}
-		pctx, cancel := context.WithTimeout(ctx, approvalProbeTimeout)
-		waiting, err := prober.WaitingOnApproval(pctx, sub)
-		cancel()
-		if errors.Is(err, errApprovalUnobservable) {
-			l.warnUnobservable(r.SessionID)
-		}
+		key := cohortKey(r.SessionID, r.Project)
 		l.mu.Lock()
 		if l.approvalWaits == nil {
 			l.approvalWaits = map[string]*approvalWait{}
 		}
-		w := l.approvalWaits[r.SessionID]
-		if err != nil || !waiting {
-			delete(l.approvalWaits, r.SessionID)
+		w := l.approvalWaits[key]
+		l.mu.Unlock()
+		// Only an agent the cohort could act on is announced: on duty, on
+		// the roster, not held, in a readable project. Anything else drops
+		// a pending count (a notice already posted keeps its recovery).
+		p, err := l.projectView(ctx, r.Root, r.Project, false)
+		if err != nil || r.OffDuty || !p.InRoster(r.Agent) || p.Held(r.Agent) {
+			if w == nil || !w.posted {
+				l.mu.Lock()
+				delete(l.approvalWaits, key)
+				l.mu.Unlock()
+				continue
+			}
+		} else {
+			seen[key] = true
+		}
+		pr, done := probes[r.SessionID]
+		if !done {
+			pctx, cancel := context.WithTimeout(ctx, approvalProbeTimeout)
+			pr.waiting, pr.err = prober.WaitingOnApproval(pctx, sub)
+			cancel()
+			probes[r.SessionID] = pr
+			if errors.Is(pr.err, errApprovalUnobservable) {
+				l.warnUnobservable(r.SessionID)
+			}
+		}
+		switch {
+		case pr.err != nil:
+			// Unknown: never post on a guess, and never assert recovery.
+			// A pending count restarts; a posted notice waits for a known
+			// answer.
+			seen[key] = w != nil && w.posted
+			if !seen[key] {
+				l.mu.Lock()
+				delete(l.approvalWaits, key)
+				l.mu.Unlock()
+			}
+		case !pr.waiting:
+			if w != nil && w.posted {
+				seen[key] = !l.postUnblocked(ctx, r)
+				if seen[key] {
+					continue // retry the recovery notice next tick
+				}
+			}
+			l.mu.Lock()
+			delete(l.approvalWaits, key)
 			l.mu.Unlock()
-			continue
+		case seen[key]:
+			if w == nil {
+				w = &approvalWait{since: now}
+				l.mu.Lock()
+				l.approvalWaits[key] = w
+				l.mu.Unlock()
+			}
+			if w.posted || now.Sub(w.since) < defaultApprovalWait {
+				continue
+			}
+			if _, _, err := l.API.PostMessageContext(ctx, r.Channel, slack.MsgOptionText(blockedNotice(r.Agent, "", defaultApprovalWait), false)); err != nil {
+				l.Log.Warn("posting a Codex BLOCKED notice failed", zap.String("session", r.SessionID), zap.Error(err))
+				continue
+			}
+			l.mu.Lock()
+			w.posted = true
+			l.mu.Unlock()
+		default:
+			// Still waiting but now ineligible: keep the posted notice's
+			// state for its eventual recovery.
+			seen[key] = true
 		}
-		if w == nil {
-			w = &approvalWait{since: now}
-			l.approvalWaits[r.SessionID] = w
-		}
-		due := !w.posted && now.Sub(w.since) >= defaultApprovalWait
-		l.mu.Unlock()
-		if !due {
-			continue
-		}
-		if _, _, err := l.API.PostMessageContext(ctx, r.Channel, slack.MsgOptionText(blockedNotice(r.Agent, "", defaultApprovalWait), false)); err != nil {
-			l.Log.Warn("posting a Codex BLOCKED notice failed", zap.String("session", r.SessionID), zap.Error(err))
-			continue
-		}
-		l.mu.Lock()
-		w.posted = true
-		l.mu.Unlock()
 	}
+	// A registration that is gone takes its wait with it, so a later
+	// registration starts fresh.
+	l.mu.Lock()
+	for key := range l.approvalWaits {
+		if !seen[key] {
+			delete(l.approvalWaits, key)
+		}
+	}
+	for session := range l.unobservable {
+		if _, ok := probes[session]; !ok {
+			delete(l.unobservable, session)
+		}
+	}
+	l.mu.Unlock()
+}
+
+// unblockedNotice is posted when a Codex session that was announced BLOCKED
+// is known to have its approval answered. It is a later, non-BLOCKED post
+// from the agent's own bot, which every listener's trackCohort already takes
+// as the end of a BLOCKED GM watch.
+func unblockedNotice(agent string) string {
+	return "UNBLOCKED: " + slackEscaper.Replace(agent) + " is no longer waiting for approval."
+}
+
+// postUnblocked announces r's recovery and retires this listener's own
+// BLOCKED watches for it at once (the others retire theirs from the Slack
+// event). It reports whether the notice was posted.
+func (l *Listener) postUnblocked(ctx context.Context, r CohortReg) bool {
+	if _, _, err := l.API.PostMessageContext(ctx, r.Channel, slack.MsgOptionText(unblockedNotice(r.Agent), false)); err != nil {
+		l.Log.Warn("posting a Codex UNBLOCKED notice failed", zap.String("session", r.SessionID), zap.Error(err))
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	changed := false
+	for k, w := range l.state.GMWatches {
+		if w.Blocked && w.Channel == r.Channel && w.GM == r.Agent {
+			delete(l.state.GMWatches, k)
+			changed = true
+		}
+	}
+	if changed {
+		if err := l.state.Save(l.StateFile); err != nil {
+			l.Log.Error("saving state failed", zap.Error(err))
+		}
+	}
+	return true
 }
 
 // deliverCohort pushes a listener-generated notice (not a Slack message) into

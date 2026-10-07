@@ -534,7 +534,8 @@ func TestCohortCodexApprovalWaitPostsBlocked(t *testing.T) {
 	l.CohortTick(context.Background())
 	now = now.Add(5 * time.Minute)
 	l.CohortTick(context.Background())
-	assert.Len(t, api.posts(), 1)
+	require.Len(t, api.posts(), 2, "the known clear was announced once; the new wait has not reached 10 minutes")
+	assert.Equal(t, "C1|"+unblockedNotice("codex-b"), api.posts()[1])
 }
 
 func TestCohortCodexProbeFailureResetsTheWait(t *testing.T) {
@@ -558,4 +559,44 @@ func TestCohortCodexProbeFailureResetsTheWait(t *testing.T) {
 	now = now.Add(3 * time.Minute)
 	l.CohortTick(context.Background())
 	assert.Empty(t, api.posts(), "an unobservable gap restarts the count: never post on a guess")
+}
+
+func TestCohortCodexWaitIsPerRegistration(t *testing.T) {
+	api := newFakeSlack()
+	d := &probeDeliverer{}
+	root := t.TempDir()
+	writeProject(t, root, "proj", "<!-- cohort-succession: claude, codex-b -->\n")
+	writeProject(t, root, "other", "<!-- cohort-succession: claude, codex-b -->\n")
+	now := time.Unix(1_800_000_000, 0)
+	l, err := NewListener(api, d, Identity{UserID: "UCB", BotID: "BCB"}, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
+	require.NoError(t, err)
+	l.Now = func() time.Time { return now }
+	require.NoError(t, l.Subscribe(context.Background(), &Subscription{SessionID: "th1", Kind: KindCodex, ThreadID: "th1", Channels: []string{"C1", "C2"}}, 0))
+	register := func(project, channel string) {
+		resp := l.Control(context.Background(), ControlRequest{Op: "cohort-register", SessionID: "th1",
+			Cohort: &CohortReg{Project: project, Agent: "codex-b", Root: root, Channel: channel}})
+		require.True(t, resp.OK, resp.Error)
+	}
+	register("proj", "C1")
+	register("other", "C2")
+
+	d.set("th1", true)
+	l.CohortTick(context.Background())
+	now = now.Add(10 * time.Minute)
+	l.CohortTick(context.Background())
+	assert.ElementsMatch(t, []string{
+		"C1|" + blockedNotice("codex-b", "", defaultApprovalWait),
+		"C2|" + blockedNotice("codex-b", "", defaultApprovalWait),
+	}, api.posts(), "each project channel hears")
+
+	// Leaving drops the wait; re-registering while still waiting starts a
+	// fresh count and posts again.
+	require.True(t, l.Control(context.Background(), ControlRequest{Op: "cohort-leave", SessionID: "th1", Cohort: &CohortReg{Project: "other"}}).OK)
+	l.CohortTick(context.Background())
+	register("other", "C2")
+	l.CohortTick(context.Background())
+	now = now.Add(10 * time.Minute)
+	l.CohortTick(context.Background())
+	assert.Len(t, api.posts(), 3)
+	assert.Equal(t, "C2|"+blockedNotice("codex-b", "", defaultApprovalWait), api.posts()[2])
 }

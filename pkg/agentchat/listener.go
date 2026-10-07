@@ -70,7 +70,7 @@ type Listener struct {
 	queues        map[string]chan []pending // per-session delivery queues (Async)
 	approvals     map[string]*approval      // approval-hook requests by approval ID
 	views         cohortViews               // project views for cohort tracking
-	approvalWaits map[string]*approvalWait  // Codex sessions seen waiting on an approval, by session
+	approvalWaits map[string]*approvalWait  // Codex registrations seen waiting on an approval, by session|project
 	unobservable  map[string]bool           // Codex sessions whose daemon hides approval waits (warned once)
 }
 
