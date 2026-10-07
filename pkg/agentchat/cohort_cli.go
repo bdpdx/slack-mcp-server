@@ -63,12 +63,18 @@ var projectStateOrigin = regexp.MustCompile(`^(git@github\.com:|ssh://git@github
 // checkProjectState refuses a root whose origin is not rezilient-project-state
 // or that has no fetched origin/main.
 func checkProjectState(ctx context.Context, dir string) error {
-	url, err := gitIn(ctx, dir, nil, nil, "remote", "get-url", "origin")
-	if err != nil {
-		return fmt.Errorf("%s has no origin remote", dir)
-	}
-	if !projectStateOrigin.MatchString(strings.TrimSpace(url)) {
-		return fmt.Errorf("%s: origin %s is not rezilient-co/rezilient-project-state", dir, strings.TrimSpace(url))
+	// Both directions: authority is fetched from the fetch URL, and claims are
+	// pushed to the push URL(s) (pushurl and pushInsteadOf apply there).
+	for _, args := range [][]string{{"remote", "get-url", "origin"}, {"remote", "get-url", "--push", "--all", "origin"}} {
+		out, err := gitIn(ctx, dir, nil, nil, args...)
+		if err != nil {
+			return fmt.Errorf("%s has no origin remote", dir)
+		}
+		for _, url := range strings.Fields(out) {
+			if !projectStateOrigin.MatchString(url) {
+				return fmt.Errorf("%s: origin %s is not rezilient-co/rezilient-project-state", dir, url)
+			}
+		}
 	}
 	if _, err := gitIn(ctx, dir, nil, nil, "rev-parse", "--verify", "-q", "refs/remotes/origin/main"); err != nil {
 		return fmt.Errorf("%s is not a project-state checkout with origin/main", dir)
@@ -299,6 +305,10 @@ func (c *cli) logCheckpoint(project, drift, note string) error {
 		return err
 	}
 	defer f.Close()
+	// The mode only applies on creation: tighten a file that already exists.
+	if err := f.Chmod(0o600); err != nil {
+		return err
+	}
 	_, err = f.Write(append(line, '\n'))
 	return err
 }
