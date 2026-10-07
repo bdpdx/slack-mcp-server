@@ -211,11 +211,12 @@ func (r *CohortReg) CheckpointDue(now time.Time) bool {
 	return r.CheckpointNotified.Before(latest)
 }
 
-// gitIn runs git in dir and returns its trimmed stdout.
+// gitIn runs git in dir and returns its trimmed stdout. It never prompts:
+// a git that wants credentials fails instead of hanging the listener.
 func gitIn(ctx context.Context, dir string, env []string, stdin []byte, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -oBatchMode=yes"), env...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -233,7 +234,7 @@ func LoadCohortProjectAt(ctx context.Context, root, project, commit string) (*Co
 	if !projectName.MatchString(project) {
 		return nil, fmt.Errorf("%q is not a project name", project)
 	}
-	md, err := gitIn(ctx, root, nil, nil, "show", commit+":"+project+"/PROJECT.md")
+	md, err := gitIn(ctx, root, nil, nil, "show", commit+":./"+project+"/PROJECT.md")
 	if err != nil {
 		return nil, err
 	}
@@ -242,8 +243,8 @@ func LoadCohortProjectAt(ctx context.Context, root, project, commit string) (*Co
 		return nil, err
 	}
 	p := &CohortProject{Name: project, Root: root, Succession: order, GM: GMState{GM: order[0]}, holds: map[string]bool{}}
-	if _, err := gitIn(ctx, root, nil, nil, "cat-file", "-e", commit+":"+project+"/gm.json"); err == nil {
-		data, err := gitIn(ctx, root, nil, nil, "show", commit+":"+project+"/gm.json")
+	if _, err := gitIn(ctx, root, nil, nil, "cat-file", "-e", commit+":./"+project+"/gm.json"); err == nil {
+		data, err := gitIn(ctx, root, nil, nil, "show", commit+":./"+project+"/gm.json")
 		if err != nil {
 			return nil, err
 		}
@@ -251,7 +252,7 @@ func LoadCohortProjectAt(ctx context.Context, root, project, commit string) (*Co
 			return nil, fmt.Errorf("gm.json at %s: %w", commit, err)
 		}
 	}
-	if list, err := gitIn(ctx, root, nil, nil, "ls-tree", "--name-only", commit, project+"/holds/"); err == nil {
+	if list, err := gitIn(ctx, root, nil, nil, "ls-tree", "--name-only", commit, "./"+project+"/holds/"); err == nil {
 		for _, line := range strings.Split(list, "\n") {
 			if line != "" {
 				p.holds[filepath.Base(line)] = true

@@ -20,6 +20,9 @@ const (
 	// cohortFetchInterval is how often the listener fetches a project-state
 	// checkout so it sees GM claims and holds published from other machines.
 	cohortFetchInterval = 2 * time.Minute
+	// cohortFetchTimeout bounds a project-state fetch so a hung network can
+	// never stall the listener.
+	cohortFetchTimeout = 20 * time.Second
 	// watchMaxAge drops a GM watch nobody resolved, so state cannot grow
 	// without bound.
 	watchMaxAge = 24 * time.Hour
@@ -76,18 +79,20 @@ func (l *Listener) projectView(ctx context.Context, root, project string, fresh 
 		return v.p, nil
 	}
 	needFetch := l.Now().Sub(l.views.fetched[root]) >= cohortFetchInterval
+	if needFetch {
+		l.views.fetched[root] = l.Now() // claimed before fetching, so concurrent callers don't fetch too
+	}
 	l.views.mu.Unlock()
 
 	var p *CohortProject
 	var err error
 	if _, gerr := gitIn(ctx, root, nil, nil, "rev-parse", "--verify", "-q", "refs/remotes/origin/main"); gerr == nil {
 		if needFetch {
-			if _, ferr := gitIn(ctx, root, nil, nil, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main"); ferr != nil {
+			fctx, cancel := context.WithTimeout(ctx, cohortFetchTimeout)
+			if _, ferr := gitIn(fctx, root, nil, nil, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main"); ferr != nil {
 				l.Log.Warn("fetching project-state failed; using the last fetch", zap.String("root", root), zap.Error(ferr))
 			}
-			l.views.mu.Lock()
-			l.views.fetched[root] = l.Now()
-			l.views.mu.Unlock()
+			cancel()
 		}
 		p, err = LoadCohortProjectAt(ctx, root, project, "refs/remotes/origin/main")
 	} else {
@@ -103,7 +108,16 @@ func (l *Listener) projectView(ctx context.Context, root, project string, fresh 
 }
 
 // cohortControl answers the cohort-* control ops.
-func (l *Listener) cohortControl(req ControlRequest) ControlResponse {
+func (l *Listener) cohortControl(ctx context.Context, req ControlRequest) ControlResponse {
+	var view *CohortProject
+	if req.Op == "cohort-register" && req.Cohort != nil && req.Cohort.Root != "" {
+		// Read the project as the tick will, before taking l.mu: it may run git.
+		p, err := l.projectView(ctx, req.Cohort.Root, req.Cohort.Project, true)
+		if err != nil {
+			return ControlResponse{Error: err.Error()}
+		}
+		view = p
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if req.Op == "cohort-status" {
@@ -118,7 +132,7 @@ func (l *Listener) cohortControl(req ControlRequest) ControlResponse {
 	reg := l.state.Cohort[key]
 	switch req.Op {
 	case "cohort-register":
-		next, err := l.validateRegistration(req.SessionID, req.Cohort)
+		next, err := l.validateRegistration(req.SessionID, req.Cohort, view)
 		if err != nil {
 			return ControlResponse{Error: err.Error()}
 		}
@@ -160,7 +174,7 @@ func (l *Listener) cohortControl(req ControlRequest) ControlResponse {
 
 // validateRegistration checks a registration against the live subscription
 // and the project files. Call with l.mu held.
-func (l *Listener) validateRegistration(session string, in *CohortReg) (*CohortReg, error) {
+func (l *Listener) validateRegistration(session string, in *CohortReg, p *CohortProject) (*CohortReg, error) {
 	sub := l.state.Subscriptions[session]
 	if sub == nil {
 		return nil, errors.New("this session is not watching any channel; run watch start first")
@@ -168,12 +182,8 @@ func (l *Listener) validateRegistration(session string, in *CohortReg) (*CohortR
 	if in.Channel == "" || !sub.Watches(in.Channel) {
 		return nil, fmt.Errorf("this session does not watch the project channel %s", in.Channel)
 	}
-	if in.Root == "" {
+	if in.Root == "" || p == nil {
 		return nil, errors.New("the project-state root is required")
-	}
-	p, err := LoadCohortProject(in.Root, in.Project)
-	if err != nil {
-		return nil, err
 	}
 	if !p.InRoster(in.Agent) {
 		return nil, fmt.Errorf("%s is not in %s's succession order", in.Agent, in.Project)
@@ -253,7 +263,11 @@ func (l *Listener) trackCohort(ctx context.Context, m Message) {
 			if w.Blocked {
 				answered = !blocked // any later GM post means it got unstuck
 			} else {
-				answered = m.ThreadTS == w.Thread || mentionsUser(m.Text, w.SenderID)
+				thread := w.Thread
+				if thread == "" { // a watch saved before threads were tracked
+					thread = w.TS
+				}
+				answered = m.ThreadTS == thread || mentionsUser(m.Text, w.SenderID)
 			}
 			if answered {
 				delete(l.state.GMWatches, k)
