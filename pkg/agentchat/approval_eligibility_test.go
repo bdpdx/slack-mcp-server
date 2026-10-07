@@ -87,3 +87,54 @@ func TestCohortCodexRecoveryNeedsAKnownClear(t *testing.T) {
 	l.CohortTick(context.Background())
 	require.Len(t, api.posts(), 2, "announced once")
 }
+
+// The tick that observes recovery does not also deliver an escalation for
+// the BLOCKED watch it just retired.
+func TestCohortCodexRecoveryStopsSameTickEscalation(t *testing.T) {
+	l, api, d, now, _ := codexObserverListener(t, "codex-b")
+	require.NoError(t, l.Subscribe(context.Background(), &Subscription{SessionID: "s9", Kind: KindCodex, ThreadID: "s9", Channels: []string{"C1"}}, 0))
+	d.set("th1", true)
+	l.CohortTick(context.Background())
+	*now = now.Add(10 * time.Minute)
+	l.CohortTick(context.Background())
+	require.Len(t, api.posts(), 1)
+	l.trackCohort(context.Background(), Message{Channel: "C1", User: "UCB", Text: blockedNotice("codex-b", "", defaultApprovalWait), TS: NowTS(*now)})
+	require.Len(t, l.state.GMWatches, 1)
+	// The successor's slot comes due in the same tick the clear is seen.
+	*now = now.Add(15 * time.Minute)
+	d.set("th1", false)
+	before := len(d.got)
+	l.CohortTick(context.Background())
+	require.Empty(t, l.state.GMWatches)
+	for _, g := range d.got[before:] {
+		require.NotContains(t, g.text, "BLOCKED", "no escalation for a watch retired this tick")
+	}
+}
+
+// Recovery survives a listener restart: the durable BLOCKED watch stands for
+// the posted notice. A session still waiting after the restart is not
+// announced again.
+func TestCohortCodexRecoverySurvivesRestart(t *testing.T) {
+	l, api, d, now, _ := codexObserverListener(t, "codex-b")
+	d.set("th1", true)
+	l.CohortTick(context.Background())
+	*now = now.Add(10 * time.Minute)
+	l.CohortTick(context.Background())
+	require.Len(t, api.posts(), 1)
+	l.trackCohort(context.Background(), Message{Channel: "C1", User: "UCB", Text: blockedNotice("codex-b", "", defaultApprovalWait), TS: NowTS(*now)})
+	require.Len(t, l.state.GMWatches, 1)
+
+	restarted, err := NewListener(api, d, Identity{UserID: "UCB", BotID: "BCB"}, "UBR", l.StateFile, l.Log)
+	require.NoError(t, err)
+	restarted.Now = func() time.Time { return *now }
+	*now = now.Add(20 * time.Minute)
+	restarted.CohortTick(context.Background())
+	require.Len(t, api.posts(), 1, "still waiting after the restart: not announced again")
+
+	d.set("th1", false)
+	*now = now.Add(time.Minute)
+	restarted.CohortTick(context.Background())
+	require.Empty(t, restarted.state.GMWatches, "known recovery retires the durable watch")
+	require.Len(t, api.posts(), 2)
+	require.Equal(t, "C1|"+unblockedNotice("codex-b"), api.posts()[1])
+}

@@ -528,6 +528,16 @@ func (l *Listener) CohortTick(ctx context.Context) {
 
 	delivered := map[int]bool{}
 	for i, s := range sends {
+		// A watch retired since the snapshot (an UNBLOCKED notice this
+		// tick) no longer escalates.
+		if s.watch != "" {
+			l.mu.Lock()
+			_, live := l.state.GMWatches[s.watch]
+			l.mu.Unlock()
+			if !live {
+				continue
+			}
+		}
 		sub := subs[s.reg.SessionID]
 		if sub == nil || l.deliverCohort(ctx, sub, s.watch+"|"+s.mark+"|"+NowTS(now), s.text) != nil {
 			continue
@@ -630,6 +640,15 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 			l.approvalWaits = map[string]*approvalWait{}
 		}
 		w := l.approvalWaits[key]
+		// The wait is memory-only, but the BLOCKED watch our own bot's
+		// notice created is durable: after a restart it stands for the
+		// posted notice, so a known clear still announces recovery. It is
+		// never read as proof of a continuous wait (no new count starts
+		// from it, and a still-waiting session is not announced again).
+		if w == nil && l.ownBlockedWatchLocked(r) {
+			w = &approvalWait{since: now, posted: true}
+			l.approvalWaits[key] = w
+		}
 		l.mu.Unlock()
 		// Only an agent the cohort could act on is announced: on duty, on
 		// the roster, not held, in a readable project. Anything else drops
@@ -713,6 +732,17 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 		}
 	}
 	l.mu.Unlock()
+}
+
+// ownBlockedWatchLocked reports whether a durable BLOCKED watch in r's
+// channel comes from this listener's own bot as r's agent. l.mu is held.
+func (l *Listener) ownBlockedWatchLocked(r CohortReg) bool {
+	for _, w := range l.state.GMWatches {
+		if w.Blocked && w.Channel == r.Channel && w.GM == r.Agent && w.GMID == l.Self.UserID {
+			return true
+		}
+	}
+	return false
 }
 
 // unblockedNotice is posted when a Codex session that was announced BLOCKED
