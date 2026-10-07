@@ -137,6 +137,16 @@ func (c *cli) cohort(ctx context.Context, args []string) error {
 		if strings.TrimSpace(*drift) == "" {
 			return errors.New(`cohort checkpoint needs --drift "<line>"`)
 		}
+		// The public drift line is the checkpoint: post it first, and record
+		// completion only once it is in the channel.
+		reg, err := c.registration(ctx, sub.SessionID, *project)
+		if err != nil {
+			return err
+		}
+		if _, _, err := c.bot.PostMessageContext(ctx, reg.Channel,
+			slack.MsgOptionText("Checkpoint: "+slackEscaper.Replace(strings.TrimSpace(*drift)), false)); err != nil {
+			return fmt.Errorf("posting the drift line failed; the checkpoint is not recorded: %w", err)
+		}
 		req.Op = "cohort-checkpoint"
 	default:
 		return fmt.Errorf("unknown cohort command %q", args[0])
@@ -154,12 +164,6 @@ func (c *cli) cohort(ctx context.Context, args []string) error {
 			}
 		}
 		return exitError{code, errors.New(resp.Error)}
-	}
-	if req.Op == "cohort-checkpoint" && len(resp.Cohort) == 1 {
-		if _, _, err := c.bot.PostMessageContext(ctx, resp.Cohort[0].Channel,
-			slack.MsgOptionText("Checkpoint: "+slackEscaper.Replace(strings.TrimSpace(*drift)), false)); err != nil {
-			return fmt.Errorf("checkpoint recorded, but posting the drift line failed: %w", err)
-		}
 	}
 	c.printJSON(map[string]any{"ok": true, "cohort": cohortJSON(resp.Cohort)})
 	return nil
@@ -179,6 +183,20 @@ func cohortJSON(regs []CohortReg) []map[string]any {
 		})
 	}
 	return out
+}
+
+// registration returns session's registration in project.
+func (c *cli) registration(ctx context.Context, session, project string) (CohortReg, error) {
+	resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "cohort-status", Cohort: &CohortReg{Project: project}})
+	if err != nil {
+		return CohortReg{}, errors.New("no slack-agent-chat listener is running")
+	}
+	for _, r := range resp.Cohort {
+		if r.SessionID == session {
+			return r, nil
+		}
+	}
+	return CohortReg{}, fmt.Errorf("this session is not registered in %s", project)
 }
 
 // registeredIn reports whether session is registered in the cohort whose

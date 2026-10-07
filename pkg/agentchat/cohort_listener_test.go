@@ -353,3 +353,19 @@ func TestCohortHoldChangeMidEscalationTellsEachAgentOnce(t *testing.T) {
 	f.tick()
 	assert.Len(t, f.notices("s2"), 1, "codex-b was already told; the hold lifting does not repeat it")
 }
+
+func TestCohortHeldAgentGetsNoCheckpoint(t *testing.T) {
+	f := newCohortFixture(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(f.root, "proj", "holds"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "holds", "codex-b"), nil, 0o644))
+	f.at(2 * time.Hour)
+	f.tick()
+	assert.Empty(t, f.notices("s2"), "a user's hold silences checkpoint wakeups")
+	assert.Len(t, f.notices("s3"), 1)
+
+	g := newCohortFixture(t)
+	require.NoError(t, os.Remove(filepath.Join(g.root, "proj", "PROJECT.md")))
+	g.at(2 * time.Hour)
+	g.tick()
+	assert.Empty(t, g.notices("s2"), "unreadable authority: fail closed")
+}

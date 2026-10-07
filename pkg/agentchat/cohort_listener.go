@@ -478,9 +478,15 @@ func (l *Listener) CohortTick(ctx context.Context) {
 		}
 	}
 	for _, r := range regs {
-		if !r.OffDuty && subs[r.SessionID] != nil && r.CheckpointDue(now) {
-			sends = append(sends, send{reg: r, text: checkpointNotice(r)})
+		if r.OffDuty || subs[r.SessionID] == nil || !r.CheckpointDue(now) {
+			continue
 		}
+		// A held agent gets no checkpoint wakeups; with the project
+		// unreadable, nobody does this tick (fail closed).
+		if p, err := load(r.Root, r.Project); err != nil || p.Held(r.Agent) {
+			continue
+		}
+		sends = append(sends, send{reg: r, text: checkpointNotice(r)})
 	}
 
 	delivered := map[int]bool{}
