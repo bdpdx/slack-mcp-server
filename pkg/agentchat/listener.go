@@ -68,6 +68,7 @@ type Listener struct {
 	sessLock  map[string]*sync.Mutex    // serializes deliveries per session
 	queues    map[string]chan []pending // per-session delivery queues (Async)
 	approvals map[string]*approval      // approval-hook requests by approval ID
+	views     cohortViews               // project views for cohort tracking
 }
 
 // queueDepth bounds each session's pending deliveries. Overflow is dropped;
@@ -175,7 +176,11 @@ func (l *Listener) HandleMessage(ctx context.Context, m Message) {
 		l.dropChannel(m.Channel)
 		return
 	}
-	if !m.Deliverable() || m.From(l.Self) {
+	if !m.Deliverable() {
+		return
+	}
+	l.trackCohort(ctx, m) // before the self filter: this home's own GM answers count
+	if m.From(l.Self) {
 		return
 	}
 	if l.approvalReply(m) {
@@ -608,6 +613,11 @@ func (l *Listener) Unsubscribe(sessionID, channel string) {
 	if channel != "" {
 		sub.Channels = slices.DeleteFunc(sub.Channels, func(c string) bool { return c == channel })
 	}
+	for k, r := range l.state.Cohort {
+		if r.SessionID == sessionID && (channel == "" || r.Channel == channel || len(sub.Channels) == 0) {
+			delete(l.state.Cohort, k)
+		}
+	}
 	if channel == "" || len(sub.Channels) == 0 {
 		delete(l.state.Subscriptions, sessionID)
 		if q := l.queues[sessionID]; q != nil {
@@ -693,6 +703,8 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 	case "approval":
 		decision, reason := l.TakeApproval(req.Approval)
 		return ControlResponse{OK: true, Decision: decision, Text: reason}
+	case "cohort-register", "cohort-leave", "cohort-duty", "cohort-checkpoint", "cohort-status":
+		return l.cohortControl(ctx, req)
 	case "status":
 		// Names save each hook a conversations.info call per channel.
 		sessions := l.Status()

@@ -69,9 +69,10 @@ trust new hooks in the next session.
   come to that channel with Allow / Deny / Answer in terminal buttons. Only the button can allow;
   a reply in the channel or the request's thread can deny (`no` plus a reason for the agent) or say
   `terminal`. With no answer in
-  10 minutes (`--wait`), the terminal asks instead, and the session's project
-  channel gets a `BLOCKED:` notice naming the agent and the tool (never its
-  input), so the other agents know it is stuck.
+  10 minutes (`--wait`), the terminal asks instead. A session registered in
+  a cohort (below) also posts a `BLOCKED:` notice naming the agent and the
+  tool (never its input) to its project channel, so the other agents know
+  it is stuck.
 - `Stop` → `stop-hook` (both hosts): when a turn you started by typing at the terminal ends, the
   agent's bot DMs you its final response. Turns started by Slack messages, background work or
   subagents send nothing. This replaces a Codex `notify` push notification.
@@ -92,3 +93,37 @@ Codex needs a running app-server to receive Slack messages, so for each Codex ho
   you can delete archived ones in the Slack UI. Only the project's creator (through their own agents)
   can do this.
 - Listener state and log: `<home>/slack-agent-chat/`.
+
+## Cohort liveness (`chat cohort`)
+
+For agents working in a `projects/` cohort (rezilient-project-state), the
+listener can watch for an unavailable GM and for 2-hourly checkpoints.
+Nothing here applies to a session that does not register.
+
+- `chat cohort register --project P --agent NAME` (after `watch start`)
+  validates `projects/P/PROJECT.md` and joins the session to P's cohort. The
+  project-state checkout is found through the `projects/` symlink, or given
+  with `--project-root`.
+- **GM availability.** The listener tracks each @mention of the GM (read
+  from `projects/P/gm.json`, or the first agent in PROJECT.md's succession
+  order). An answer is the GM's reply in that thread, a post @mentioning the
+  sender, or its ✅ on the mention; a delivery receipt or an unrelated post
+  is not. A GM `BLOCKED:` notice counts as unavailable at once. After 15
+  minutes unanswered, the first successor not on hold is told to claim
+  (`chat gm claim`); each further 10 minutes, the next one; then every
+  registered agent is told to alert the user. Every listener computes the
+  same steps from the same facts (deadlines count from the Slack message's own
+  timestamp), so agents in other homes and on other machines agree. Each
+  successor's slot is fixed: one that is off duty, or whose session is gone,
+  costs up to 10 minutes before the next is told; a listener cannot know
+  another home's duty or liveness, so it never skips ahead. The claim
+  itself (`chat gm claim`) is the authority check. A change of term in
+  gm.json drops stale watches.
+- **Holds.** `projects/P/holds/NAME` (the user's hold) keeps NAME out of
+  succession, and a held GM is not treated as an outage. `chat cohort duty
+  off` only silences this session; it never lifts a hold.
+- **Checkpoints.** Every 2 hours from the last completed checkpoint, each
+  registered agent is told to run its context check and post a drift line
+  with `chat cohort checkpoint --drift LINE`. Missed periods coalesce into
+  one notice.
+- `chat capabilities` prints the supported features for setup scripts.

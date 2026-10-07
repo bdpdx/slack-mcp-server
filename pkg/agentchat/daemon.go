@@ -16,6 +16,9 @@ import (
 const (
 	idleExit      = 60 * time.Second
 	sweepInterval = 60 * time.Second
+	// cohortInterval is how often cohort deadlines are checked; well under
+	// the 10-minute successor window.
+	cohortInterval = 30 * time.Second
 )
 
 // ParseEventsAPIMessage extracts a message event from a Socket Mode
@@ -162,7 +165,7 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 	}()
 
 	go func() {
-		idleSince, lastSweep := time.Now(), time.Now()
+		idleSince, lastSweep, lastCohort := time.Now(), time.Now(), time.Now()
 		tick := time.NewTicker(5 * time.Second)
 		defer tick.Stop()
 		for {
@@ -173,6 +176,10 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 				if now.Sub(lastSweep) >= sweepInterval {
 					l.Sweep(ctx)
 					lastSweep = now
+				}
+				if now.Sub(lastCohort) >= cohortInterval {
+					l.CohortTick(ctx)
+					lastCohort = now
 				}
 				if l.HasSubscriptions() {
 					idleSince = now

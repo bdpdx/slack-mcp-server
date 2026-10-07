@@ -134,6 +134,18 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
   post --channel CHANNEL --text TEXT [--thread TS]
                     post as the user (agents reply with conversations_add_message)
   ack CHANNEL TS    mark a message processed (adds a check-mark reaction)
+  cohort register --project P --agent NAME [--project-root DIR]
+                    join this session to projects/P's cohort: the listener
+                    then tells it when the GM looks unavailable (it is next
+                    in the succession order) and when its 2-hour checkpoint
+                    is due. Validates P's PROJECT.md (exit 2) and that this
+                    session watches #P (exit 3)
+  cohort leave|duty on|off|checkpoint --drift LINE --project P
+                    leave; go off or on duty (never lifts a user's hold);
+                    record a checkpoint and post the drift line
+  cohort status [--project P] [--format json|table]
+                    list this home's cohort registrations
+  capabilities      print this build's cohort capabilities as JSON
   relay-hook        UserPromptSubmit hook for %agents prompts (reads stdin)
   ask-hook          Claude PreToolUse hook for AskUserQuestion: ask in Slack
                     instead of the terminal while watching a project
@@ -221,6 +233,10 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = c.post(ctx, rest[1:])
 	case "ack":
 		err = c.ack(ctx, rest[1:])
+	case "cohort":
+		err = c.cohort(ctx, rest[1:])
+	case "capabilities":
+		err = c.capabilities()
 	case "relay-hook":
 		ctx, cancel := context.WithTimeout(ctx, relayTimeout)
 		defer cancel()
@@ -246,6 +262,10 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "slack-mcp-server chat: %v\n", err)
+		var ee exitError
+		if errors.As(err, &ee) {
+			return ee.code
+		}
 		return 1
 	}
 	return 0

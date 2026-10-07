@@ -25,6 +25,7 @@ type ControlRequest struct {
 	TS           string        `json:"ts,omitempty"`
 	Text         string        `json:"text,omitempty"`
 	Approval     string        `json:"approval,omitempty"`
+	Cohort       *CohortReg    `json:"cohort,omitempty"` // cohort-* ops
 }
 
 // ControlResponse is the listener's reply.
@@ -34,6 +35,8 @@ type ControlResponse struct {
 	Sessions []SessionStatus `json:"sessions,omitempty"`
 	Decision string          `json:"decision,omitempty"` // for op "approval"
 	Text     string          `json:"text,omitempty"`     // for op "approval": the reason
+	Cohort   []CohortReg     `json:"cohort,omitempty"`   // for cohort-* ops
+	Watches  []GMWatch       `json:"watches,omitempty"`  // for cohort-status: pending deadlines
 }
 
 // SessionStatus describes one subscribed session.

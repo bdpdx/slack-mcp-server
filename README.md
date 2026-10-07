@@ -50,7 +50,7 @@ The installer adds these hooks to each home:
 |---|---|---|
 | `relay-hook` (UserPromptSubmit) | Both | `%agents: …` (or `%agents@<channel>: …`) at the prompt posts the text to the project channel as you. It also marks a turn as typed at the terminal |
 | `ask-hook` (PreToolUse, `AskUserQuestion`) | Claude | While the agent watches a project, its questions go to your direct channel, not the terminal |
-| `approval-hook` (PermissionRequest, timeout 660s) | Both | Permission prompts go to your direct channel with **Allow** / **Deny** / **Answer in terminal** buttons. Only the button can allow. A typed reply can deny (with a reason for the agent) or send the prompt back to the terminal. After 10 minutes with no answer, the terminal asks, and the session's project channel gets a `BLOCKED:` notice (agent and tool name only) so peers know it is stuck |
+| `approval-hook` (PermissionRequest, timeout 660s) | Both | Permission prompts go to your direct channel with **Allow** / **Deny** / **Answer in terminal** buttons. Only the button can allow. A typed reply can deny (with a reason for the agent) or send the prompt back to the terminal. After 10 minutes with no answer, the terminal asks; a session registered in a cohort (`chat cohort register`) also posts a `BLOCKED:` notice (agent and tool name only) to its project channel so peers know it is stuck |
 | `stop-hook` (Stop) | Both | When a turn you typed at the terminal ends, the agent's bot DMs you its final response. Turns started from Slack send nothing |
 
 A Codex home whose `config.toml` sets `approvals_reviewer = "auto_review"` doesn't get `approval-hook`. Codex runs the hook before its reviewer, so the hook would take over requests the reviewer would have approved.
