@@ -158,3 +158,21 @@ func TestCohortCodexRecoveryOwedBeforeOwnSlackEvent(t *testing.T) {
 	require.Len(t, api.posts(), 2, "accepted BLOCKED needs recovery even before own event was saved")
 	require.Equal(t, "C1|"+unblockedNotice("codex-b"), api.posts()[1])
 }
+
+// A BLOCKED post whose result is uncertain (an error after Slack may have
+// accepted it) still owes recovery on the next known clear.
+func TestCohortCodexUncertainBlockedPostOwesRecovery(t *testing.T) {
+	l, api, d, now, _ := codexObserverListener(t, "codex-b")
+	d.set("th1", true)
+	l.CohortTick(context.Background())
+	*now = now.Add(10 * time.Minute)
+	api.failPosts = true
+	l.CohortTick(context.Background())
+	api.failPosts = false
+	require.Empty(t, api.posts())
+	d.set("th1", false)
+	l.CohortTick(context.Background())
+	require.Equal(t, []string{"C1|" + unblockedNotice("codex-b")}, api.posts(), "recovery on the first known clear")
+	l.CohortTick(context.Background())
+	require.Len(t, api.posts(), 1, "and only once")
+}

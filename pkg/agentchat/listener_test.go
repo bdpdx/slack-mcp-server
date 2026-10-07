@@ -25,6 +25,7 @@ type fakeSlack struct {
 	replyPage int                        // when > 0, replies are served this many per page
 	reactions []string                   // name|channel|ts
 	failReads bool                       // history and replies fail
+	failPosts bool                       // PostMessageContext fails (after "accepting")
 	posted    []string                   // channel|text
 }
 
@@ -99,6 +100,9 @@ func (f *fakeSlack) PostMessageContext(_ context.Context, channel string, option
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failPosts {
+		return "", "", errors.New("timeout")
+	}
 	f.posted = append(f.posted, channel+"|"+values.Get("text"))
 	return channel, NowTS(time.Now()), nil
 }

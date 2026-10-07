@@ -649,13 +649,16 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 			w = &approvalWait{since: now, posted: true}
 			l.approvalWaits[key] = w
 		}
+		// owed: a BLOCKED notice may be in Slack (posted, or attempted with
+		// an uncertain result), so a known clear must announce recovery.
+		owed := (w != nil && w.posted) || l.state.Announced[key]
 		l.mu.Unlock()
 		// Only an agent the cohort could act on is announced: on duty, on
 		// the roster, not held, in a readable project. Anything else drops
 		// a pending count (a notice already posted keeps its recovery).
 		p, err := l.projectView(ctx, r.Root, r.Project, false)
 		if err != nil || r.OffDuty || !p.InRoster(r.Agent) || p.Held(r.Agent) {
-			if w == nil || !w.posted {
+			if !owed {
 				l.mu.Lock()
 				delete(l.approvalWaits, key)
 				l.mu.Unlock()
@@ -679,14 +682,14 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 			// Unknown: never post on a guess, and never assert recovery.
 			// A pending count restarts; a posted notice waits for a known
 			// answer.
-			seen[key] = w != nil && w.posted
+			seen[key] = owed
 			if !seen[key] {
 				l.mu.Lock()
 				delete(l.approvalWaits, key)
 				l.mu.Unlock()
 			}
 		case !pr.waiting:
-			if w != nil && w.posted {
+			if owed {
 				seen[key] = !l.postUnblocked(ctx, r, key)
 				if seen[key] {
 					continue // retry the recovery notice next tick
