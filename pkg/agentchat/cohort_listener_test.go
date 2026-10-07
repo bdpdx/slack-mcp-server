@@ -296,7 +296,7 @@ func TestCohortStateSurvivesRestart(t *testing.T) {
 	assert.Len(t, f.notices("s2"), 1)
 }
 
-// Review fixes (PR #6, Fable): mentions inside threads, read errors, GM
+// Review fixes: mentions inside threads, read errors, GM
 // identity, pruning, and holds changing mid-escalation.
 
 func TestCohortMentionInsideAThreadIsAnswered(t *testing.T) {
