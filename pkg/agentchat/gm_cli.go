@@ -33,7 +33,7 @@ func (c *cli) gm(ctx context.Context, args []string) error {
 	claimID := fs.String("claim-id", "", "verify, release: this agent's claim ID")
 	to := fs.String("to", "", "release: the agent to hand GM to")
 	reason := fs.String("reason", "GM unavailable", "claim: why")
-	userDirected := fs.Bool("user-directed", false, "claim: the user told this agent to take over (skips the deadline check; say so in --reason)")
+	userDirected := fs.Bool("user-directed", false, "claim: the user told this agent to take over; skips only the deadline check (registration, duty, liveness and holds still apply); say so in --reason")
 	if _, err := parseArgs(fs, args[1:]); err != nil {
 		return err
 	}
@@ -103,12 +103,14 @@ func (c *cli) gm(ctx context.Context, args []string) error {
 		if *expectTerm < 0 || *expectGM == "" {
 			return errors.New("gm claim needs --expect-term and --expect-gm from the notice")
 		}
-		if !*userDirected {
-			if err := c.claimEligible(ctx, *project, *agent, *expectTerm, *expectGM); err != nil {
-				return exitError{exitGMLost, err}
-			}
-		} else if *reason == "GM unavailable" {
+		if *userDirected && *reason == "GM unavailable" {
 			return errors.New("a --user-directed claim needs --reason naming the user's instruction")
+		}
+		// Admission (registration, duty, fresh liveness, holds, the expected
+		// authority and, unless user-directed, a due and still-unanswered
+		// deadline) is rechecked after the lock and before every attempt.
+		a.Admit = func(ctx context.Context) error {
+			return c.claimEligible(ctx, *project, *agent, *expectTerm, *expectGM, *userDirected)
 		}
 		r, err := a.Claim(ctx, *expectTerm, *expectGM, *reason)
 		if err != nil {
@@ -138,13 +140,13 @@ const gmCommandTimeout = 2 * time.Minute
 // claimEligible asks this home's listener whether this session may claim:
 // registered as agent, on duty, not held, and a matching GM deadline due
 // with its successor slot reached.
-func (c *cli) claimEligible(ctx context.Context, project, agent string, term int, gm string) error {
+func (c *cli) claimEligible(ctx context.Context, project, agent string, term int, gm string, userDirected bool) error {
 	sub, err := detectSession(os.Getenv)
 	if err != nil {
 		return err
 	}
 	resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "cohort-claim-check", SessionID: sub.SessionID,
-		Cohort: &CohortReg{Project: project, Agent: agent}, Expect: &GMState{Term: term, GM: gm}})
+		Cohort: &CohortReg{Project: project, Agent: agent}, Expect: &GMState{Term: term, GM: gm}, UserDirected: userDirected})
 	if err != nil {
 		return errors.New("no slack-agent-chat listener is running")
 	}

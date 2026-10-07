@@ -3,6 +3,7 @@ package agentchat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -143,4 +144,34 @@ func TestGMReceiptRequiresExactState(t *testing.T) {
 	r, err := c.Claim(context.Background(), 0, "claude", "x")
 	require.NoError(t, err)
 	assert.NotEqual(t, ClaimWon, r.Outcome)
+}
+
+// Admission is rechecked before every attempt, including a rebuild.
+func TestGMAdmissionRecheckedOnRebuild(t *testing.T) {
+	_, clones := gmRepo(t, 2)
+	c := newClaimer(clones[0], "codex-b")
+	calls := 0
+	c.Admit = func(context.Context) error {
+		calls++
+		if calls > 1 {
+			return errors.New("the deadline was answered")
+		}
+		return nil
+	}
+	fired := false
+	c.beforePush = func() {
+		if fired {
+			return
+		}
+		fired = true
+		other := clones[1]
+		require.NoError(t, os.WriteFile(filepath.Join(other, "proj", "NOTES.md"), []byte("x\n"), 0o644))
+		gitT(t, other, "add", "-A")
+		gitT(t, other, "commit", "-qm", "unrelated")
+		gitT(t, other, "push", "-q", "origin", "HEAD:main")
+	}
+	r, err := c.Claim(context.Background(), 0, "claude", "x")
+	require.NoError(t, err)
+	assert.Equal(t, ClaimRefused, r.Outcome, "the rebuild re-ran admission and it no longer holds")
+	assert.Equal(t, 2, calls)
 }

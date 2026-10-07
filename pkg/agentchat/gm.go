@@ -53,6 +53,10 @@ type GMAuthority struct {
 	Project string
 	Agent   string // the caller
 	Env     []string
+	// Admit, when set, is the caller's eligibility check. It runs after the
+	// claim lock is taken and again before every attempt, so a claim never
+	// proceeds on an admission that went stale while waiting or rebuilding.
+	Admit func(ctx context.Context) error
 
 	beforePush func()            // tests: runs between building and pushing
 	pushErr    func(error) error // tests: rewrites the push result
@@ -230,6 +234,11 @@ func (a *GMAuthority) transition(ctx context.Context, valid func(*CohortProject)
 		// never a reason to mint another term.
 		if st, ok := minted[p.GM.ClaimID]; ok && st == p.GM {
 			return ClaimResult{Outcome: ClaimWon, State: p.GM}, nil
+		}
+		if a.Admit != nil {
+			if err := a.Admit(ctx); err != nil {
+				return ClaimResult{Outcome: ClaimRefused, State: p.GM, Reason: err.Error()}, nil
+			}
 		}
 		if outcome, reason := valid(p); outcome != "" {
 			return ClaimResult{Outcome: outcome, State: p.GM, Reason: reason}, nil
