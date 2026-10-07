@@ -35,6 +35,7 @@ type SlackAPI interface {
 	GetConversationHistoryContext(ctx context.Context, params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error)
 	GetConversationRepliesContext(ctx context.Context, params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error)
 	AddReactionContext(ctx context.Context, name string, item slack.ItemRef) error
+	PostMessageContext(ctx context.Context, channel string, options ...slack.MsgOption) (string, string, error)
 }
 
 // UserAPI is the part of the owner's *slack.Client (user token) the listener
@@ -59,16 +60,18 @@ type Listener struct {
 	// Users acts as the owner; nil leaves <project>__users alone.
 	Users UserAPI
 
-	mu        sync.Mutex
-	state     *State
-	repeats   *RepeatFilter
-	users     map[string]*slack.User
-	chNames   map[string]string
-	relays    map[string]time.Time      // expected %agents echoes: session|channel|text → expiry
-	sessLock  map[string]*sync.Mutex    // serializes deliveries per session
-	queues    map[string]chan []pending // per-session delivery queues (Async)
-	approvals map[string]*approval      // approval-hook requests by approval ID
-	views     cohortViews               // project views for cohort tracking
+	mu            sync.Mutex
+	state         *State
+	repeats       *RepeatFilter
+	users         map[string]*slack.User
+	chNames       map[string]string
+	relays        map[string]time.Time      // expected %agents echoes: session|channel|text → expiry
+	sessLock      map[string]*sync.Mutex    // serializes deliveries per session
+	queues        map[string]chan []pending // per-session delivery queues (Async)
+	approvals     map[string]*approval      // approval-hook requests by approval ID
+	views         cohortViews               // project views for cohort tracking
+	approvalWaits map[string]*approvalWait  // Codex sessions seen waiting on an approval, by session
+	unobservable  map[string]bool           // Codex sessions whose daemon hides approval waits (warned once)
 }
 
 // queueDepth bounds each session's pending deliveries. Overflow is dropped;

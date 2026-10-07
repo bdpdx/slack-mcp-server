@@ -241,3 +241,27 @@ func TestClientMessageIDDeterministic(t *testing.T) {
 	assert.NotEqual(t, a, clientMessageID("s", "C", "2.0"))
 	assert.Contains(t, a, "slack-agent-chat-")
 }
+
+func TestCodexWaitingOnApproval(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		status        map[string]any
+		waiting, seen bool
+	}{
+		{"waiting", map[string]any{"type": "active", "activeFlags": []any{"waitingOnApproval"}}, true, true},
+		{"user input is not an approval", map[string]any{"type": "active", "activeFlags": []any{"waitingOnUserInput"}}, false, true},
+		{"active, no flags", map[string]any{"type": "active", "activeFlags": []any{}}, false, true},
+		{"older daemon without the field", map[string]any{"type": "active"}, false, false},
+		{"idle", map[string]any{"type": "idle"}, false, true},
+	} {
+		f := &fakeCodex{respond: func(m string, _ map[string]any) (any, string) {
+			return map[string]any{"thread": map[string]any{"id": "th", "status": tc.status}}, ""
+		}}
+		sock := f.start(t)
+		waiting, seen, err := CodexWaitingOnApproval(context.Background(), sock, "th")
+		require.NoError(t, err, tc.name)
+		assert.Equal(t, tc.waiting, waiting, tc.name)
+		assert.Equal(t, tc.seen, seen, tc.name)
+		assert.Equal(t, []string{"initialize", "initialized", "thread/read"}, f.methods(), "%s: metadata only, never resume or approve", tc.name)
+	}
+}

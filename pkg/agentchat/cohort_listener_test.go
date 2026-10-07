@@ -12,6 +12,7 @@ import (
 	"github.com/slack-go/slack"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 // cohortFixture is two homes, one per agent as in real use: listener l
@@ -473,4 +474,88 @@ func TestCohortClaimCheck(t *testing.T) {
 	assert.True(t, check(f.l, "s2", "codex-b", 0, "claude").OK, "an earlier successor stays eligible")
 	require.True(t, f.l.Control(context.Background(), ControlRequest{Op: "cohort-duty", SessionID: "s2", Text: "off", Cohort: &CohortReg{Project: "proj"}}).OK)
 	assert.False(t, check(f.l, "s2", "codex-b", 0, "claude").OK, "off duty")
+}
+
+// probeDeliverer is a fakeDeliverer whose sessions can report waiting on an
+// approval, as Codex threads do through thread/read.
+type probeDeliverer struct {
+	fakeDeliverer
+	mu      sync.Mutex
+	waiting map[string]bool
+	errs    map[string]error
+}
+
+func (p *probeDeliverer) WaitingOnApproval(_ context.Context, sub *Subscription) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.waiting[sub.SessionID], p.errs[sub.SessionID]
+}
+
+func (p *probeDeliverer) set(session string, waiting bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.waiting == nil {
+		p.waiting = map[string]bool{}
+	}
+	p.waiting[session] = waiting
+}
+
+func TestCohortCodexApprovalWaitPostsBlocked(t *testing.T) {
+	api := newFakeSlack()
+	d := &probeDeliverer{}
+	root := t.TempDir()
+	writeProject(t, root, "proj", "<!-- cohort-succession: claude, codex-b -->\n")
+	now := time.Unix(1_800_000_000, 0)
+	l, err := NewListener(api, d, Identity{UserID: "UCB", BotID: "BCB"}, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
+	require.NoError(t, err)
+	l.Now = func() time.Time { return now }
+	sub := &Subscription{SessionID: "th1", Kind: KindCodex, ThreadID: "th1", Channels: []string{"C1"}}
+	require.NoError(t, l.Subscribe(context.Background(), sub, 0))
+	resp := l.Control(context.Background(), ControlRequest{Op: "cohort-register", SessionID: "th1",
+		Cohort: &CohortReg{Project: "proj", Agent: "codex-b", Root: root, Channel: "C1"}})
+	require.True(t, resp.OK, resp.Error)
+
+	d.set("th1", true)
+	l.CohortTick(context.Background())
+	now = now.Add(9 * time.Minute)
+	l.CohortTick(context.Background())
+	assert.Empty(t, api.posts(), "not yet 10 minutes")
+	now = now.Add(time.Minute)
+	l.CohortTick(context.Background())
+	l.CohortTick(context.Background())
+	require.Len(t, api.posts(), 1, "posted once")
+	assert.Equal(t, "C1|"+blockedNotice("codex-b", "", defaultApprovalWait), api.posts()[0])
+
+	// The flag clears, then a new wait starts its own 10 minutes.
+	d.set("th1", false)
+	l.CohortTick(context.Background())
+	d.set("th1", true)
+	now = now.Add(time.Minute)
+	l.CohortTick(context.Background())
+	now = now.Add(5 * time.Minute)
+	l.CohortTick(context.Background())
+	assert.Len(t, api.posts(), 1)
+}
+
+func TestCohortCodexProbeFailureResetsTheWait(t *testing.T) {
+	api := newFakeSlack()
+	d := &probeDeliverer{errs: map[string]error{}}
+	root := t.TempDir()
+	writeProject(t, root, "proj", "<!-- cohort-succession: claude, codex-b -->\n")
+	now := time.Unix(1_800_000_000, 0)
+	l, err := NewListener(api, d, Identity{UserID: "UCB", BotID: "BCB"}, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
+	require.NoError(t, err)
+	l.Now = func() time.Time { return now }
+	require.NoError(t, l.Subscribe(context.Background(), &Subscription{SessionID: "th1", Kind: KindCodex, ThreadID: "th1", Channels: []string{"C1"}}, 0))
+	require.True(t, l.Control(context.Background(), ControlRequest{Op: "cohort-register", SessionID: "th1",
+		Cohort: &CohortReg{Project: "proj", Agent: "codex-b", Root: root, Channel: "C1"}}).OK)
+	d.set("th1", true)
+	l.CohortTick(context.Background())
+	now = now.Add(8 * time.Minute)
+	d.errs["th1"] = ErrCodexUnavailable
+	l.CohortTick(context.Background())
+	delete(d.errs, "th1")
+	now = now.Add(3 * time.Minute)
+	l.CohortTick(context.Background())
+	assert.Empty(t, api.posts(), "an unobservable gap restarts the count: never post on a guess")
 }

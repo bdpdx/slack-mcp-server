@@ -25,6 +25,7 @@ type fakeSlack struct {
 	replyPage int                        // when > 0, replies are served this many per page
 	reactions []string                   // name|channel|ts
 	failReads bool                       // history and replies fail
+	posted    []string                   // channel|text
 }
 
 func newFakeSlack() *fakeSlack {
@@ -91,6 +92,23 @@ func (f *fakeSlack) GetConversationRepliesContext(_ context.Context, p *slack.Ge
 	}
 	return all[start:end], next != "", next, nil
 }
+func (f *fakeSlack) PostMessageContext(_ context.Context, channel string, options ...slack.MsgOption) (string, string, error) {
+	_, values, err := slack.UnsafeApplyMsgOptions("", channel, "", options...)
+	if err != nil {
+		return "", "", err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.posted = append(f.posted, channel+"|"+values.Get("text"))
+	return channel, NowTS(time.Now()), nil
+}
+
+func (f *fakeSlack) posts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.posted...)
+}
+
 func (f *fakeSlack) AddReactionContext(_ context.Context, name string, item slack.ItemRef) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

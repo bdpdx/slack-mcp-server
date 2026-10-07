@@ -524,6 +524,8 @@ func (l *Listener) CohortTick(ctx context.Context) {
 		sends = append(sends, send{reg: r, text: checkpointNotice(r)})
 	}
 
+	l.checkApprovalWaits(ctx, regs, subs, now)
+
 	delivered := map[int]bool{}
 	for i, s := range sends {
 		sub := subs[s.reg.SessionID]
@@ -562,6 +564,90 @@ func (l *Listener) CohortTick(ctx context.Context) {
 		if err := l.state.Save(l.StateFile); err != nil {
 			l.Log.Error("saving state failed", zap.Error(err))
 		}
+	}
+}
+
+// errApprovalUnobservable means a session's runtime does not expose whether
+// it is waiting on an approval.
+var errApprovalUnobservable = errors.New("approval waits are not observable for this session")
+
+// approvalProber is implemented by deliverers that can tell whether a
+// session is stuck on an approval prompt (Codex, through thread/read).
+type approvalProber interface {
+	WaitingOnApproval(ctx context.Context, sub *Subscription) (bool, error)
+}
+
+// approvalProbeTimeout bounds one thread/read, so a stuck daemon cannot
+// stall the cohort tick.
+const approvalProbeTimeout = 10 * time.Second
+
+// warnUnobservable logs, once per session, that its Codex daemon does not
+// report approval waits, so no BLOCKED notice can be posted for it.
+func (l *Listener) warnUnobservable(session string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.unobservable == nil {
+		l.unobservable = map[string]bool{}
+	}
+	if l.unobservable[session] {
+		return
+	}
+	l.unobservable[session] = true
+	l.Log.Warn("this Codex daemon does not report approval waits; no BLOCKED notice can be posted for the session", zap.String("session", session))
+}
+
+type approvalWait struct {
+	since  time.Time
+	posted bool
+}
+
+// checkApprovalWaits posts BLOCKED for a registered session that has been
+// waiting on an approval for the approval-hook's wait (10 minutes): the
+// Codex counterpart of the Claude hook's notice. Each wait posts once; a
+// cleared flag or a failed observation resets it, so nothing is ever posted
+// on a guess. The count starts when this listener first sees the wait.
+func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, subs map[string]*Subscription, now time.Time) {
+	prober, ok := l.Deliverer.(approvalProber)
+	if !ok {
+		return
+	}
+	for _, r := range regs {
+		sub := subs[r.SessionID]
+		if sub == nil || sub.Kind != KindCodex {
+			continue
+		}
+		pctx, cancel := context.WithTimeout(ctx, approvalProbeTimeout)
+		waiting, err := prober.WaitingOnApproval(pctx, sub)
+		cancel()
+		if errors.Is(err, errApprovalUnobservable) {
+			l.warnUnobservable(r.SessionID)
+		}
+		l.mu.Lock()
+		if l.approvalWaits == nil {
+			l.approvalWaits = map[string]*approvalWait{}
+		}
+		w := l.approvalWaits[r.SessionID]
+		if err != nil || !waiting {
+			delete(l.approvalWaits, r.SessionID)
+			l.mu.Unlock()
+			continue
+		}
+		if w == nil {
+			w = &approvalWait{since: now}
+			l.approvalWaits[r.SessionID] = w
+		}
+		due := !w.posted && now.Sub(w.since) >= defaultApprovalWait
+		l.mu.Unlock()
+		if !due {
+			continue
+		}
+		if _, _, err := l.API.PostMessageContext(ctx, r.Channel, slack.MsgOptionText(blockedNotice(r.Agent, "", defaultApprovalWait), false)); err != nil {
+			l.Log.Warn("posting a Codex BLOCKED notice failed", zap.String("session", r.SessionID), zap.Error(err))
+			continue
+		}
+		l.mu.Lock()
+		w.posted = true
+		l.mu.Unlock()
 	}
 }
 

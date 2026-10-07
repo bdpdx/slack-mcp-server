@@ -35,7 +35,7 @@ func (e exitError) Unwrap() error { return e.err }
 
 // capabilities are the cohort features this build supports, for
 // `chat capabilities`; setup scripts check them instead of assuming.
-var capabilities = []string{"blocked-v1", "cohort-v1", "gm-claim-v1"}
+var capabilities = []string{"blocked-v1", "codex-observe-v1", "cohort-v1", "gm-claim-v1"}
 
 func (c *cli) capabilities() error {
 	c.printJSON(map[string]any{"version": version.Version, "capabilities": capabilities})

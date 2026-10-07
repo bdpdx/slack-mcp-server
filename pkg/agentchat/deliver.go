@@ -53,3 +53,20 @@ func (d *HostDeliverer) Alive(ctx context.Context, sub *Subscription) (bool, err
 func clientMessageID(session, channel, ts string) string {
 	return "slack-agent-chat-" + uuid.NewSHA1(uuid.NameSpaceURL, []byte(session+"\x00"+channel+"\x00"+ts)).String()
 }
+
+// WaitingOnApproval reports whether sub's session is stuck on an approval
+// prompt. Only Codex threads expose that (through thread/read); Claude
+// sessions report it themselves through the approval hook.
+func (d *HostDeliverer) WaitingOnApproval(ctx context.Context, sub *Subscription) (bool, error) {
+	if sub.Kind != KindCodex {
+		return false, nil
+	}
+	waiting, known, err := CodexWaitingOnApproval(ctx, d.CodexSocket, sub.ThreadID)
+	if err != nil {
+		return false, err
+	}
+	if !known {
+		return false, errApprovalUnobservable
+	}
+	return waiting, nil
+}
