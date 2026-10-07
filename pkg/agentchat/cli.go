@@ -140,21 +140,24 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
                     in the succession order) and when its 2-hour checkpoint
                     is due. Validates P's PROJECT.md (exit 2) and that this
                     session watches #P (exit 3)
-  cohort leave|duty on|off|checkpoint --drift LINE --project P
+  cohort leave|duty on|off|checkpoint --drift LINE [--context NOTE] --project P
                     leave; go off or on duty (never lifts a user's hold);
-                    record a checkpoint and post the drift line
+                    record a checkpoint and post the drift line (--context
+                    goes only to this home's local checkpoints.log)
   cohort status [--project P] [--format json|table]
                     list this home's cohort registrations
   gm status|init|claim|verify|release --project P [--agent NAME]
                     the project's GM authority (gm.json on project-state's
-                    origin/main). init gives a new project's first GM term
-                    1. claim --expect-term T --expect-gm G takes over by
-                    compare-and-swap, only when this home's listener has a
-                    due deadline reaching this agent's slot (or with
-                    --user-directed --reason R); exit 4 lost or refused, 5
-                    authority unavailable. verify --term T --claim-id ID
-                    before each GM-file write (exit 4: stop); release --term
-                    T --claim-id ID --to AGENT hands GM back
+                    origin/main; origin must be rezilient-co/rezilient-
+                    project-state on GitHub). init gives a new project's first
+                    GM term 1. claim --expect-term T --expect-gm G takes over by
+                    compare-and-swap, only when this home's listener has a due
+                    deadline reaching this agent's slot (or with --user-directed
+                    --reason R, which skips only the deadline test;
+                    registration, duty, liveness and holds still apply); exit 4
+                    lost or refused, 5 authority unavailable. verify --term T
+                    --claim-id ID before each GM-file write (exit 4: stop);
+                    release --term T --claim-id ID --to AGENT hands GM back
   capabilities      print this build's cohort capabilities as JSON
   relay-hook        UserPromptSubmit hook for %agents prompts (reads stdin)
   ask-hook          Claude PreToolUse hook for AskUserQuestion: ask in Slack

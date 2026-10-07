@@ -52,6 +52,9 @@ func (c *cli) gm(ctx context.Context, args []string) error {
 	if err != nil {
 		return exitError{exitGMUnavailable, err}
 	}
+	if err := checkProjectState(ctx, dir); err != nil {
+		return exitError{exitGMUnavailable, err}
+	}
 	a := &GMAuthority{Root: dir, Project: *project, Agent: *agent}
 	if args[0] != "status" && *agent == "" {
 		return fmt.Errorf("gm %s needs --agent", args[0])

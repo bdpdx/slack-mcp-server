@@ -2,11 +2,13 @@ package agentchat
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -54,6 +56,32 @@ func projectStateRoot(dir string) (string, error) {
 	}
 }
 
+// projectStateOrigin is what a project-state checkout's origin must name:
+// GM authority and holds are read from, and claims pushed to, that remote.
+var projectStateOrigin = regexp.MustCompile(`^(git@github\.com:|ssh://git@github\.com/|https://github\.com/)rezilient-co/rezilient-project-state(\.git)?/?$`)
+
+// checkProjectState refuses a root whose origin is not rezilient-project-state
+// or that has no fetched origin/main.
+func checkProjectState(ctx context.Context, dir string) error {
+	// Both directions: authority is fetched from the fetch URL, and claims are
+	// pushed to the push URL(s) (pushurl and pushInsteadOf apply there).
+	for _, args := range [][]string{{"remote", "get-url", "origin"}, {"remote", "get-url", "--push", "--all", "origin"}} {
+		out, err := gitIn(ctx, dir, nil, nil, args...)
+		if err != nil {
+			return fmt.Errorf("%s has no origin remote", dir)
+		}
+		for _, url := range strings.Fields(out) {
+			if !projectStateOrigin.MatchString(url) {
+				return fmt.Errorf("%s: origin %s is not rezilient-co/rezilient-project-state", dir, url)
+			}
+		}
+	}
+	if _, err := gitIn(ctx, dir, nil, nil, "rev-parse", "--verify", "-q", "refs/remotes/origin/main"); err != nil {
+		return fmt.Errorf("%s is not a project-state checkout with origin/main", dir)
+	}
+	return nil
+}
+
 func (c *cli) cohort(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: cohort register|leave|checkpoint|duty|status")
@@ -64,7 +92,7 @@ func (c *cli) cohort(ctx context.Context, args []string) error {
 	agent := fs.String("agent", "", "this agent's Slack name (register)")
 	root := fs.String("project-root", "", "the rezilient-project-state checkout (default: from the projects/ symlink)")
 	drift := fs.String("drift", "", "the drift line to post (checkpoint)")
-	_ = fs.String("context", "", "a private note on the context self-check (checkpoint); never posted")
+	contextNote := fs.String("context", "", "a private note on the context self-check (checkpoint); kept in this home's local checkpoint log, never posted")
 	format := fs.String("format", "json", "json or table (status)")
 	rest, err := parseArgs(fs, args[1:])
 	if err != nil {
@@ -140,8 +168,8 @@ func (c *cli) cohort(ctx context.Context, args []string) error {
 		}
 		// The root must be a project-state checkout with a fetched origin/main:
 		// that is where GM authority and holds are read from.
-		if _, err := gitIn(ctx, dir, nil, nil, "rev-parse", "--verify", "-q", "refs/remotes/origin/main"); err != nil {
-			return exitError{exitCohortInvalid, fmt.Errorf("%s is not a project-state checkout with origin/main", dir)}
+		if err := checkProjectState(ctx, dir); err != nil {
+			return exitError{exitCohortInvalid, err}
 		}
 		if _, err := LoadCohortProjectAt(ctx, dir, *project, "refs/remotes/origin/main"); err != nil {
 			return exitError{exitCohortInvalid, err}
@@ -197,6 +225,11 @@ func (c *cli) cohort(ctx context.Context, args []string) error {
 			}
 		}
 		return exitError{code, errors.New(resp.Error)}
+	}
+	if req.Op == "cohort-checkpoint" && strings.TrimSpace(*contextNote) != "" {
+		if err := c.logCheckpoint(*project, *drift, *contextNote); err != nil {
+			fmt.Fprintf(c.stderr, "warning: the checkpoint is recorded, but its context note was not logged: %v\n", err)
+		}
 	}
 	out := map[string]any{"ok": true, "cohort": cohortJSON(resp.Cohort)}
 	if req.Op == "cohort-register" && len(resp.Cohort) == 1 {
@@ -254,4 +287,28 @@ func (c *cli) registeredIn(ctx context.Context, session, channel string) bool {
 		}
 	}
 	return false
+}
+
+// logCheckpoint appends a checkpoint's private context note to this home's
+// local log, readable only by its owner. It never leaves the machine.
+func (c *cli) logCheckpoint(project, drift, note string) error {
+	line, err := json.Marshal(map[string]string{"at": time.Now().Format(time.RFC3339), "project": project,
+		"drift": strings.TrimSpace(drift), "context": strings.TrimSpace(note)})
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(c.home.StateDir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(c.home.StateDir, "checkpoints.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	// The mode only applies on creation: tighten a file that already exists.
+	if err := f.Chmod(0o600); err != nil {
+		return err
+	}
+	_, err = f.Write(append(line, '\n'))
+	return err
 }
