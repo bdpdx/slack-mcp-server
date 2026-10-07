@@ -688,6 +688,12 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 			// A pending count restarts; a posted notice waits for a known
 			// answer.
 			seen[key] = owed
+			if owed && w != nil && !w.posted {
+				// Recovery stays owed, but the observed count restarts.
+				l.mu.Lock()
+				w.since = now
+				l.mu.Unlock()
+			}
 			if !seen[key] {
 				l.mu.Lock()
 				delete(l.approvalWaits, key)
@@ -713,6 +719,17 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 			if w.posted || now.Sub(w.since) < defaultApprovalWait {
 				continue
 			}
+			// Our own notice already reached Slack (its event created our
+			// watch): that is delivery, so do not post a duplicate.
+			l.mu.Lock()
+			delivered := l.ownBlockedWatchLocked(r)
+			if delivered {
+				w.posted = true
+			}
+			l.mu.Unlock()
+			if delivered {
+				continue
+			}
 			// Record the announcement before making it: a crash after
 			// Slack accepts the post must still leave a recovery owed.
 			l.mu.Lock()
@@ -731,9 +748,14 @@ func (l *Listener) checkApprovalWaits(ctx context.Context, regs []CohortReg, sub
 			w.posted = true
 			l.mu.Unlock()
 		default:
-			// Still waiting but now ineligible: keep the posted notice's
-			// state for its eventual recovery.
+			// Still waiting but now ineligible: keep the owed recovery; an
+			// unposted retry's observed count restarts.
 			seen[key] = true
+			if !w.posted {
+				l.mu.Lock()
+				w.since = now
+				l.mu.Unlock()
+			}
 		}
 	}
 	// A registration that is gone takes its wait with it, so a later

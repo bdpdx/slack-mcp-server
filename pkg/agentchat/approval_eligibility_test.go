@@ -2,6 +2,7 @@ package agentchat
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -196,4 +197,73 @@ func TestCohortCodexAnnouncementIntentRetriesAfterRestart(t *testing.T) {
 	*now = now.Add(10 * time.Minute)
 	restarted.CohortTick(context.Background())
 	require.NotEmpty(t, api.posts(), "an uncertain intent must not suppress BLOCKED forever while the thread keeps waiting")
+}
+
+// A failed read restarts the observed count even while recovery is owed.
+func TestCohortCodexOwedWaitRestartsCountOnProbeError(t *testing.T) {
+	l, api, d, now, _ := codexObserverListener(t, "codex-b")
+	d.set("th1", true)
+	l.CohortTick(context.Background())
+	*now = now.Add(10 * time.Minute)
+	api.failPosts = true
+	l.CohortTick(context.Background()) // owed through the announcement record
+	api.failPosts = false
+	require.Empty(t, api.posts())
+	*now = now.Add(5 * time.Minute)
+	d.mu.Lock()
+	d.errs = map[string]error{"th1": ErrCodexUnavailable}
+	d.mu.Unlock()
+	l.CohortTick(context.Background())
+	d.mu.Lock()
+	d.errs = nil
+	d.mu.Unlock()
+	*now = now.Add(9 * time.Minute)
+	l.CohortTick(context.Background())
+	require.Empty(t, api.posts(), "9 minutes observed since the error: not yet")
+	*now = now.Add(time.Minute)
+	l.CohortTick(context.Background())
+	require.Equal(t, []string{"C1|" + blockedNotice("codex-b", "", defaultApprovalWait)}, api.posts())
+}
+
+// An errored post that Slack did accept shows up as our own watch; that
+// counts as delivery, so no duplicate is posted.
+func TestCohortCodexOwnWatchCountsAsDelivery(t *testing.T) {
+	l, api, d, now, _ := codexObserverListener(t, "codex-b")
+	d.set("th1", true)
+	l.CohortTick(context.Background())
+	*now = now.Add(10 * time.Minute)
+	api.failPosts = true
+	l.CohortTick(context.Background())
+	api.failPosts = false
+	l.trackCohort(context.Background(), Message{Channel: "C1", User: "UCB", Text: blockedNotice("codex-b", "", defaultApprovalWait), TS: NowTS(*now)})
+	*now = now.Add(time.Minute)
+	l.CohortTick(context.Background())
+	require.Empty(t, api.posts(), "no duplicate after the accepted notice")
+	d.set("th1", false)
+	l.CohortTick(context.Background())
+	require.Equal(t, []string{"C1|" + unblockedNotice("codex-b")}, api.posts())
+}
+
+// After a restart, an unconfirmed announcement's retry count restarts on an
+// unknown read.
+func TestCohortCodexUnconfirmedRetryCountResetsOnUnknown(t *testing.T) {
+	l, api, d, now, _ := codexObserverListener(t, "codex-b")
+	d.set("th1", true)
+	l.CohortTick(context.Background())
+	*now = now.Add(10 * time.Minute)
+	api.failPosts = true
+	l.CohortTick(context.Background())
+	restarted, err := NewListener(api, d, Identity{UserID: "UCB", BotID: "BCB"}, "UBR", l.StateFile, l.Log)
+	require.NoError(t, err)
+	restarted.Now = func() time.Time { return *now }
+	api.failPosts = false
+	restarted.CohortTick(context.Background())
+	*now = now.Add(8 * time.Minute)
+	d.errs = map[string]error{"th1": errors.New("unknown observation")}
+	restarted.CohortTick(context.Background())
+	d.errs = nil
+	*now = now.Add(3 * time.Minute)
+	restarted.CohortTick(context.Background())
+	require.Empty(t, api.posts(), "recovery owed must not turn an unknown gap into continuous observed waiting")
+	require.True(t, restarted.state.Announced[cohortKey("th1", "proj")], "recovery intent stays durable while the count restarts")
 }
