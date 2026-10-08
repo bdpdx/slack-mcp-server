@@ -600,3 +600,195 @@ func TestCohortCodexWaitIsPerRegistration(t *testing.T) {
 	assert.Len(t, api.posts(), 3)
 	assert.Equal(t, "C2|"+blockedNotice("codex-b", "", defaultApprovalWait), api.posts()[2])
 }
+
+// A mention of a new GM arriving while each home's cached view still names
+// the former one is classified against a re-read view, so the single
+// unanswered mention still produces its successor notice.
+func TestCohortNewGMMentionSurvivesCachedFormerAuthority(t *testing.T) {
+	f := newCohortFixture(t)
+	// Registration primed each home's view with the original term-0 GM.
+	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "gm.json"),
+		[]byte(`{"term":1,"gm":"codex-r","claim_id":"changed-authority"}`), 0o600))
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100",
+		User: "UBR", Text: "<@UCR> please decide"})
+	f.at(26 * time.Minute)
+	f.tick()
+	f.tick()
+	require.Len(t, f.notices("s2"), 1, "the mention survives the stale view")
+}
+
+// A BLOCKED notice from a new GM the cached view does not yet name is still
+// an outage.
+func TestCohortNewGMBlockedSurvivesCachedFormerAuthority(t *testing.T) {
+	f := newCohortFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "gm.json"),
+		[]byte(`{"term":1,"gm":"codex-r","claim_id":"changed-authority"}`), 0o600))
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100",
+		User: "UCR", Text: "BLOCKED: codex-r has waited 10m0s for approval of Bash; it is now waiting at the terminal."})
+	f.at(11 * time.Minute)
+	f.tick()
+	require.Len(t, f.notices("s2"), 1, "the next live successor is told")
+}
+
+// Ordinary chatter that names no other roster agent does not force a re-read.
+func TestCohortRecheckOnlyForPossibleGMSignals(t *testing.T) {
+	f := newCohortFixture(t)
+	p, err := f.l.projectView(context.Background(), f.root, "proj", false)
+	require.NoError(t, err)
+	assert.False(t, f.l.mayNameUncachedGM(context.Background(), Message{User: "UCR", Text: "status update"}, p))
+	assert.False(t, f.l.mayNameUncachedGM(context.Background(), Message{User: "UBR", Text: "<@UCL> please decide"}, p), "the cached GM")
+	assert.True(t, f.l.mayNameUncachedGM(context.Background(), Message{User: "UBR", Text: "<@UCR> please decide"}, p))
+	assert.True(t, f.l.mayNameUncachedGM(context.Background(), Message{User: "UCR", Text: "BLOCKED: codex-r has waited"}, p))
+	assert.False(t, f.l.mayNameUncachedGM(context.Background(), Message{User: "UCR", Text: "<@UCR> self"}, p), "a self-mention")
+}
+
+// When the new authority is not yet visible on arrival (a push still
+// landing, or from another machine before the next fetch), the mention is
+// kept and classified on a later tick, still counting from its own time. A
+// second, non-GM mention in the same message does not hold it back.
+func TestCohortNewGMMentionReplayedAfterAuthorityLands(t *testing.T) {
+	f := newCohortFixture(t)
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100",
+		User: "UBR", Text: "<@UCR> <@UCB> please decide"})
+	assert.Equal(t, 0, f.watchCount(), "codex-r is not GM in any view yet")
+	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "gm.json"),
+		[]byte(`{"term":1,"gm":"codex-r","claim_id":"changed-authority"}`), 0o600))
+	f.at(2 * time.Minute)
+	f.tick() // the refreshed view now names codex-r; the kept mention is classified
+	require.Equal(t, 2, f.watchCount(), "one watch per home")
+	f.at(26 * time.Minute)
+	f.tick()
+	f.tick()
+	require.Len(t, f.notices("s2"), 1, "deadlines count from the mention, not the replay")
+}
+
+// A kept mention the new GM already answered before its authority became
+// visible must not raise a false outage when it is replayed.
+func TestCohortReplayedMentionAlreadyAnsweredIsDropped(t *testing.T) {
+	f := newCohortFixture(t)
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100",
+		User: "UBR", Text: "<@UCR> please decide"})
+	reply := slack.Message{Msg: slack.Msg{User: "UCR", Timestamp: "1800000010.000100", ThreadTimestamp: "1800000000.000100", Text: "on it"}}
+	parent := slack.Message{Msg: slack.Msg{User: "UBR", Timestamp: "1800000000.000100", Text: "<@UCR> please decide"}}
+	f.api.mu.Lock()
+	f.api.replies["C1|1800000000.000100"] = []slack.Message{parent, reply}
+	f.api.mu.Unlock()
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000010.000100", ThreadTS: "1800000000.000100", User: "UCR", Text: "on it"})
+	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "gm.json"),
+		[]byte(`{"term":1,"gm":"codex-r","claim_id":"changed-authority"}`), 0o600))
+	f.at(2 * time.Minute)
+	f.tick()
+	assert.Equal(t, 0, f.watchCount(), "the answer predates the replay")
+	f.at(26 * time.Minute)
+	f.tick()
+	f.tick()
+	assert.Empty(t, f.notices("s2"))
+}
+
+// With a real remote: a claim published from another clone one second after
+// this home's fetch is invisible to its local re-read, so the sole mention of
+// the new GM is kept and classified once the routine fetch sees the claim.
+func TestCohortNewGMMentionAfterRemoteClaimWithinFetchInterval(t *testing.T) {
+	_, clones := gmRepo(t, 2)
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListenerAs(t, api, d, Identity{UserID: "UCB", BotID: "BCB"})
+	now := time.Unix(1_800_000_000, 0)
+	l.Now = func() time.Time { return now }
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s2"), 0))
+	resp := l.Control(context.Background(), ControlRequest{Op: "cohort-register", SessionID: "s2",
+		Cohort: &CohortReg{Project: "proj", Agent: "codex-b", Root: clones[0], Channel: "C1"}})
+	require.True(t, resp.OK, resp.Error)
+	r, err := newClaimer(clones[1], "codex-r").Claim(context.Background(), 0, "claude", "elsewhere")
+	require.NoError(t, err)
+	require.Equal(t, ClaimWon, r.Outcome)
+	now = now.Add(time.Second)
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000001.000100", User: "UBR", Text: "<@UCR> please decide"})
+	now = now.Add(26 * time.Minute)
+	l.CohortTick(context.Background())
+	n := 0
+	for _, g := range d.got {
+		if strings.Contains(g.text, "[cohort]") {
+			n++
+		}
+	}
+	require.Equal(t, 1, n, "the mention survives the fetch interval")
+}
+
+// A mention of an agent from before it became GM owed no GM answer: once it
+// claims, that kept message is not replayed into an outage.
+func TestCohortPreClaimMentionIsNotReplayed(t *testing.T) {
+	f := newCohortFixture(t)
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100",
+		User: "UBR", Text: "<@UCR> heads up, rez1 is down"})
+	f.at(5 * time.Minute)
+	since := f.now.Format(time.RFC3339)
+	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "gm.json"),
+		[]byte(`{"term":1,"gm":"codex-r","claim_id":"later","since":"`+since+`"}`), 0o600))
+	f.at(6 * time.Minute)
+	f.tick()
+	f.tick()
+	assert.Equal(t, 0, f.watchCount(), "sent before codex-r became GM")
+	f.at(29 * time.Minute)
+	f.tick()
+	assert.Empty(t, f.notices("s2"))
+	assert.Empty(t, f.notices("s3"))
+}
+
+// With a real remote, a joint ask naming the new GM beside another roster
+// agent is replayed like a single mention.
+func TestCohortNewGMMixedMentionAfterRemoteClaim(t *testing.T) {
+	_, clones := gmRepo(t, 2)
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListenerAs(t, api, d, Identity{UserID: "UCB", BotID: "BCB"})
+	now := time.Unix(1_800_000_000, 0)
+	l.Now = func() time.Time { return now }
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s2"), 0))
+	resp := l.Control(context.Background(), ControlRequest{Op: "cohort-register", SessionID: "s2",
+		Cohort: &CohortReg{Project: "proj", Agent: "codex-b", Root: clones[0], Channel: "C1"}})
+	require.True(t, resp.OK, resp.Error)
+	r, err := newClaimer(clones[1], "codex-r").Claim(context.Background(), 0, "claude", "elsewhere")
+	require.NoError(t, err)
+	require.Equal(t, ClaimWon, r.Outcome)
+	now = now.Add(time.Second)
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000001.000100", User: "UBR", Text: "<@UCR> <@UCB> please decide"})
+	now = now.Add(26 * time.Minute)
+	l.CohortTick(context.Background())
+	n := 0
+	for _, g := range d.got {
+		if strings.Contains(g.text, "[cohort]") {
+			n++
+		}
+	}
+	require.Equal(t, 1, n, "the extra non-GM mention does not suppress the GM watch")
+}
+
+// A replayed joint ask is not kept again: after the new GM answers it live,
+// later ticks neither recreate the watch nor, if Slack reads fail, raise a
+// false outage for it.
+func TestCohortReplayedJointAskIsNotKeptAgain(t *testing.T) {
+	f := newCohortFixture(t)
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100",
+		User: "UBR", Text: "<@UCR> <@UCB> please decide"})
+	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "gm.json"),
+		[]byte(`{"term":1,"gm":"codex-r","claim_id":"changed-authority"}`), 0o600))
+	f.at(2 * time.Minute)
+	f.tick()
+	require.Equal(t, 2, f.watchCount())
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000150.000100", ThreadTS: "1800000000.000100", User: "UCR", Text: "on it"})
+	require.Equal(t, 0, f.watchCount(), "answered live")
+	for _, l := range f.homes() {
+		l.mu.Lock()
+		kept := len(l.rechecks)
+		l.mu.Unlock()
+		assert.Equal(t, 0, kept, "nothing left to replay")
+	}
+	f.api.mu.Lock()
+	f.api.failReads = true
+	f.api.mu.Unlock()
+	for _, d := range []time.Duration{3, 8, 26} {
+		f.at(d * time.Minute)
+		f.tick()
+	}
+	assert.Equal(t, 0, f.watchCount())
+	assert.Empty(t, f.notices("s2"))
+}

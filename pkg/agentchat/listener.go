@@ -74,6 +74,7 @@ type Listener struct {
 	views         cohortViews               // project views for cohort tracking
 	approvalWaits map[string]*approvalWait  // Codex registrations seen waiting on an approval, by session|project
 	unobservable  map[string]bool           // Codex sessions whose daemon hides approval waits (warned once)
+	rechecks      map[string]recheck        // possible GM signals to classify again once the view refreshes
 }
 
 // queueDepth bounds each session's pending deliveries. Overflow is dropped;
