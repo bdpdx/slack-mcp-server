@@ -196,6 +196,7 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 
 	log.Info("listener started", zap.String("home", home.Dir), zap.String("bot_user", self.UserID), zap.String("owner", owner.UserID))
 	err = sm.RunContext(ctx)
+	l.WaitNotes(5 * time.Second)
 	if ctx.Err() != nil {
 		return nil
 	}

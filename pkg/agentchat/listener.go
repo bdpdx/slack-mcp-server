@@ -74,7 +74,8 @@ type Listener struct {
 	sessLock      map[string]*sync.Mutex    // serializes deliveries per session
 	queues        map[string]chan []pending // per-session delivery queues (Async)
 	approvals     map[string]*approval      // approval-hook requests by approval ID
-	closing       bool                      // shutting down: records no new message or answer (set under mu)
+	closing       bool                      // shutting down: records no new answer (set under mu)
+	notes         sync.WaitGroup            // restart notes being posted
 	views         cohortViews               // project views for cohort tracking
 	approvalWaits map[string]*approvalWait  // Codex registrations seen waiting on an approval, by session|project
 	unobservable  map[string]bool           // Codex sessions whose daemon hides approval waits (warned once)
@@ -186,7 +187,14 @@ func (l *Listener) HandleMessage(ctx context.Context, m Message) {
 	closing := l.closing
 	l.mu.Unlock()
 	if closing {
-		return // left unmarked: the next listener's recovery delivers it
+		// An answer to a waiting request is consumed here (approvalReply asks
+		// the owner to answer again), so the next listener never pushes it to
+		// the session as chat; anything else is left unmarked for that
+		// listener's recovery to deliver.
+		if m.Deliverable() && !m.From(l.Self) && l.approvalReply(m) {
+			l.markConsumed(m)
+		}
+		return
 	}
 	if m.SubType == "channel_archive" || m.SubType == "group_archive" {
 		l.dropChannel(m.Channel)
@@ -355,9 +363,6 @@ func (l *Listener) consumeRelay(sessionID string, m Message) bool {
 		return false
 	}
 	delete(l.relays, key)
-	if l.closing {
-		return true // not delivered, and left unmarked for the next listener
-	}
 	l.state.MarkDelivered(sessionID, m.Channel, m.TS, now)
 	if err := l.state.Save(l.StateFile); err != nil {
 		l.Log.Error("saving state failed", zap.Error(err))
@@ -932,7 +937,9 @@ func (l *Listener) HandleInteraction(payload []byte) {
 		if l.closing {
 			l.mu.Unlock()
 			l.Log.Info("approval click during shutdown; asking the owner to click again", zap.String("approval", act.Value))
-			go l.clickAgain(c)
+			l.mu.Lock()
+			l.note(c.channel, c.ts, "That click arrived while the listener was restarting and was not recorded. Click again in a few seconds.")
+			l.mu.Unlock()
 			continue
 		}
 		a := l.approvalEntry(act.Value)
@@ -970,12 +977,6 @@ func (l *Listener) HandleInteraction(payload []byte) {
 func (l *Listener) approvalReply(m Message) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.closing {
-		// Shutting down: record no answer. Report it consumed so it is not
-		// delivered either; markConsumed leaves it unmarked, and the next
-		// listener's recovery delivers it.
-		return true
-	}
 	var target *approval
 	var at *approvalMsg // the copy answered
 	explicit := true
@@ -1013,6 +1014,16 @@ func (l *Listener) approvalReply(m Message) bool {
 			return false
 		}
 	}
+	if l.closing {
+		// Shutting down: an answer recorded now would be lost with this
+		// listener's memory, and the next listener's recovery would push it
+		// to the session as chat. Record nothing, keep it out of the session
+		// (consumed), and ask the owner to answer again.
+		if m.User == l.OwnerID && target.decision == "" && !target.ended && explicit {
+			l.note(at.channel, at.ts, "That reply arrived while the listener was restarting and was not recorded. Answer again in a few seconds.")
+		}
+		return true
+	}
 	if m.User == l.OwnerID && target.decision == "" && !target.ended && explicit {
 		if decision == decisionAllow {
 			target.hint = at
@@ -1040,9 +1051,6 @@ func (l *Listener) dropChannel(channel string) {
 func (l *Listener) markConsumed(m Message) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.closing {
-		return // the answer was not recorded; the next listener recovers the message
-	}
 	for _, sub := range l.state.Watchers(m.Channel) {
 		l.state.MarkDelivered(sub.SessionID, m.Channel, m.TS, l.Now())
 	}
@@ -1132,14 +1140,28 @@ func (l *Listener) closeForShutdown(deadline time.Time) bool {
 	}
 }
 
-// clickAgain tells the owner, in the request's thread, that a click made
-// while the listener was shutting down was not recorded.
-func (l *Listener) clickAgain(c click) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, _, err := l.API.PostMessageContext(ctx, c.channel, slack.MsgOptionTS(c.ts),
-		slack.MsgOptionText("That click arrived while the listener was restarting and was not recorded. Click again in a few seconds.", false)); err != nil {
-		l.Log.Warn("posting the click-again note failed", zap.Error(err))
+// note posts text in the thread of a request copy (channel, ts) without
+// blocking; WaitNotes lets a stopping daemon finish posting. Call with l.mu
+// held.
+func (l *Listener) note(channel, ts, text string) {
+	l.notes.Add(1)
+	go func() {
+		defer l.notes.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, _, err := l.API.PostMessageContext(ctx, channel, slack.MsgOptionTS(ts), slack.MsgOptionText(text, false)); err != nil {
+			l.Log.Warn("posting a restart note failed", zap.Error(err))
+		}
+	}()
+}
+
+// WaitNotes waits up to d for restart notes still being posted.
+func (l *Listener) WaitNotes(d time.Duration) {
+	done := make(chan struct{})
+	go func() { l.notes.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(d):
 	}
 }
 
@@ -1147,8 +1169,8 @@ func (l *Listener) clickAgain(c click) {
 // an Allow click, its hook has not collected yet. Call with l.mu held.
 func (l *Listener) answersWaitingLocked() bool {
 	for _, a := range l.approvals {
-		if a.ended {
-			continue
+		if a.ended || len(a.msgs) == 0 {
+			continue // a click on a request no hook registered: nothing can collect it
 		}
 		if (a.decision != "" && a.decision != decisionTaken) || len(a.clicks) > 0 || a.hint != nil {
 			return true
