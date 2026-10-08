@@ -61,7 +61,7 @@ func TestFormatApprovalUnsafe(t *testing.T) {
 	_, unsafe = FormatApproval("UBR", "claude", "Bash", json.RawMessage(`{"command":"echo hi\nmake test\tx"}`))
 	assert.Empty(t, unsafe, "newlines and tabs are fine")
 
-	blocks, _ := json.Marshal(approvalBlocks("t", "it is too long", "a1", defaultApprovalWait))
+	blocks, _ := json.Marshal(approvalBlocks("t", "it is too long", "a1", defaultApprovalWait, approvalOptions{}))
 	assert.NotContains(t, string(blocks), approvalActionPrefix+decisionAllow, "no Allow button")
 	assert.Contains(t, string(blocks), approvalActionPrefix+decisionDeny)
 	assert.Contains(t, string(blocks), "can't be allowed from Slack because it is too long")

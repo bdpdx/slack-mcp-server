@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -32,9 +33,15 @@ const (
 	decisionAllow        = "allow"
 	decisionDeny         = "deny"
 	decisionTerminal     = "terminal"
-	decisionHint         = "hint"  // the owner typed an allow word; explain the button
-	decisionTaken        = "taken" // answered and handed to the hook
-	decisionEnded        = "ended" // the listener ended the request; nothing is decided
+	decisionHint         = "hint"          // the owner typed an allow word; explain the button
+	decisionAllowSimilar = "allow-similar" // allow and apply Claude Code's suggested rule
+	decisionRuleSession  = "rule-session"  // allow and add the proposed rule for this session
+	decisionRuleLocal    = "rule-local"    // ... for this project
+	decisionRuleUser     = "rule-user"     // ... for all projects
+	decisionPropose      = "propose"       // the owner typed a rule; draw its confirm buttons
+	decisionRuleHelp     = "rule-help"     // the owner typed something after "allow" that is not a rule
+	decisionTaken        = "taken"         // answered and handed to the hook
+	decisionEnded        = "ended"         // the listener ended the request; nothing is decided
 	defaultApprovalWait  = 10 * time.Minute
 	approvalPoll         = time.Second
 )
@@ -81,7 +88,12 @@ func classifyApprovalReply(text string) (decision, reason string, explicit bool)
 	return decisionDeny, text, false
 }
 
+// approvalButton is a button answering request id with decision. Rule
+// confirm buttons carry the rule's hash in their value ("id|hash").
 func approvalButton(id, decision, label, style string) *slack.ButtonBlockElement {
+	if len(label) > 75 {
+		label = label[:72] + "…"
+	}
 	b := slack.NewButtonBlockElement(approvalActionPrefix+decision, id, slack.NewTextBlockObject(slack.PlainTextType, label, false, false))
 	if style != "" {
 		b.Style = slack.Style(style)
@@ -89,14 +101,30 @@ func approvalButton(id, decision, label, style string) *slack.ButtonBlockElement
 	return b
 }
 
+// approvalOptions are what a request offers besides Allow / Deny /
+// terminal: Claude Code's suggested rule (similar, labelled similarLabel)
+// and typed rules (rules), neither of which Codex supports.
+type approvalOptions struct {
+	similar      []json.RawMessage
+	similarLabel string
+	rules        bool
+}
+
 // approvalBlocks lays out the request. When unsafe is set (see
 // FormatApproval) there is no Allow button: the owner can deny, or answer in
 // the terminal, which shows the request in full.
-func approvalBlocks(text, unsafe, id string, wait time.Duration) []slack.Block {
+func approvalBlocks(text, unsafe, id string, wait time.Duration, opt approvalOptions) []slack.Block {
 	var buttons []slack.BlockElement
 	note := "Or reply here: _no_ plus a reason for the agent, or _terminal_. Only the button can allow."
 	if unsafe == "" {
 		buttons = append(buttons, approvalButton(id, decisionAllow, "Allow", "primary"))
+		if len(opt.similar) > 0 {
+			buttons = append(buttons, approvalButton(id, decisionAllowSimilar, "Allow similar", ""))
+			note = "_Allow similar_ also adds " + opt.similarLabel + ". " + note
+		}
+		if opt.rules {
+			note += " " + ruleHelp
+		}
 	} else {
 		note = fmt.Sprintf("This can't be allowed from Slack because %s. Deny it here, or answer in the terminal, which shows it in full.", slackEscaper.Replace(unsafe))
 	}
@@ -110,11 +138,44 @@ func approvalBlocks(text, unsafe, id string, wait time.Duration) []slack.Block {
 	}
 }
 
+// ruleConfirmBlocks redraws the request with confirm buttons for rule, the
+// owner's typed rule: allow and add it for this session, this project or
+// all projects. Each button carries the rule's hash, so a later proposal
+// can't be granted by an earlier button.
+func ruleConfirmBlocks(text, id string, rule allowRule, wait time.Duration) []slack.Block {
+	v := id + "|" + rule.hash()
+	r := rule.String()
+	prefix := "Allow + add"
+	warn := ""
+	if rule.broad() {
+		prefix = "Yes, allow + add BROAD"
+		warn = " *This is broad:* it allows every use of " + slackEscaper.Replace(rule.Tool) + "."
+	}
+	buttons := []slack.BlockElement{
+		approvalButton(v, decisionRuleSession, prefix+" "+r+" this session", "primary"),
+		approvalButton(v, decisionRuleLocal, prefix+" "+r+" this project", ""),
+		approvalButton(v, decisionRuleUser, prefix+" "+r+" all projects", ""),
+		approvalButton(id, decisionDeny, "Deny", "danger"),
+		approvalButton(id, decisionTerminal, "Answer in terminal", ""),
+	}
+	note := fmt.Sprintf("Confirm the rule `%s`: click where it applies.%s Or reply `allow <rule>` again to change it, or _no_ to deny. After %s with no answer here, it is left to the terminal.",
+		slackEscaper.Replace(r), warn, wait)
+	return []slack.Block{
+		slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, text, false, false), nil, nil),
+		slack.NewActionBlock("", buttons...),
+		slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, note, false, false)),
+	}
+}
+
 // approvalOutcome is the line that replaces the buttons once settled.
 func approvalOutcome(decision, reason string, wait time.Duration) string {
 	switch decision {
 	case decisionAllow:
 		return "✅ Allowed."
+	case decisionAllowSimilar:
+		return "✅ Allowed, and added the suggested rule."
+	case decisionRuleSession, decisionRuleLocal, decisionRuleUser:
+		return fmt.Sprintf("✅ Allowed, and added `%s` (%s).", slackEscaper.Replace(reason), destinationLabel(ruleDestinations[decision]))
 	case decisionDeny:
 		if reason != "" {
 			return "❌ Denied: " + slackEscaper.Replace(reason)
@@ -173,20 +234,28 @@ func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration
 		return 0
 	}
 	text, unsafe := FormatApproval(me.ownerID, me.agentName, ev.ToolName, ev.ToolInput)
+	var opt approvalOptions
+	if unsafe == "" && !ev.codex() {
+		// Claude Code takes rules back from the hook; Codex rejects them.
+		opt.similar, opt.similarLabel = allowSuggestions(ev.PermissionSuggestions)
+		opt.rules = true
+	}
 	id := newApprovalID()
 	posted := c.postRequest(setup, targets, "approval request", id, text,
 		slack.MsgOptionText(fmt.Sprintf("%s needs your approval: %s", me.agentName, ev.ToolName), false),
-		slack.MsgOptionBlocks(approvalBlocks(text, unsafe, id, wait)...))
+		slack.MsgOptionBlocks(approvalBlocks(text, unsafe, id, wait, opt)...))
 	if len(posted) == 0 {
 		return 0
 	}
 
 	waitCtx, cancelWait := context.WithTimeout(ctx, wait)
-	decision, reason := c.waitForApproval(waitCtx, posted, id, text, approvalHint)
-	cancelWait()
-	if decision == decisionAllow && unsafe != "" {
-		decision = decisionTerminal // there was no Allow button; never allow what was not shown
+	var confirm func(allowRule) []slack.Block
+	if opt.rules {
+		confirm = func(rule allowRule) []slack.Block { return ruleConfirmBlocks(text, id, rule, wait) }
 	}
+	decision, reason := c.waitForApproval(waitCtx, posted, id, text, approvalHint, confirm)
+	cancelWait()
+	decision = settleApproval(decision, &reason, unsafe, opt)
 
 	// ctx ends early when the host stops the hook (the terminal answered):
 	// finish the redraw regardless.
@@ -200,10 +269,47 @@ func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration
 	if decision == "" && ctx.Err() == nil {
 		c.postBlocked(finish, c.hookSession(ev), me.agentName, ev.ToolName, wait)
 	}
-	if decision == decisionAllow || decision == decisionDeny {
+	switch decision {
+	case decisionAllow, decisionDeny:
 		c.printJSON(permissionDecision(decision, reason))
+	case decisionAllowSimilar:
+		c.printJSON(permissionAllowWith(opt.similar))
+	case decisionRuleSession, decisionRuleLocal, decisionRuleUser:
+		rule, _ := parseAllowRule(reason)
+		c.printJSON(permissionAllowWith([]any{addRule(rule, ruleDestinations[decision])}))
 	}
 	return 0
+}
+
+// settleApproval guards the owner's answer: nothing allows what Slack did
+// not show (unsafe), Allow similar needs a suggestion, and a rule answer
+// needs a request that takes rules and a rule that still parses. A guarded
+// answer goes back to the terminal.
+func settleApproval(decision string, reason *string, unsafe string, opt approvalOptions) string {
+	switch decision {
+	case decisionAllow:
+		if unsafe != "" {
+			return decisionTerminal // there was no Allow button; never allow what was not shown
+		}
+	case decisionAllowSimilar:
+		if unsafe != "" || len(opt.similar) == 0 {
+			return decisionTerminal
+		}
+	case decisionRuleSession, decisionRuleLocal, decisionRuleUser:
+		rule, ok := parseAllowRule(*reason)
+		if unsafe != "" || !opt.rules || !ok {
+			return decisionTerminal
+		}
+		*reason = rule.String()
+	}
+	return decision
+}
+
+// permissionAllowWith allows the request and adds permission rules
+// (updatedPermissions entries, Claude Code only).
+func permissionAllowWith(updates any) map[string]any {
+	return map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PermissionRequest",
+		"decision": map[string]any{"behavior": decisionAllow, "updatedPermissions": updates}}}
 }
 
 // postBlocked tells the session's project channels that the agent is stuck
@@ -283,7 +389,9 @@ const hintTimeout = 5 * time.Second
 // (decisionEnded). When the owner types an allow word, it
 // posts hint in that copy's thread and keeps waiting. A listener that lost
 // the request (it restarted) gets its copies (text) registered again.
-func (c *cli) waitForApproval(ctx context.Context, posted []postedMsg, id, text, hint string) (string, string) {
+// confirm, when set, gives the blocks that redraw the request for a rule the
+// owner typed (nil: this request takes no rules).
+func (c *cli) waitForApproval(ctx context.Context, posted []postedMsg, id, text, hint string, confirm func(allowRule) []slack.Block) (string, string) {
 	tick := time.NewTicker(approvalPoll)
 	defer tick.Stop()
 	for {
@@ -307,20 +415,47 @@ func (c *cli) waitForApproval(ctx context.Context, posted []postedMsg, id, text,
 			return decisionEnded, ""
 		case resp.Decision == "":
 		case resp.Decision == decisionHint:
-			channel, ts := posted[0].channel, posted[0].ts
-			for _, p := range posted {
-				if p.channel == resp.Channel && p.ts == resp.TS {
-					channel, ts = p.channel, p.ts
+			c.replyInRequest(ctx, posted, resp, hint)
+		case resp.Decision == decisionPropose || resp.Decision == decisionRuleHelp:
+			rule, ok := parseAllowRule(resp.Text)
+			var blocks []slack.Block
+			if confirm != nil && ok && resp.Decision == decisionPropose {
+				blocks = confirm(rule)
+			}
+			switch {
+			case blocks != nil:
+				// Redraw every copy with confirm buttons for this rule.
+				for _, p := range posted {
+					upd, cancel := context.WithTimeout(ctx, hintTimeout)
+					if _, _, _, err := c.bot.UpdateMessageContext(upd, p.channel, p.ts, slack.MsgOptionText("Confirm rule: "+rule.String(), false), slack.MsgOptionBlocks(blocks...)); err != nil {
+						fmt.Fprintf(c.stderr, "slack-agent-chat: drawing rule confirm in #%s: %v\n", p.name, err)
+					}
+					cancel()
 				}
+			case confirm == nil:
+				c.replyInRequest(ctx, posted, resp, "Rules can't be added from Slack for this request: use the approve button to allow just this once, or reply _no_ to deny.")
+			default:
+				c.replyInRequest(ctx, posted, resp, "I couldn't read that as a rule. "+ruleHelp)
 			}
-			post, cancel := context.WithTimeout(ctx, hintTimeout)
-			if _, _, err := c.bot.PostMessageContext(post, channel, slack.MsgOptionTS(ts), slack.MsgOptionText(hint, false)); err != nil {
-				fmt.Fprintf(c.stderr, "slack-agent-chat: posting approval hint: %v\n", err)
-			}
-			cancel()
 		default:
 			return resp.Decision, resp.Text
 		}
+	}
+}
+
+// replyInRequest posts text in the thread of the copy the owner answered in
+// (resp.Channel/TS), or the first copy.
+func (c *cli) replyInRequest(ctx context.Context, posted []postedMsg, resp ControlResponse, text string) {
+	channel, ts := posted[0].channel, posted[0].ts
+	for _, p := range posted {
+		if p.channel == resp.Channel && p.ts == resp.TS {
+			channel, ts = p.channel, p.ts
+		}
+	}
+	post, cancel := context.WithTimeout(ctx, hintTimeout)
+	defer cancel()
+	if _, _, err := c.bot.PostMessageContext(post, channel, slack.MsgOptionTS(ts), slack.MsgOptionText(text, false)); err != nil {
+		fmt.Fprintf(c.stderr, "slack-agent-chat: replying to an approval request: %v\n", err)
 	}
 }
 

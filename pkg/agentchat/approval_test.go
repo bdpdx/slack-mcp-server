@@ -60,7 +60,7 @@ func TestApprovalOutcome(t *testing.T) {
 }
 
 func TestApprovalBlocksCarryTheID(t *testing.T) {
-	blocks := approvalBlocks("text", "", "abc123", defaultApprovalWait)
+	blocks := approvalBlocks("text", "", "abc123", defaultApprovalWait, approvalOptions{})
 	data, _ := json.Marshal(blocks)
 	for _, d := range []string{decisionAllow, decisionDeny, decisionTerminal} {
 		assert.Contains(t, string(data), `"action_id":"`+approvalActionPrefix+d+`","value":"abc123"`)

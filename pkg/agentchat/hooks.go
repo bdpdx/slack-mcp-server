@@ -24,7 +24,14 @@ type hookEvent struct {
 	Reason               string          `json:"reason"`    // PermissionDenied: the classifier's reason
 	PromptID             string          `json:"prompt_id"` // Claude Code
 	TurnID               string          `json:"turn_id"`   // Codex
+	// PermissionSuggestions (Claude Code PermissionRequest): the rules the
+	// terminal dialog would offer to save.
+	PermissionSuggestions json.RawMessage `json:"permission_suggestions,omitempty"`
 }
+
+// codex reports whether the event comes from Codex, which takes no
+// permission rules back from hooks.
+func (ev hookEvent) codex() bool { return ev.TurnID != "" && ev.PromptID == "" }
 
 // isQuietHook reports whether cmd is a hook that must never fail or block
 // its host: any error leaves things to the host's normal handling.
