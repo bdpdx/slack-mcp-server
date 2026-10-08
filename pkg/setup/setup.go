@@ -538,8 +538,13 @@ func Main(args []string) int {
 		Clipboard: pbcopy,
 	})
 	printSummary(os.Stdout, linkPath, results, errors.Is(err, ErrAborted))
+	restartFailed := false
 	if st, serr := LoadState(filepath.Join(*repo, ".install-state.json")); serr == nil {
-		RestartListeners(os.Stdout, ExecRunner{}, linkPath, DiscoverHomes(user, st))
+		restartFailed = RestartListeners(os.Stdout, ExecRunner{}, linkPath, DiscoverHomes(user, st))
+	}
+	if restartFailed {
+		fmt.Fprintln(os.Stderr, "setup: a listener restart failed; see Listeners above")
+		return 1
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "setup:", err)

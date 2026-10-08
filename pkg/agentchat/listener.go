@@ -717,10 +717,17 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 		if l.Stop == nil {
 			return ControlResponse{Error: "this listener cannot be shut down"}
 		}
-		// After the reply is written: state is saved as it changes, so
-		// nothing else needs flushing.
-		time.AfterFunc(shutdownDelay, l.Stop)
+		// After the reply is written, and once hooks have collected answers
+		// the owner already gave (an answer lives only in memory): state is
+		// saved as it changes, so nothing else needs flushing.
 		l.Log.Info("shutting down on request")
+		go func() {
+			for deadline := l.Now().Add(answerDrain); l.answersWaiting() && l.Now().Before(deadline); {
+				time.Sleep(100 * time.Millisecond)
+			}
+			time.Sleep(shutdownDelay)
+			l.Stop()
+		}()
 		return ControlResponse{OK: true, Version: version.Version}
 	case "approval-end":
 		l.EndApproval(req.Approval, req.Text)
@@ -1076,6 +1083,22 @@ func (l *Listener) EndApproval(id, owed string) {
 		a.ended, a.retryAt, a.tries = true, l.Now(), 0
 		a.setOwed(owed)
 	}
+}
+
+// answersWaiting reports whether any live request holds an answer, or an
+// Allow click, its hook has not collected yet.
+func (l *Listener) answersWaiting() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, a := range l.approvals {
+		if a.ended {
+			continue
+		}
+		if (a.decision != "" && a.decision != decisionTaken) || len(a.clicks) > 0 || a.hint != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // setOwed makes line the outcome every copy still has to show.

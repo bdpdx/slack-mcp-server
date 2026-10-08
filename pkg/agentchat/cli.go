@@ -103,6 +103,7 @@ type cli struct {
 	stderr io.Writer
 	bot    *slack.Client
 	user   *slack.Client
+	kill   func() error // stops the home's listener process; nil means SIGTERM it (tests replace it)
 }
 
 const chatUsage = `usage: slack-mcp-server chat [--env-file FILE] COMMAND
