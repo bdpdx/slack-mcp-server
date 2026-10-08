@@ -450,15 +450,34 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 	sl := l.sessionLock(sub.SessionID)
 	sl.Lock()
 	defer sl.Unlock()
+	fresh := l.freshItems(sub, items)
+	note := ""
 	l.mu.Lock()
-	_, owed := l.catchUpOwed[sub.SessionID]
+	r, owed := l.catchUpOwed[sub.SessionID]
+	switch {
+	case owed && r.readOnly && r.tries >= releaseAfter && len(fresh) > 0:
+		// History keeps failing to read while the session is reachable:
+		// stop holding its live messages. The older ones stay in history,
+		// the note says so, and the floor keeps them from arriving late.
+		delete(l.catchUpOwed, sub.SessionID)
+		if l.catchUpFloor == nil {
+			l.catchUpFloor = map[string]string{}
+		}
+		l.catchUpFloor[sub.SessionID] = fresh[0].msg.TS
+		note, owed = unreadNote, false
+	case owed:
+		// New activity: try the owed catch-up at the next sweep rather than
+		// after its backoff, so a session that is back soon gets everything.
+		r.next = time.Time{}
+		l.catchUpOwed[sub.SessionID] = r
+	}
 	l.mu.Unlock()
 	if owed {
 		// Older messages are still owed to this session: hold this one
 		// (unmarked) so the owed catch-up sends everything oldest first.
+		// (Cohort notices are not channel messages and are not held.)
 		return deliverDeferred
 	}
-	fresh := l.freshItems(sub, items)
 	l.mu.Lock()
 	if floor := l.catchUpFloor[sub.SessionID]; floor != "" {
 		// A capped catch-up already sent newer messages and told the agent
@@ -467,7 +486,7 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 		fresh = slices.DeleteFunc(fresh, func(p pending) bool { return TSLess(p.msg.TS, floor) })
 	}
 	l.mu.Unlock()
-	o := l.deliverLocked(ctx, sub, fresh, catchUp{})
+	o := l.deliverLocked(ctx, sub, fresh, catchUp{note: note})
 	if o == deliverFailed {
 		l.oweCatchUp(sub.SessionID) // the next sweep sends it with whatever else is pending
 	}
@@ -500,6 +519,7 @@ func (l *Listener) oweCatchUpLocked(session string) {
 // unacknowledged messages not sent. parts == 0 marks a live delivery.
 type catchUp struct {
 	part, parts, start, total, skipped int
+	note                               string // a live delivery's leading note, if any
 }
 
 // freshItems drops items already delivered to sub.
@@ -555,6 +575,9 @@ func (l *Listener) deliverLocked(ctx context.Context, sub *Subscription, fresh [
 		text = fresh[0].notice.Format()
 	default:
 		text = FormatBatch(notices)
+	}
+	if h.note != "" {
+		text = h.note + "\n\n" + text
 	}
 	last := fresh[len(fresh)-1].msg
 	if !l.beginDelivery() {
@@ -773,6 +796,9 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 	switch {
 	case outcome == deliverFailed || sinceFailed:
 		l.oweCatchUpLocked(sub.SessionID)
+		r := l.catchUpOwed[sub.SessionID]
+		r.readOnly = outcome != deliverFailed
+		l.catchUpOwed[sub.SessionID] = r
 	case outcome != deliverRefused && l.owedGen[sub.SessionID] == gen:
 		// Settled, unless something became owed after the history read
 		// began (a drop while this catch-up held the session): that stays.
@@ -785,13 +811,25 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 type backlogRetry struct {
 	tries int
 	next  time.Time
+	// readOnly (owed catch-ups): only reading history failed, so the
+	// session itself is reachable and live messages need not wait forever.
+	readOnly bool
 }
+
+// releaseAfter is how many failed owed catch-ups (failing only on reading
+// history) hold a reachable session's live messages before they are
+// released with a note pointing at the channel history.
+const releaseAfter = 2
+
+// unreadNote heads live messages released while older ones could not be read.
+const unreadNote = "[slack-agent-chat] Older messages for you could not be fetched from Slack, so they were not sent and newer ones follow. Read the channel history before acting on these."
 
 // Kept backlogs are retried with backoff from backlogRetryMin to
 // backlogRetryMax.
 const (
 	backlogRetryMin = time.Minute
 	backlogRetryMax = time.Hour
+	catchUpRetryMax = 5 * time.Minute // owed catch-ups: live messages are held meanwhile
 )
 
 // RetryBacklogs sends the kept first-join backlogs of watching sessions
@@ -849,7 +887,8 @@ func (l *Listener) RetryBacklogs(ctx context.Context) {
 		defer l.mu.Unlock()
 		if r, ok := l.catchUpOwed[session]; ok {
 			r.tries++
-			r.next = time.Now().Add(min(backlogRetryMin<<min(r.tries-1, 6), backlogRetryMax))
+			// Capped lower than a kept backlog's: held live messages wait on it.
+			r.next = time.Now().Add(min(backlogRetryMin<<min(r.tries-1, 6), catchUpRetryMax))
 			l.catchUpOwed[session] = r
 		}
 	}
@@ -1074,6 +1113,9 @@ func (l *Listener) Unsubscribe(sessionID, channel string) {
 		}
 	}
 	if channel == "" || len(sub.Channels) == 0 {
+		delete(l.catchUpOwed, sessionID)
+		delete(l.owedGen, sessionID)
+		delete(l.catchUpFloor, sessionID)
 		delete(l.state.Subscriptions, sessionID)
 		if q := l.queues[sessionID]; q != nil {
 			close(q)

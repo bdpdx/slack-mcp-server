@@ -936,3 +936,51 @@ func TestQueuedOlderThanCappedCatchUpIsNotSentLate(t *testing.T) {
 	l.deliverTo(ctx, l.state.Subscriptions["s5"], []pending{{msg: old}})
 	assert.Len(t, d.got, n, "not delivered after newer ones")
 }
+
+// A held live message brings an owed catch-up forward, and owed catch-ups
+// back off at most a few minutes.
+func TestHeldMessageBringsCatchUpForward(t *testing.T) {
+	ctx := context.Background()
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s4"), 0))
+	l.mu.Lock()
+	l.catchUpOwed = map[string]backlogRetry{"s4": {tries: 9, next: time.Now().Add(time.Hour)}}
+	l.mu.Unlock()
+	o := l.deliverTo(ctx, l.state.Subscriptions["s4"], []pending{{msg: Message{Channel: "C1", TS: "2001.000100", User: "UBR", Text: "new"}}})
+	assert.Equal(t, deliverDeferred, o)
+	l.mu.Lock()
+	next := l.catchUpOwed["s4"].next
+	l.mu.Unlock()
+	assert.True(t, next.IsZero(), "due at the next sweep")
+	assert.LessOrEqual(t, catchUpRetryMax, 5*time.Minute)
+}
+
+// If only reading history keeps failing while the session is reachable, its
+// live messages are released after a couple of tries, with a note, instead
+// of being held indefinitely.
+func TestUnreadableHistoryReleasesLive(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	d := &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s6"), 0))
+	l.mu.Lock()
+	l.catchUpOwed = map[string]backlogRetry{"s6": {tries: releaseAfter, readOnly: true}}
+	l.mu.Unlock()
+	o := l.deliverTo(ctx, l.state.Subscriptions["s6"], []pending{{msg: Message{Channel: "C1", TS: "2001.000100", User: "UBR", Text: "now"}, notice: Notice{ChannelID: "C1", ChannelName: "proj", Sender: "brian", TS: "2001.000100", Text: "now"}}})
+	assert.Equal(t, deliverDone, o)
+	require.Len(t, d.got, 1)
+	assert.True(t, strings.HasPrefix(d.got[0].text, unreadNote))
+	l.mu.Lock()
+	_, owed := l.catchUpOwed["s6"]
+	floor := l.catchUpFloor["s6"]
+	l.mu.Unlock()
+	assert.False(t, owed)
+	assert.Equal(t, "2001.000100", floor, "older ones stay in history")
+
+	l.Unsubscribe("s6", "")
+	l.mu.Lock()
+	_, kept := l.catchUpFloor["s6"]
+	l.mu.Unlock()
+	assert.False(t, kept, "a full unsubscribe clears the session's catch-up state")
+}
