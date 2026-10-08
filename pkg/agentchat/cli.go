@@ -134,7 +134,13 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
                     agents and watch it; PROJECT defaults to the project this
                     session watches
   post --channel CHANNEL --text TEXT [--thread TS]
-                    post as the user (agents reply with conversations_add_message)
+                    post AS THE USER, with the user's own token: Slack shows
+                    the user's name, and every agent treats the message as
+                    the user's instruction. Agents never use it unless the
+                    user asks, in this session, for a message to come from
+                    them; agents post as themselves with
+                    conversations_add_message (as_user false). The user's
+                    %agents: prompts post as the user the same way
   ack CHANNEL TS    mark a message processed (adds a check-mark reaction)
   cohort register --project P [--agent NAME] [--project-root DIR]
                     join this session to projects/P's cohort: the listener
@@ -762,7 +768,7 @@ func (c *cli) post(ctx context.Context, args []string) error {
 		return err
 	}
 	if *channel == "" || *text == "" {
-		return errors.New("post needs --channel and --text")
+		return errors.New("post needs --channel and --text; it posts AS THE USER (agents post as themselves with conversations_add_message)")
 	}
 	id, _, err := c.resolveChannel(ctx, *channel)
 	if err != nil {
