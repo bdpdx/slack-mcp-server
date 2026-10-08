@@ -73,13 +73,13 @@ type Listener struct {
 	relays        map[string]time.Time      // expected %agents echoes: session|channel|text → expiry
 	sessLock      map[string]*sync.Mutex    // serializes deliveries per session
 	queues        map[string]chan []pending // per-session delivery queues (Async)
+	queued        int                       // deliveries queued or in progress on those queues (under mu)
 	approvals     map[string]*approval      // approval-hook requests by approval ID
 	closing       bool                      // shutting down: records no new answer (set under mu)
 	inflight      int                       // restart notes and redraws still being posted (under mu)
 	views         cohortViews               // project views for cohort tracking
 	approvalWaits map[string]*approvalWait  // Codex registrations seen waiting on an approval, by session|project
 	unobservable  map[string]bool           // Codex sessions whose daemon hides approval waits (warned once)
-	rechecks      map[string]recheck        // possible GM signals to classify again once the view refreshes
 }
 
 // queueDepth bounds each session's pending deliveries. Overflow is dropped;
@@ -316,9 +316,25 @@ func (l *Listener) dispatch(ctx context.Context, sub *Subscription, items []pend
 	}
 	select {
 	case q <- items:
+		l.queued++
 	default:
 		l.Log.Warn("delivery queue full; message left for catch-up", zap.String("session", sub.SessionID))
 	}
+}
+
+// waitDeliveries waits up to d for the delivery queues to empty, so a
+// stopping listener never exits between delivering a message and marking it
+// delivered (which would deliver it twice after a restart).
+func (l *Listener) waitDeliveries(d time.Duration) {
+	for deadline := time.Now().Add(d); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		l.mu.Lock()
+		n := l.queued
+		l.mu.Unlock()
+		if n == 0 {
+			return
+		}
+	}
+	l.Log.Warn("stopping with deliveries still in progress; they will be retried by the next listener")
 }
 
 // work delivers one session's queued items in order until the queue is
@@ -332,6 +348,9 @@ func (l *Listener) work(ctx context.Context, sessionID string, q chan []pending)
 		if sub != nil {
 			l.deliverTo(ctx, sub, items)
 		}
+		l.mu.Lock()
+		l.queued--
+		l.mu.Unlock()
 	}
 }
 
@@ -743,7 +762,11 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 			return ControlResponse{Error: "answers are waiting for their hooks; try the restart again shortly"}
 		}
 		l.Log.Info("shutting down on request")
-		time.AfterFunc(shutdownDelay, l.Stop) // after the reply is written
+		go func() {
+			time.Sleep(shutdownDelay) // after the reply is written
+			l.waitDeliveries(deliveryDrain)
+			l.Stop()
+		}()
 		return ControlResponse{OK: true, Version: version.Version}
 	case "approval-end":
 		l.EndApproval(req.Approval, req.Text)
@@ -779,6 +802,7 @@ type approval struct {
 	clicks           []click       // owner Allow clicks waiting for their copy to register
 	at               time.Time
 	clicked          time.Time // the owner's latest recorded click
+	decidedOn        click     // where a clicked decision was made
 	text             string    // the request as posted, to redraw it once it ends
 	polled           time.Time // the hook's last poll; a hook that stops polling is gone
 	ended            bool      // takes no more answers: the hook finished, or was given up on
@@ -905,8 +929,12 @@ func (l *Listener) WatchApproval(id, channel, ts, text string) int {
 		if a.decision != "" && a.decision != decisionTaken {
 			// An answer clicked on this copy before it registered; nothing
 			// can collect it before the listener exits.
+			on := a.decidedOn
+			if on.channel == "" {
+				on.channel, on.ts = channel, ts
+			}
 			a.decision, a.reason = "", ""
-			l.note(channel, ts, clickAgainNote)
+			l.note(on.channel, on.ts, clickAgainNote)
 		}
 		return len(a.msgs)
 	}
@@ -976,7 +1004,7 @@ func (l *Listener) HandleInteraction(payload []byte) {
 			// the owner clicked it on this bot's message carrying the request's
 			// id: it decides at once, before any Allow still waiting for its
 			// copy, and whether or not this copy is registered yet.
-			a.decision, a.clicks, a.clicked = decision, nil, c.at
+			a.decision, a.clicks, a.clicked, a.decidedOn = decision, nil, c.at, c
 		case len(a.clicks) < maxPendingClicks:
 			a.clicks, a.clicked = append(a.clicks, c), c.at
 			a.applyClicks(c.at)

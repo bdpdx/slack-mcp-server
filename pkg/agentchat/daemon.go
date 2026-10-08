@@ -198,6 +198,7 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 
 	log.Info("listener started", zap.String("home", home.Dir), zap.String("bot_user", self.UserID), zap.String("owner", owner.UserID))
 	err = sm.RunContext(ctx)
+	cancel() // stops the event loop too if Socket Mode ended on its own
 	// Let the event loop finish the event in hand, then the notes and
 	// redraws it started, so none is cut off by exit.
 	select {

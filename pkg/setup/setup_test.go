@@ -266,8 +266,8 @@ func TestRunFailedUpdateSaysChooseUpdate(t *testing.T) {
 func TestPrintSummary(t *testing.T) {
 	icon := fmt.Sprintf(iconMsgFmt, "pat-codex", "pat-codex")
 	both := []Result{
-		{Home: "/u/.claude", Type: TypeClaude, Installed: true},
-		{Home: "/u/.codex", Type: TypeCodex, Installed: true, Notes: []string{icon}},
+		{Home: "/u/.claude", Type: TypeClaude, Installed: true, Fresh: true},
+		{Home: "/u/.codex", Type: TypeCodex, Installed: true, Fresh: true, Notes: []string{icon}},
 	}
 	var b bytes.Buffer
 	printSummary(&b, "/b/slack-mcp-server", both, false)
@@ -283,7 +283,13 @@ func TestPrintSummary(t *testing.T) {
 	assert.Contains(t, out, "Remaining steps:")
 	assert.NotContains(t, out, "Codex", "no Codex home was set up")
 	assert.NotContains(t, out, "bot icon", "no icon note was given")
-	assert.Contains(t, out, "1. Restart your agent sessions.")
+	assert.Contains(t, out, "1. Start (or restart) agent sessions in the homes set up or reinstalled above.")
+
+	b.Reset()
+	updated := []Result{{Home: "/u/.claude", Type: TypeClaude, Installed: true}, {Home: "/u/.codex", Type: TypeCodex, Installed: true}}
+	printSummary(&b, "/b/slack-mcp-server", updated, false)
+	assert.NotContains(t, b.String(), "Remaining steps:", "an update needs no restart: setup restarts the listeners itself")
+	assert.NotContains(t, b.String(), "estart")
 
 	b.Reset()
 	printSummary(&b, "/b/slack-mcp-server", both, true)

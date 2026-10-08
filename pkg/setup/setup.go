@@ -238,6 +238,7 @@ func processHome(ctx context.Context, o Options, st *State, h Home) (Result, boo
 		bot, notes = name, n
 	}
 	res, err := installHome(o, h)
+	res.Fresh = action != actUpdate
 	res.Notes = append(res.Notes, notes...)
 	if err != nil {
 		return res, false, err
@@ -571,7 +572,7 @@ func printSummary(w io.Writer, bin string, results []Result, aborted bool) {
 	} else {
 		fmt.Fprintf(w, "\nslack-mcp-server is installed at %s\n", bin)
 	}
-	installed, codex, icon := false, false, false
+	installed, fresh, codex, icon := false, false, false, false
 	for _, r := range results {
 		fmt.Fprintf(w, "\n%s\n", r.Home)
 		for _, c := range r.Changed {
@@ -585,7 +586,8 @@ func printSummary(w io.Writer, bin string, results []Result, aborted bool) {
 			icon = icon || (r.Installed && strings.HasPrefix(n, "Set an icon for "))
 		}
 		installed = installed || r.Installed
-		codex = codex || (r.Installed && r.Type == TypeCodex)
+		fresh = fresh || (r.Installed && r.Fresh)
+		codex = codex || (r.Installed && r.Fresh && r.Type == TypeCodex)
 	}
 	if aborted {
 		fmt.Fprintln(w, "\nSetup stopped before it finished. Run ./install.sh again to set up the remaining homes.")
@@ -594,15 +596,23 @@ func printSummary(w io.Writer, bin string, results []Result, aborted bool) {
 	if !installed {
 		return
 	}
+	// An update needs no restarts: setup restarts each running listener on
+	// the new binary itself (see Listeners). Only a home set up new or
+	// reinstalled with new tokens needs its agent sessions started fresh.
 	var steps []string
 	if icon {
 		steps = append(steps, "Set the bot icon (see the icon notes above).")
 	}
-	steps = append(steps, "Restart your agent sessions.")
-	if codex {
-		steps = append(steps, "Trust the hooks when Codex asks.")
+	if fresh {
+		steps = append(steps, "Start (or restart) agent sessions in the homes set up or reinstalled above.")
+		if codex {
+			steps = append(steps, "Trust the hooks when Codex asks.")
+		}
+		steps = append(steps, "Tell the agent: start a project chat called <name>.")
 	}
-	steps = append(steps, "Tell the agent: start a project chat called <name>.")
+	if len(steps) == 0 {
+		return
+	}
 	fmt.Fprintln(w, "\nRemaining steps:")
 	for i, s := range steps {
 		fmt.Fprintf(w, "  %d. %s\n", i+1, s)

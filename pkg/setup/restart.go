@@ -4,8 +4,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"strings"
 )
+
+// StreamRunner runs a command with its stderr streamed to w as it runs,
+// returning only its stdout.
+type StreamRunner interface {
+	RunStream(w io.Writer, env []string, name string, args ...string) (string, error)
+}
+
+// RunStream implements StreamRunner.
+func (ExecRunner) RunStream(w io.Writer, env []string, name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Env = commandEnv(os.Environ(), env)
+	cmd.Stderr = w
+	out, err := cmd.Output()
+	return string(out), err
+}
 
 // RestartListeners replaces the running listener of every home that has an
 // env file with the binary at bin (just installed), so an upgrade takes
@@ -22,10 +39,18 @@ func RestartListeners(w io.Writer, r Runner, bin string, homes []Home) (failed b
 			fmt.Fprintln(w, "\nListeners")
 			header = true
 		}
-		fmt.Fprintf(w, "  %s: ", h.Path) // before the restart, which can take a while
-		out, err := r.Run(nil, bin, "chat", "--env-file", EnvPath(h.Path), "listener", "restart", "--if-running")
+		args := []string{"chat", "--env-file", EnvPath(h.Path), "listener", "restart", "--if-running"}
+		var out string
+		var err error
+		if sr, ok := r.(StreamRunner); ok {
+			fmt.Fprintf(w, "  %s:\n", h.Path) // its progress follows as it runs
+			out, err = sr.RunStream(w, nil, bin, args...)
+			fmt.Fprintf(w, "    %s\n", restartLine(out, err))
+		} else {
+			out, err = r.Run(nil, bin, args...)
+			fmt.Fprintf(w, "  %s: %s\n", h.Path, restartLine(out, err))
+		}
 		failed = failed || err != nil
-		fmt.Fprintln(w, restartLine(out, err))
 	}
 	return failed
 }
@@ -35,7 +60,7 @@ func restartLine(out string, err error) string {
 	if err != nil {
 		msg := strings.TrimSpace(out)
 		if msg == "" {
-			msg = err.Error()
+			msg = err.Error() + " (the reason is printed above)"
 		}
 		return "restart FAILED: " + msg
 	}

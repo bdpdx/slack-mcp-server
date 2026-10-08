@@ -778,7 +778,7 @@ func TestCohortReplayedJointAskIsNotKeptAgain(t *testing.T) {
 	require.Equal(t, 0, f.watchCount(), "answered live")
 	for _, l := range f.homes() {
 		l.mu.Lock()
-		kept := len(l.rechecks)
+		kept := len(l.state.Rechecks)
 		l.mu.Unlock()
 		assert.Equal(t, 0, kept, "nothing left to replay")
 	}

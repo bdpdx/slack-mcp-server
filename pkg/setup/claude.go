@@ -14,6 +14,7 @@ type Result struct {
 	Home      string
 	Type      string   // TypeClaude or TypeCodex
 	Installed bool     // the home was set up completely
+	Fresh     bool     // set up new or reinstalled (new tokens), not just updated
 	Changed   []string // files written or registrations made
 	Manual    []string // commands the user must run
 	Notes     []string // anything else to tell the user

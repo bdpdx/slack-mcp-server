@@ -46,6 +46,16 @@ type State struct {
 	// BLOCKED notice may be in Slack: recorded before the post, so a known
 	// clear after any restart still announces recovery.
 	Announced map[string]bool `json:"announced,omitempty"`
+	// Rechecks holds possible GM signals by channel|ts, kept to be
+	// classified again once a refreshed project view names their agent as
+	// GM (see replayRechecks); kept here so a listener restart keeps them.
+	Rechecks map[string]*Recheck `json:"rechecks,omitempty"`
+}
+
+// Recheck is a message kept for GM classification until Until.
+type Recheck struct {
+	M     Message   `json:"m"`
+	Until time.Time `json:"until"`
 }
 
 // LoadState reads path; a missing file yields empty state.

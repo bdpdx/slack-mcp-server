@@ -25,9 +25,16 @@ import (
 var (
 	shutdownDelay   = 200 * time.Millisecond
 	answerDrain     = 5 * time.Second
+	deliveryDrain   = 5 * time.Second // see waitDeliveries
 	shutdownTimeout = 10 * time.Second
-	stopWait        = 15 * time.Second
-	probeTimeout    = 5 * time.Second
+	// stopWait must exceed the daemon's own exit time after a shutdown:
+	// shutdownDelay and deliveryDrain, then up to 5 s for the event loop
+	// and 5 s for notes (RunListener).
+	stopWait     = 20 * time.Second
+	probeTimeout = 5 * time.Second
+	// startWait bounds how long ensureListener waits for a new listener
+	// to answer.
+	startWait = 15 * time.Second
 )
 
 // restartAttempts bounds how often restart tries again when the new

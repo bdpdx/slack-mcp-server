@@ -357,7 +357,7 @@ func (c *cli) ensureListener(ctx context.Context) error {
 		return err
 	}
 	_ = cmd.Process.Release()
-	for i := 0; i < 60; i++ {
+	for deadline := time.Now().Add(startWait); time.Now().Before(deadline); {
 		time.Sleep(250 * time.Millisecond)
 		pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		_, err := SendControl(pctx, c.home.ControlSocket, ControlRequest{Op: "status"})

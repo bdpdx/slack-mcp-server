@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 // shutdown replies first, then stops the daemon; a listener not run as a
@@ -481,7 +482,7 @@ func TestLateRegistrationClearsUncollectedDecision(t *testing.T) {
 	l := newTestListener(t, api, &fakeDeliverer{})
 	now := time.Unix(2000, 0)
 	l.Now = func() time.Time { return now }
-	l.HandleInteraction(clickOn("UBR", decisionDeny, "m", "C1", "2000.1", "BCL"))
+	l.HandleInteraction(clickOn("UBR", decisionDeny, "m", "C2", "3000.1", "BCL"))
 	now = now.Add(copyRegisterWait)
 	l.Stop = func() {}
 	require.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
@@ -491,7 +492,60 @@ func TestLateRegistrationClearsUncollectedDecision(t *testing.T) {
 	l.WaitNotes(2 * time.Second)
 	found := false
 	for _, p := range api.posts() {
-		found = found || strings.Contains(p, "Click again")
+		found = found || (strings.HasPrefix(p, "C2|") && strings.Contains(p, "Click again"))
 	}
-	assert.True(t, found)
+	assert.True(t, found, "the note goes to the copy where the denial was clicked")
+}
+
+// heldDeliverer holds each delivery until release is closed.
+type heldDeliverer struct {
+	fakeDeliverer
+	release chan struct{}
+}
+
+func (d *heldDeliverer) Deliver(ctx context.Context, sub *Subscription, clientID, text string) (string, error) {
+	<-d.release
+	return d.fakeDeliverer.Deliver(ctx, sub, clientID, text)
+}
+
+// A shutdown lets a delivery in progress finish and be marked before the
+// listener stops, so the next listener never delivers it a second time.
+func TestShutdownWaitsForDeliveries(t *testing.T) {
+	ctx := context.Background()
+	d := &heldDeliverer{release: make(chan struct{})}
+	l, err := NewListener(newFakeSlack(), d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
+	require.NoError(t, err)
+	l.Async = true
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0))
+	l.HandleMessage(ctx, Message{Channel: "C1", TS: "2000.5", User: "UBR", Text: "hello"})
+	stopped := make(chan struct{})
+	l.Stop = func() { close(stopped) }
+	require.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+	select {
+	case <-stopped:
+		t.Fatal("stopped with a delivery in progress")
+	case <-time.After(shutdownDelay + 300*time.Millisecond):
+	}
+	close(d.release)
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("never stopped")
+	}
+	l.mu.Lock()
+	marked := l.state.WasDelivered("s1", "C1", "2000.5")
+	l.mu.Unlock()
+	assert.True(t, marked, "delivered and marked before the stop")
+}
+
+// Messages kept for GM re-classification survive a listener restart.
+func TestRechecksSurviveRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	l, err := NewListener(newFakeSlack(), &fakeDeliverer{}, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	l.rememberRecheck(Message{Channel: "C1", TS: "2000.1", User: "UBR", Text: "<@UGM> are you there?"})
+	l2, err := NewListener(newFakeSlack(), &fakeDeliverer{}, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	require.Len(t, l2.state.Rechecks, 1)
+	assert.Equal(t, "<@UGM> are you there?", l2.state.Rechecks[watchKey("C1", "2000.1")].M.Text)
 }
