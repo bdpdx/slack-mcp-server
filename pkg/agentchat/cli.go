@@ -171,9 +171,15 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
                     instead of the terminal while watching a project
   approval-hook [--wait 10m]
                     PermissionRequest hook: ask the user in Slack (buttons or
-                    a thread reply) and answer the prompt; after --wait with
-                    no answer, the terminal asks and the project channel
-                    gets a BLOCKED notice
+                    a thread reply) and answer the prompt. The terminal shows
+                    its own prompt at the same time; the first answer wins.
+                    After --wait with no answer, the hook leaves it to the
+                    terminal and the project channel gets a BLOCKED notice
+  denied-hook [--wait 10m]
+                    Claude PermissionDenied hook (auto mode): ask the user in
+                    Slack whether an action the classifier blocked may be
+                    retried; Approve lets the model retry (the classifier
+                    judges the retry again). Decline or no answer: it stands
   stop-hook         Stop hook: DM the user the final response of a turn they
                     started at the terminal (relay-hook marks those turns)
   listen            run the listener in the foreground (started automatically)
@@ -265,20 +271,27 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		ctx, cancel := context.WithTimeout(ctx, relayTimeout)
 		defer cancel()
 		return c.relayHook(ctx, event)
-	case "ask-hook", "approval-hook", "stop-hook":
+	case "ask-hook", "approval-hook", "denied-hook", "stop-hook":
 		ctx, cancel := context.WithTimeout(ctx, relayTimeout)
 		defer cancel()
 		switch rest[0] {
 		case "ask-hook":
 			return c.askHook(ctx, hook)
-		case "approval-hook":
-			fs := flag.NewFlagSet("approval-hook", flag.ContinueOnError)
+		case "approval-hook", "denied-hook":
+			fs := flag.NewFlagSet(rest[0], flag.ContinueOnError)
 			fs.SetOutput(stderr)
-			wait := fs.Duration("wait", defaultApprovalWait, "how long to wait for an answer in Slack before the terminal asks")
+			wait := fs.Duration("wait", defaultApprovalWait, "how long to wait for an answer in Slack")
 			if fs.Parse(rest[1:]) != nil {
 				return 0
 			}
-			return c.approvalHook(context.Background(), hook, *wait)
+			// The host stops the hook when the terminal answers first (or the
+			// session moves on); the hook then marks its Slack request ended.
+			sig, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+			defer stop()
+			if rest[0] == "denied-hook" {
+				return c.deniedHook(sig, hook, *wait)
+			}
+			return c.approvalHook(sig, hook, *wait)
 		}
 		return c.stopHook(ctx, hook)
 	default:

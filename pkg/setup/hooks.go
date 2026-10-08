@@ -15,7 +15,7 @@ type HookSpec struct {
 	Timeout int
 }
 
-var ourHooks = []string{"relay-hook", "ask-hook", "approval-hook", "stop-hook"}
+var ourHooks = []string{"relay-hook", "ask-hook", "approval-hook", "denied-hook", "stop-hook"}
 
 // approvalTimeout must exceed approval-hook's --wait (10m) so the hook can
 // hand the prompt back to the terminal before the host kills it.
@@ -27,6 +27,7 @@ func ClaudeHookSpecs() []HookSpec {
 		{Event: "UserPromptSubmit", Hook: "relay-hook", Timeout: 15},
 		{Event: "PreToolUse", Matcher: "AskUserQuestion", Hook: "ask-hook", Timeout: 15},
 		{Event: "PermissionRequest", Hook: "approval-hook", Timeout: approvalTimeout},
+		{Event: "PermissionDenied", Hook: "denied-hook", Timeout: approvalTimeout},
 		{Event: "Stop", Hook: "stop-hook", Timeout: 15},
 	}
 }

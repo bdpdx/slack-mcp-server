@@ -14,9 +14,12 @@ import (
 
 // approval-hook (PermissionRequest) asks the owner in the session's direct
 // channel, with Allow / Deny / Answer-in-terminal buttons, and answers the
-// host's permission prompt on their behalf. The host shows its own prompt
-// only after the hook returns, so the hook waits a limited time and then
-// hands the prompt back to the terminal.
+// host's permission prompt on their behalf. Claude Code shows its own
+// terminal prompt at the same time, and the first answer wins: when the
+// terminal answers, the host stops the hook, which (or, if it was killed
+// outright, the listener once it stops polling) marks the Slack request as
+// ended. Unanswered, the hook waits a limited time and hands the prompt back
+// to the terminal.
 //
 // Button clicks and replies in the message's thread reach this home's
 // listener (the app's Socket Mode connection), which keeps the owner's
@@ -102,7 +105,7 @@ func approvalBlocks(text, unsafe, id string, wait time.Duration) []slack.Block {
 	return []slack.Block{
 		slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, text, false, false), nil, nil),
 		slack.NewActionBlock("", buttons...),
-		slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, fmt.Sprintf("%s After %s with no answer, the terminal asks.", note, wait), false, false)),
+		slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, fmt.Sprintf("%s The terminal can answer it too; after %s with no answer here, it is left to the terminal.", note, wait), false, false)),
 	}
 }
 
@@ -121,6 +124,10 @@ func approvalOutcome(decision, reason string, wait time.Duration) string {
 	}
 	return fmt.Sprintf("⏱ No answer after %s; answer it in the terminal.", wait)
 }
+
+// endedOutcome replaces the buttons when the host stopped the hook first:
+// the terminal answered (or the session moved on), so nothing is decided here.
+const endedOutcome = "↩️ No longer waiting: it was answered in the terminal, or the request ended. Nothing was decided here."
 
 // blockedNotice is what the project channel sees when an approval request
 // goes unanswered: the agent is now stuck at the terminal, and its peers
@@ -174,7 +181,7 @@ func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration
 		return 0
 	}
 
-	if _, err := SendControl(setup, c.home.ControlSocket, ControlRequest{Op: "approval-watch", Approval: id, Channel: channel, TS: ts}); err != nil {
+	if _, err := SendControl(setup, c.home.ControlSocket, ControlRequest{Op: "approval-watch", Approval: id, Channel: channel, TS: ts, Text: text}); err != nil {
 		fmt.Fprintf(c.stderr, "slack-agent-chat: registering approval with the listener: %v\n", err)
 	}
 
@@ -185,9 +192,14 @@ func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration
 		decision = decisionTerminal // there was no Allow button; never allow what was not shown
 	}
 
-	finish, cancelFinish := context.WithTimeout(ctx, relayTimeout)
+	// ctx ends early when the host stops the hook (the terminal answered):
+	// finish the redraw regardless.
+	finish, cancelFinish := context.WithTimeout(context.WithoutCancel(ctx), relayTimeout)
 	defer cancelFinish()
 	outcome := approvalOutcome(decision, reason, wait)
+	if decision == "" && ctx.Err() != nil {
+		outcome = endedOutcome
+	}
 	if _, _, _, err := c.bot.UpdateMessageContext(finish, channel, ts,
 		slack.MsgOptionText(outcome, false),
 		slack.MsgOptionBlocks(

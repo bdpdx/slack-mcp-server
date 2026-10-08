@@ -19,6 +19,7 @@ type hookEvent struct {
 	ToolName             string          `json:"tool_name"`
 	ToolInput            json.RawMessage `json:"tool_input"`
 	LastAssistantMessage string          `json:"last_assistant_message"`
+	Reason               string          `json:"reason"`    // PermissionDenied: the classifier's reason
 	PromptID             string          `json:"prompt_id"` // Claude Code
 	TurnID               string          `json:"turn_id"`   // Codex
 }
@@ -26,7 +27,7 @@ type hookEvent struct {
 // isQuietHook reports whether cmd is a hook that must never fail or block
 // its host: any error leaves things to the host's normal handling.
 func isQuietHook(cmd string) bool {
-	return cmd == "ask-hook" || cmd == "approval-hook" || cmd == "stop-hook"
+	return cmd == "ask-hook" || cmd == "approval-hook" || cmd == "denied-hook" || cmd == "stop-hook"
 }
 
 var slackEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")

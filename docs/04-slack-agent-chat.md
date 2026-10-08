@@ -68,11 +68,24 @@ trust new hooks in the next session.
   approve on its own; leave it out of such Codex homes. When installed: approval requests
   come to that channel with Allow / Deny / Answer in terminal buttons. Only the button can allow;
   a reply in the channel or the request's thread can deny (`no` plus a reason for the agent) or say
-  `terminal`. With no answer in
-  10 minutes (`--wait`), the terminal asks instead. A session registered in
-  a cohort (below) also posts a `BLOCKED:` notice naming the agent and the
-  tool (never its input) to its project channel, so the other agents know
-  it is stuck.
+  `terminal`. Claude Code shows its own terminal prompt at the same time, and
+  the first answer wins. When the terminal answers, the Slack request is
+  marked as ended (by the hook as Claude stops it, or by the listener within
+  about 15 seconds once the hook stops polling), so its buttons never linger.
+  With no answer in 10 minutes (`--wait`), the hook leaves the prompt to the
+  terminal. A session registered in a cohort (below) then also posts a
+  `BLOCKED:` notice naming the agent and the tool (never its input) to its
+  project channel, so the other agents know it is stuck.
+- `PermissionDenied` → `denied-hook` (Claude, auto mode only), with
+  `"timeout": 660`. An action the auto-mode classifier blocks shows no
+  permission prompt, so `approval-hook` never sees it. This hook posts the
+  blocked action and the classifier's reason to the direct channel with
+  Approve retry / Decline buttons, and the agent waits up to 10 minutes
+  (`--wait`). Approve answers `retry`: Claude Code tells the model it may
+  retry the call, and the classifier judges the retry again (the block
+  itself is not reversed). Decline, a reply opening with `no`, no answer, or
+  a denial without a classifier verdict (for which Claude ignores `retry`)
+  leaves the block standing. Only the button can approve.
 - `Stop` → `stop-hook` (both hosts): when a turn you started by typing at the terminal ends, the
   agent's bot DMs you its final response. Turns started by Slack messages, background work or
   subagents send nothing. This replaces a Codex `notify` push notification.

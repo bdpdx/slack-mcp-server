@@ -37,6 +37,7 @@ type SlackAPI interface {
 	GetConversationRepliesContext(ctx context.Context, params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error)
 	AddReactionContext(ctx context.Context, name string, item slack.ItemRef) error
 	PostMessageContext(ctx context.Context, channel string, options ...slack.MsgOption) (string, string, error)
+	UpdateMessageContext(ctx context.Context, channel, timestamp string, options ...slack.MsgOption) (string, string, string, error)
 }
 
 // UserAPI is the part of the owner's *slack.Client (user token) the listener
@@ -703,7 +704,7 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 	case "expect":
 		l.ExpectRelay(req.SessionID, req.Channel, req.Text)
 	case "approval-watch":
-		l.WatchApproval(req.Approval, req.Channel, req.TS)
+		l.WatchApproval(req.Approval, req.Channel, req.TS, req.Text)
 	case "approval":
 		decision, reason := l.TakeApproval(req.Approval)
 		return ControlResponse{OK: true, Decision: decision, Text: reason}
@@ -736,7 +737,15 @@ type approval struct {
 	hint             bool   // the owner typed an allow word, which cannot approve
 	early            *click // a click that arrived before the hook registered
 	at               time.Time
+	text             string    // the request as posted, to redraw it once it ends
+	polled           time.Time // the hook's last poll; a hook that stops polling is gone
+	closed           bool      // redrawn as no longer waiting
 }
+
+// approvalAbandoned is how long a registered hook may go without polling
+// (it polls every second) before its request counts as ended: the host
+// answered in the terminal and stopped the hook, or the session ended.
+const approvalAbandoned = 15 * time.Second
 
 // click is an owner's button click on a message posted by this bot.
 type click struct {
@@ -759,13 +768,14 @@ func (l *Listener) approvalEntry(id string) *approval {
 	return a
 }
 
-// WatchApproval registers the message approval-hook posted for request id,
-// so replies in its thread are read as answers instead of delivered.
-func (l *Listener) WatchApproval(id, channel, ts string) {
+// WatchApproval registers the message a hook posted for request id (text is
+// its body), so replies in its thread are read as answers instead of
+// delivered, and the message is redrawn if the hook goes away unanswered.
+func (l *Listener) WatchApproval(id, channel, ts, text string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	a := l.approvalEntry(id)
-	a.channel, a.ts = channel, ts
+	a.channel, a.ts, a.text, a.polled = channel, ts, text, l.Now()
 	if c := a.early; c != nil && a.decision == "" && c.channel == channel && c.ts == ts {
 		a.decision = c.decision
 	}
@@ -918,6 +928,9 @@ func (l *Listener) TakeApproval(id string) (decision, reason string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	a := l.approvals[id]
+	if a != nil {
+		a.polled = l.Now()
+	}
 	switch {
 	case a == nil || a.decision == decisionTaken:
 		return "", ""
@@ -930,6 +943,36 @@ func (l *Listener) TakeApproval(id string) (decision, reason string) {
 		return decisionHint, ""
 	}
 	return "", ""
+}
+
+// SweepApprovals redraws each registered request whose hook stopped polling
+// without taking an answer, so Slack never shows live buttons for a prompt
+// that ended elsewhere (the terminal answered it, or the session moved on).
+func (l *Listener) SweepApprovals(ctx context.Context) {
+	type ended struct{ channel, ts, text, line string }
+	var gone []ended
+	l.mu.Lock()
+	for _, a := range l.approvals {
+		if a.channel == "" || a.closed || a.decision == decisionTaken || l.Now().Sub(a.polled) < approvalAbandoned {
+			continue
+		}
+		a.closed = true
+		line := "↩️ No longer waiting: it was answered in the terminal, or the request ended. Nothing was decided here."
+		if a.decision != "" {
+			line = "↩️ Your answer arrived after the request had ended, so it changed nothing."
+		}
+		gone = append(gone, ended{a.channel, a.ts, a.text, line})
+	}
+	l.mu.Unlock()
+	for _, g := range gone {
+		blocks := []slack.Block{slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, g.line, false, false))}
+		if g.text != "" {
+			blocks = append([]slack.Block{slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, g.text, false, false), nil, nil)}, blocks...)
+		}
+		if _, _, _, err := l.API.UpdateMessageContext(ctx, g.channel, g.ts, slack.MsgOptionText(g.line, false), slack.MsgOptionBlocks(blocks...)); err != nil {
+			l.Log.Warn("redrawing an ended approval request failed", zap.String("channel", g.channel), zap.String("ts", g.ts), zap.Error(err))
+		}
+	}
 }
 
 // RecoverAll catches every restored session up on messages that arrived while
