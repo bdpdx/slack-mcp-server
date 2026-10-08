@@ -359,7 +359,10 @@ func (c *cli) ensureListener(ctx context.Context) error {
 	_ = cmd.Process.Release()
 	for i := 0; i < 60; i++ {
 		time.Sleep(250 * time.Millisecond)
-		if _, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "status"}); err == nil {
+		pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_, err := SendControl(pctx, c.home.ControlSocket, ControlRequest{Op: "status"})
+		cancel()
+		if err == nil {
 			return nil
 		}
 	}

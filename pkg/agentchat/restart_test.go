@@ -70,24 +70,24 @@ func (h *fakeHome) start() error {
 // winning, or a listener that dies, is an error.
 func TestReplaceWithVerifiesTheBuild(t *testing.T) {
 	h := &fakeHome{running: "old"}
-	v, err := replaceWith(h.probe, h.stop, h.start, "new", "log")
+	v, err := replaceWith(h.probe, h.stop, h.start, "new", "log", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "new", v)
 	assert.Equal(t, 1, h.stops)
 
 	h = &fakeHome{running: "old", racers: []string{"old"}}
-	v, err = replaceWith(h.probe, h.stop, h.start, "new", "log")
+	v, err = replaceWith(h.probe, h.stop, h.start, "new", "log", nil)
 	require.NoError(t, err, "an older listener that won the gap is replaced again")
 	assert.Equal(t, "new", v)
 	assert.Equal(t, 2, h.stops)
 
 	h = &fakeHome{running: "old", racers: []string{"old", "old", "old"}}
-	_, err = replaceWith(h.probe, h.stop, h.start, "new", "log")
+	_, err = replaceWith(h.probe, h.stop, h.start, "new", "log", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "old, not this binary's new")
 
 	dies := &fakeHome{running: "old"}
-	_, err = replaceWith(dies.probe, dies.stop, func() error { dies.starts++; return nil }, "new", "log")
+	_, err = replaceWith(dies.probe, dies.stop, func() error { dies.starts++; return nil }, "new", "log", nil)
 	require.Error(t, err, "a listener that exits right after starting is not success")
 	assert.Contains(t, err.Error(), "exited right after starting")
 }
@@ -202,12 +202,12 @@ func TestReplaceWithRetriesStart(t *testing.T) {
 		}
 		return h.start()
 	}
-	v, err := replaceWith(h.probe, h.stop, start, "new", "RECOVER")
+	v, err := replaceWith(h.probe, h.stop, start, "new", "RECOVER", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "new", v)
 
 	h = &fakeHome{running: "old"}
-	_, err = replaceWith(h.probe, h.stop, func() error { return errors.New("auth.test failed") }, "new", "RECOVER")
+	_, err = replaceWith(h.probe, h.stop, func() error { return errors.New("auth.test failed") }, "new", "RECOVER", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "did not start")
 	assert.Contains(t, err.Error(), "RECOVER")
@@ -452,7 +452,46 @@ func TestRefusedShutdownFailsRestart(t *testing.T) {
 	assert.Equal(t, 0, killed)
 	started := 0
 	_, err = replaceWith(func() (string, bool) { return "v1", true }, func() error { return c.stopListener(context.Background()) },
-		func() error { started++; return nil }, "v2", "RECOVER")
+		func() error { started++; return nil }, "v2", "RECOVER", nil)
 	require.Error(t, err)
 	assert.Equal(t, 0, started, "no start after a refused stop")
+}
+
+// The hold for an unregistered copy runs from the latest click, so a denial
+// clicked after an older click on the same request still holds the drain.
+func TestLatestClickRestartsCopyWait(t *testing.T) {
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	now := time.Unix(2000, 0)
+	l.Now = func() time.Time { return now }
+	l.HandleInteraction(clickOn("UBR", decisionAllow, "k", "C1", "2000.1", "BCL"))
+	now = now.Add(copyRegisterWait + time.Second)
+	l.HandleInteraction(clickOn("UBR", decisionDeny, "k", "C1", "2000.1", "BCL"))
+	l.mu.Lock()
+	waiting := l.answersWaitingLocked()
+	l.mu.Unlock()
+	assert.True(t, waiting, "the fresh denial holds the drain")
+}
+
+// A denial clicked on a copy before it registered, whose registration lands
+// after the fence, is cleared with a click-again note rather than kept for
+// a listener about to exit.
+func TestLateRegistrationClearsUncollectedDecision(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	l := newTestListener(t, api, &fakeDeliverer{})
+	now := time.Unix(2000, 0)
+	l.Now = func() time.Time { return now }
+	l.HandleInteraction(clickOn("UBR", decisionDeny, "m", "C1", "2000.1", "BCL"))
+	now = now.Add(copyRegisterWait)
+	l.Stop = func() {}
+	require.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "m", Channel: "C1", TS: "2000.1"}).OK)
+	d, _ := takeApproval(t, l, "m")
+	assert.Equal(t, "", d)
+	l.WaitNotes(2 * time.Second)
+	found := false
+	for _, p := range api.posts() {
+		found = found || strings.Contains(p, "Click again")
+	}
+	assert.True(t, found)
 }

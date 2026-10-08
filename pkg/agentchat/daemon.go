@@ -137,7 +137,9 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 	}()
 
 	sm := socketmode.New(botAPI)
+	events := make(chan struct{}) // closed when the event loop has stopped
 	go func() {
+		defer close(events)
 		for {
 			select {
 			case <-ctx.Done():
@@ -196,6 +198,12 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 
 	log.Info("listener started", zap.String("home", home.Dir), zap.String("bot_user", self.UserID), zap.String("owner", owner.UserID))
 	err = sm.RunContext(ctx)
+	// Let the event loop finish the event in hand, then the notes and
+	// redraws it started, so none is cut off by exit.
+	select {
+	case <-events:
+	case <-time.After(5 * time.Second):
+	}
 	l.WaitNotes(5 * time.Second)
 	if ctx.Err() != nil {
 		return nil

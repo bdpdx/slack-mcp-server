@@ -91,7 +91,8 @@ func (c *cli) replaceListener(ctx context.Context) (string, error) {
 		func() (string, bool) { return c.listenerState(ctx) },
 		func() error { return c.stopListener(ctx) },
 		func() error { return c.ensureListener(ctx) },
-		version.Version, c.recovery())
+		version.Version, c.recovery(),
+		func(msg string) { fmt.Fprintf(c.stderr, "listener restart (%s): %s\n", c.home.Dir, msg) })
 }
 
 // recovery is the command that starts this home's listener by hand.
@@ -102,9 +103,12 @@ func (c *cli) recovery() string {
 // replaceWith is replaceListener's protocol: probe reports the running
 // listener's build, stop and start replace it, want is the build that must
 // answer at the end. A start that fails is tried again.
-func replaceWith(probe func() (string, bool), stop, start func() error, want, recovery string) (string, error) {
+func replaceWith(probe func() (string, bool), stop, start func() error, want, recovery string, progress func(string)) (string, error) {
 	problem := ""
 	for i := 0; i < restartAttempts; i++ {
+		if progress != nil {
+			progress(fmt.Sprintf("attempt %d of %d: stopping the running listener, then starting %s", i+1, restartAttempts, want))
+		}
 		if _, up := probe(); up {
 			if err := stop(); err != nil {
 				return "", err

@@ -13,21 +13,19 @@ import (
 // no running listener, or one already on this build, are left alone. It
 // reports whether any restart failed.
 func RestartListeners(w io.Writer, r Runner, bin string, homes []Home) (failed bool) {
-	var lines []string
+	header := false
 	for _, h := range homes {
 		if !h.HasEnv {
 			continue
 		}
+		if !header {
+			fmt.Fprintln(w, "\nListeners")
+			header = true
+		}
+		fmt.Fprintf(w, "  %s: ", h.Path) // before the restart, which can take a while
 		out, err := r.Run(nil, bin, "chat", "--env-file", EnvPath(h.Path), "listener", "restart", "--if-running")
 		failed = failed || err != nil
-		lines = append(lines, fmt.Sprintf("  %s: %s", h.Path, restartLine(out, err)))
-	}
-	if len(lines) == 0 {
-		return false
-	}
-	fmt.Fprintln(w, "\nListeners")
-	for _, l := range lines {
-		fmt.Fprintln(w, l)
+		fmt.Fprintln(w, restartLine(out, err))
 	}
 	return failed
 }

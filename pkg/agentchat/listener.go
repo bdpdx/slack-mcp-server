@@ -778,6 +778,7 @@ type approval struct {
 	hint             *approvalMsg  // the copy where the owner typed an allow word, which cannot approve; read only under l.mu
 	clicks           []click       // owner Allow clicks waiting for their copy to register
 	at               time.Time
+	clicked          time.Time // the owner's latest recorded click
 	text             string    // the request as posted, to redraw it once it ends
 	polled           time.Time // the hook's last poll; a hook that stops polling is gone
 	ended            bool      // takes no more answers: the hook finished, or was given up on
@@ -901,6 +902,12 @@ func (l *Listener) WatchApproval(id, channel, ts, text string) int {
 			l.note(c.channel, c.ts, clickAgainNote)
 		}
 		a.clicks = nil
+		if a.decision != "" && a.decision != decisionTaken {
+			// An answer clicked on this copy before it registered; nothing
+			// can collect it before the listener exits.
+			a.decision, a.reason = "", ""
+			l.note(channel, ts, clickAgainNote)
+		}
 		return len(a.msgs)
 	}
 	a.applyClicks(l.Now())
@@ -969,9 +976,9 @@ func (l *Listener) HandleInteraction(payload []byte) {
 			// the owner clicked it on this bot's message carrying the request's
 			// id: it decides at once, before any Allow still waiting for its
 			// copy, and whether or not this copy is registered yet.
-			a.decision, a.clicks = decision, nil
+			a.decision, a.clicks, a.clicked = decision, nil, c.at
 		case len(a.clicks) < maxPendingClicks:
-			a.clicks = append(a.clicks, c)
+			a.clicks, a.clicked = append(a.clicks, c), c.at
 			a.applyClicks(c.at)
 		default:
 			l.Log.Warn("ignoring approval click: too many waiting for their copies", zap.String("approval", act.Value), zap.String("channel", c.channel), zap.String("ts", c.ts))
@@ -1228,7 +1235,7 @@ func (l *Listener) answersWaitingLocked() bool {
 		if a.ended {
 			continue
 		}
-		if len(a.msgs) == 0 && l.Now().Sub(a.at) >= copyRegisterWait {
+		if len(a.msgs) == 0 && l.Now().Sub(a.clicked) >= copyRegisterWait {
 			continue // a click on a request no hook registered: nothing can collect it
 		}
 		if (a.decision != "" && a.decision != decisionTaken) || len(a.clicks) > 0 || a.hint != nil {
@@ -1288,10 +1295,7 @@ func (l *Listener) SweepApprovals(ctx context.Context) {
 	}
 	l.mu.Unlock()
 	for _, r := range todo {
-		blocks := []slack.Block{slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, r.line, false, false))}
-		if r.text != "" {
-			blocks = append([]slack.Block{slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, r.text, false, false), nil, nil)}, blocks...)
-		}
+		blocks := outcomeBlocks(r.text, r.line)
 		var drawn []approvalMsg
 		var failed error
 		for _, c := range r.copies {
