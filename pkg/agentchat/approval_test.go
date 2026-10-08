@@ -72,10 +72,11 @@ func clickPayload(user, decision, id string) []byte {
 }
 
 func clickOn(user, decision, id, channel, ts, bot string) []byte {
+	label := map[string]string{decisionAllow: "Allow", decisionDeny: "Deny", decisionTerminal: "Answer in terminal", decisionAllowSimilar: similarLabel}[decision]
 	return []byte(`{"type":"block_actions","user":{"id":"` + user + `"},` +
 		`"container":{"type":"message","channel_id":"` + channel + `","message_ts":"` + ts + `"},` +
 		`"message":{"bot_id":"` + bot + `"},` +
-		`"actions":[{"action_id":"` + approvalActionPrefix + decision + `","value":"` + id + `"}]}`)
+		`"actions":[{"action_id":"` + approvalActionPrefix + decision + `","value":"` + id + `","text":{"type":"plain_text","text":"` + label + `"}}]}`)
 }
 
 func takeApproval(t *testing.T, l *Listener, id string) (string, string) {

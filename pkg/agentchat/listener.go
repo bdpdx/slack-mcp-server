@@ -1492,6 +1492,10 @@ func (l *Listener) HandleInteraction(payload []byte) {
 			l.Log.Warn("ignoring approval click with an unknown decision", zap.String("decision", decision))
 			continue
 		}
+		if labels, fixed := buttonLabels[decision]; fixed && !labels[act.Text.Text] {
+			l.Log.Warn("ignoring approval click on a relabelled button", zap.String("approval", act.Value), zap.String("decision", decision))
+			continue
+		}
 		id, ruleHash, _ := strings.Cut(act.Value, "|")
 		c := click{in.Container.ChannelID, in.Container.MessageTS, decision, l.Now(), ruleHash, act.Text.Text}
 		l.mu.Lock()

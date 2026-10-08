@@ -222,3 +222,18 @@ func TestProposalHoldsDrain(t *testing.T) {
 func TestRuleHelpListsFormats(t *testing.T) {
 	assert.True(t, strings.Contains(ruleHelp, "allow Bash(git push *)") && strings.Contains(ruleHelp, "allow git push"))
 }
+
+// Every fixed button grants only what its label said: a Deny relabelled as
+// Allow, or an Allow relabelled as Deny, is dropped.
+func TestFixedButtonsCheckTheirLabels(t *testing.T) {
+	ctx := context.Background()
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "f1", Channel: "C1", TS: "2000.1"}).OK)
+	l.HandleInteraction(clickLabeled("UBR", decisionAllow, "f1", "C1", "2000.1", "Deny"))
+	l.HandleInteraction(clickLabeled("UBR", decisionDeny, "f1", "C1", "2000.1", "Allow"))
+	d, _ := takeApproval(t, l, "f1")
+	assert.Equal(t, "", d, "relabelled buttons decide nothing")
+	l.HandleInteraction(clickLabeled("UBR", decisionAllow, "f1", "C1", "2000.1", "Approve retry"))
+	d, _ = takeApproval(t, l, "f1")
+	assert.Equal(t, decisionAllow, d, "the denied-hook's label counts")
+}

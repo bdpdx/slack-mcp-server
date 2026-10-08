@@ -190,6 +190,15 @@ func destinationLabel(d string) string {
 // similarLabel is the Allow similar button's text.
 const similarLabel = "Allow similar"
 
+// buttonLabels are the texts the hooks draw on the fixed buttons, by
+// decision (approval-hook and denied-hook). A click whose button text is not
+// one of them was relabelled after it was drawn, and is dropped.
+var buttonLabels = map[string]map[string]bool{
+	decisionAllow:    {"Allow": true, "Allow once": true, "Approve retry": true},
+	decisionDeny:     {"Deny": true, "Decline": true},
+	decisionTerminal: {"Answer in terminal": true},
+}
+
 // ruleButtonLabel is the confirm button's text for rule and decision (one of
 // the rule decisions). The listener requires a click's button text to equal
 // it, so a click grants only what its label said.
