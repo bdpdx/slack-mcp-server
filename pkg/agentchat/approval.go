@@ -168,26 +168,21 @@ func newApprovalID() string {
 func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration) int {
 	setup, cancel := context.WithTimeout(ctx, relayTimeout)
 	defer cancel()
-	channel, name, me, err := c.directChannel(setup, c.hookSession(ev))
+	targets, me, err := c.directChannels(setup, c.hookSession(ev))
 	if err != nil {
 		return 0
 	}
 	text, unsafe := FormatApproval(me.ownerID, me.agentName, ev.ToolName, ev.ToolInput)
 	id := newApprovalID()
-	_, ts, err := c.bot.PostMessageContext(setup, channel,
+	posted := c.postRequest(setup, targets, "approval request", id, text,
 		slack.MsgOptionText(fmt.Sprintf("%s needs your approval: %s", me.agentName, ev.ToolName), false),
 		slack.MsgOptionBlocks(approvalBlocks(text, unsafe, id, wait)...))
-	if err != nil {
-		fmt.Fprintf(c.stderr, "slack-agent-chat: posting approval request to #%s: %v\n", name, err)
+	if len(posted) == 0 {
 		return 0
 	}
 
-	if _, err := SendControl(setup, c.home.ControlSocket, ControlRequest{Op: "approval-watch", Approval: id, Channel: channel, TS: ts, Text: text}); err != nil {
-		fmt.Fprintf(c.stderr, "slack-agent-chat: registering approval with the listener: %v\n", err)
-	}
-
 	waitCtx, cancelWait := context.WithTimeout(ctx, wait)
-	decision, reason := c.waitForApproval(waitCtx, channel, ts, id, text, approvalHint)
+	decision, reason := c.waitForApproval(waitCtx, posted, id, text, approvalHint)
 	cancelWait()
 	if decision == decisionAllow && unsafe != "" {
 		decision = decisionTerminal // there was no Allow button; never allow what was not shown
@@ -201,7 +196,7 @@ func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration
 	if decision == decisionEnded || (decision == "" && ctx.Err() != nil) {
 		outcome = endedOutcome
 	}
-	c.finishRequest(finish, channel, ts, id, text, outcome)
+	c.finishRequest(finish, posted, id, text, outcome)
 	if decision == "" && ctx.Err() == nil {
 		c.postBlocked(finish, c.hookSession(ev), me.agentName, ev.ToolName, wait)
 	}
@@ -211,17 +206,66 @@ func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration
 	return 0
 }
 
-// postBlocked tells the session's project channel that the agent is stuck
-// waiting at the terminal, after the Slack wait ran out. Only sessions
-// registered in that project's cohort do; others keep the plain behavior.
+// postBlocked tells the session's project channels that the agent is stuck
+// waiting at the terminal, after the Slack wait ran out. Only projects whose
+// cohort the session registered in hear it; others keep the plain behavior.
 func (c *cli) postBlocked(ctx context.Context, session, agent, tool string, wait time.Duration) {
-	project, name, err := c.watchedProject(ctx, session)
-	if err != nil || !c.registeredIn(ctx, session, project) {
-		return // only cohort sessions announce that they are blocked
+	ids, names, err := c.sessionChannels(ctx, session)
+	if err != nil {
+		return
 	}
-	if _, _, err := c.bot.PostMessageContext(ctx, project, slack.MsgOptionText(blockedNotice(agent, tool, wait), false)); err != nil {
-		fmt.Fprintf(c.stderr, "slack-agent-chat: posting blocked notice to #%s: %v\n", name, err)
+	for _, id := range ids {
+		if _, derived := ProjectOf(names[id]); derived || !c.registeredIn(ctx, session, id) {
+			continue // only cohort sessions announce that they are blocked
+		}
+		if _, _, err := c.bot.PostMessageContext(ctx, id, slack.MsgOptionText(blockedNotice(agent, tool, wait), false)); err != nil {
+			fmt.Fprintf(c.stderr, "slack-agent-chat: posting blocked notice to #%s: %v\n", names[id], err)
+		}
 	}
+}
+
+// postRequest posts request id (text is its body) in each target and
+// registers every copy with the listener, returning the copies posted.
+func (c *cli) postRequest(ctx context.Context, targets []namedChannel, what, id, text string, opts ...slack.MsgOption) []postedMsg {
+	return postCopies(targets,
+		func(t namedChannel) (string, error) {
+			_, ts, err := c.bot.PostMessageContext(ctx, t.id, opts...)
+			if err != nil {
+				fmt.Fprintf(c.stderr, "slack-agent-chat: posting %s to #%s: %v\n", what, t.name, err)
+			}
+			return ts, err
+		},
+		func(p postedMsg) (int, error) {
+			resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval-watch", Approval: id, Channel: p.channel, TS: p.ts, Text: text})
+			if err != nil {
+				fmt.Fprintf(c.stderr, "slack-agent-chat: registering %s with the listener: %v\n", what, err)
+			}
+			return resp.Copies, err
+		})
+}
+
+// postCopies posts a request in each target and registers each copy (watch
+// returns how many copies the listener holds). A further copy is posted only
+// after a registration has confirmed a count: a listener that answers
+// without one predates multi-copy requests and keeps only the last copy
+// registered, so an answer on any other copy would be lost. Until a count
+// confirms support (the first registration failed, or the listener is
+// older), the request stays at the one copy posted, which the poll
+// registers again.
+func postCopies(targets []namedChannel, post func(namedChannel) (string, error), watch func(postedMsg) (int, error)) []postedMsg {
+	var posted []postedMsg
+	for _, t := range targets {
+		ts, err := post(t)
+		if err != nil {
+			continue
+		}
+		p := postedMsg{t.id, t.name, ts}
+		posted = append(posted, p)
+		if n, err := watch(p); err != nil || n == 0 {
+			return posted // multi-copy support not confirmed: one copy only
+		}
+	}
+	return posted
 }
 
 // approvalHint and deniedHint answer an owner who typed an allow word.
@@ -237,9 +281,9 @@ const hintTimeout = 5 * time.Second
 // waitForApproval polls the listener for the owner's answer until one
 // arrives, ctx ends ("" decision) or the listener ended the request
 // (decisionEnded). When the owner types an allow word, it
-// posts hint in the thread and keeps waiting. A listener that lost the
-// request (it restarted) gets the message (text) registered again.
-func (c *cli) waitForApproval(ctx context.Context, channel, ts, id, text, hint string) (string, string) {
+// posts hint in that copy's thread and keeps waiting. A listener that lost
+// the request (it restarted) gets its copies (text) registered again.
+func (c *cli) waitForApproval(ctx context.Context, posted []postedMsg, id, text, hint string) (string, string) {
 	tick := time.NewTicker(approvalPoll)
 	defer tick.Stop()
 	for {
@@ -249,14 +293,26 @@ func (c *cli) waitForApproval(ctx context.Context, channel, ts, id, text, hint s
 		case <-tick.C:
 		}
 		resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval", Approval: id})
+		if err == nil && !resp.Ended && (resp.Unknown || (resp.Copies > 0 && resp.Copies < len(posted))) {
+			// The listener restarted, or registering a copy failed: register
+			// every copy again (one it has already adds nothing). A listener
+			// too old to count copies reports none and is left alone.
+			for _, p := range posted {
+				_, _ = SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval-watch", Approval: id, Channel: p.channel, TS: p.ts, Text: text})
+			}
+		}
 		switch {
 		case err != nil:
 		case resp.Ended:
 			return decisionEnded, ""
-		case resp.Unknown:
-			_, _ = SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval-watch", Approval: id, Channel: channel, TS: ts, Text: text})
 		case resp.Decision == "":
 		case resp.Decision == decisionHint:
+			channel, ts := posted[0].channel, posted[0].ts
+			for _, p := range posted {
+				if p.channel == resp.Channel && p.ts == resp.TS {
+					channel, ts = p.channel, p.ts
+				}
+			}
 			post, cancel := context.WithTimeout(ctx, hintTimeout)
 			if _, _, err := c.bot.PostMessageContext(post, channel, slack.MsgOptionTS(ts), slack.MsgOptionText(hint, false)); err != nil {
 				fmt.Fprintf(c.stderr, "slack-agent-chat: posting approval hint: %v\n", err)
@@ -268,19 +324,22 @@ func (c *cli) waitForApproval(ctx context.Context, channel, ts, id, text, hint s
 	}
 }
 
-// finishRequest redraws a settled request with its outcome and tells the
-// listener the hook finished. If the redraw failed, the listener is given
-// the outcome and retries it, so stale buttons never outlive the hook.
-func (c *cli) finishRequest(ctx context.Context, channel, ts, id, text, outcome string) {
+// finishRequest redraws every copy of a settled request with its outcome and
+// tells the listener the hook finished. If any redraw failed, the listener
+// is given the outcome and redraws the copies again until they all show it,
+// so stale buttons never outlive the hook.
+func (c *cli) finishRequest(ctx context.Context, posted []postedMsg, id, text, outcome string) {
 	owed := ""
-	if _, _, _, err := c.bot.UpdateMessageContext(ctx, channel, ts,
-		slack.MsgOptionText(outcome, false),
-		slack.MsgOptionBlocks(
-			slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, text, false, false), nil, nil),
-			slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, outcome, false, false)),
-		)); err != nil {
-		fmt.Fprintf(c.stderr, "slack-agent-chat: updating request: %v\n", err)
-		owed = outcome
+	for _, p := range posted {
+		if _, _, _, err := c.bot.UpdateMessageContext(ctx, p.channel, p.ts,
+			slack.MsgOptionText(outcome, false),
+			slack.MsgOptionBlocks(
+				slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, text, false, false), nil, nil),
+				slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, outcome, false, false)),
+			)); err != nil {
+			fmt.Fprintf(c.stderr, "slack-agent-chat: updating request in #%s: %v\n", p.name, err)
+			owed = outcome
+		}
 	}
 	// A budget of its own: the redraw may have used up ctx's.
 	end, cancel := context.WithTimeout(context.WithoutCancel(ctx), hintTimeout)

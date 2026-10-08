@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -87,6 +88,8 @@ func takeApproval(t *testing.T, l *Listener, id string) (string, string) {
 // decision, decides; the first click wins; the hook takes it once.
 func TestListenerApprovalClicks(t *testing.T) {
 	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	now := time.Unix(2000, 0)
+	l.Now = func() time.Time { return now }
 	ctx := context.Background()
 	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "a1", Channel: "C1", TS: "2000.1"}).OK)
 
@@ -96,6 +99,7 @@ func TestListenerApprovalClicks(t *testing.T) {
 	l.HandleInteraction(clickOn("UBR", "everything", "a1", "C1", "2000.1", "BCL"))
 	d, _ := takeApproval(t, l, "a1")
 	assert.Equal(t, "", d, "not the owner, another bot's message, another message, unknown decision")
+	now = now.Add(clickCopyWait) // the click on another message never got its copy registered
 
 	l.HandleInteraction(clickPayload("UBR", decisionDeny, "a1"))
 	l.HandleInteraction(clickPayload("UBR", decisionAllow, "a1"))
