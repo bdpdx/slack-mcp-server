@@ -30,8 +30,15 @@ type hookEvent struct {
 }
 
 // codex reports whether the event comes from Codex, which takes no
-// permission rules back from hooks.
-func (ev hookEvent) codex() bool { return ev.TurnID != "" && ev.PromptID == "" }
+// permission rules back from hooks. Claude Code marks the processes it
+// starts, hooks included, with CLAUDECODE=1; its events also carry a
+// turn_id now, so the event's fields alone can't tell the two apart.
+func (ev hookEvent) codex() bool {
+	if os.Getenv("CLAUDECODE") != "" {
+		return false
+	}
+	return os.Getenv("CODEX_THREAD_ID") != "" || ev.TurnID != ""
+}
 
 // isQuietHook reports whether cmd is a hook that must never fail or block
 // its host: any error leaves things to the host's normal handling.

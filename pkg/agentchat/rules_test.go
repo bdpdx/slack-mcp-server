@@ -88,8 +88,14 @@ func TestPermissionAllowWith(t *testing.T) {
 }
 
 func TestHookEventKind(t *testing.T) {
+	t.Setenv("CLAUDECODE", "1")
+	assert.False(t, hookEvent{SessionID: "s", TurnID: "t1"}.codex(), "Claude Code events carry turn_id too")
+	t.Setenv("CLAUDECODE", "")
+	t.Setenv("CODEX_THREAD_ID", "th1")
+	assert.True(t, hookEvent{}.codex())
+	t.Setenv("CODEX_THREAD_ID", "")
 	assert.True(t, hookEvent{TurnID: "t1"}.codex())
-	assert.False(t, hookEvent{SessionID: "s", PromptID: "p"}.codex())
+	assert.False(t, hookEvent{SessionID: "s"}.codex())
 }
 
 func TestRuleConfirmBlocks(t *testing.T) {
