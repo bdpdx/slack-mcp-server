@@ -644,11 +644,12 @@ func TestCohortRecheckOnlyForPossibleGMSignals(t *testing.T) {
 
 // When the new authority is not yet visible on arrival (a push still
 // landing, or from another machine before the next fetch), the mention is
-// kept and classified on a later tick, still counting from its own time.
+// kept and classified on a later tick, still counting from its own time. A
+// second, non-GM mention in the same message does not hold it back.
 func TestCohortNewGMMentionReplayedAfterAuthorityLands(t *testing.T) {
 	f := newCohortFixture(t)
 	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100",
-		User: "UBR", Text: "<@UCR> please decide"})
+		User: "UBR", Text: "<@UCR> <@UCB> please decide"})
 	assert.Equal(t, 0, f.watchCount(), "codex-r is not GM in any view yet")
 	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "gm.json"),
 		[]byte(`{"term":1,"gm":"codex-r","claim_id":"changed-authority"}`), 0o600))
@@ -711,4 +712,52 @@ func TestCohortNewGMMentionAfterRemoteClaimWithinFetchInterval(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, n, "the mention survives the fetch interval")
+}
+
+// A mention of an agent from before it became GM owed no GM answer: once it
+// claims, that kept message is not replayed into an outage.
+func TestCohortPreClaimMentionIsNotReplayed(t *testing.T) {
+	f := newCohortFixture(t)
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100",
+		User: "UBR", Text: "<@UCR> heads up, rez1 is down"})
+	f.at(5 * time.Minute)
+	since := f.now.Format(time.RFC3339)
+	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "gm.json"),
+		[]byte(`{"term":1,"gm":"codex-r","claim_id":"later","since":"`+since+`"}`), 0o600))
+	f.at(6 * time.Minute)
+	f.tick()
+	f.tick()
+	assert.Equal(t, 0, f.watchCount(), "sent before codex-r became GM")
+	f.at(29 * time.Minute)
+	f.tick()
+	assert.Empty(t, f.notices("s2"))
+	assert.Empty(t, f.notices("s3"))
+}
+
+// With a real remote, a joint ask naming the new GM beside another roster
+// agent is replayed like a single mention.
+func TestCohortNewGMMixedMentionAfterRemoteClaim(t *testing.T) {
+	_, clones := gmRepo(t, 2)
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListenerAs(t, api, d, Identity{UserID: "UCB", BotID: "BCB"})
+	now := time.Unix(1_800_000_000, 0)
+	l.Now = func() time.Time { return now }
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s2"), 0))
+	resp := l.Control(context.Background(), ControlRequest{Op: "cohort-register", SessionID: "s2",
+		Cohort: &CohortReg{Project: "proj", Agent: "codex-b", Root: clones[0], Channel: "C1"}})
+	require.True(t, resp.OK, resp.Error)
+	r, err := newClaimer(clones[1], "codex-r").Claim(context.Background(), 0, "claude", "elsewhere")
+	require.NoError(t, err)
+	require.Equal(t, ClaimWon, r.Outcome)
+	now = now.Add(time.Second)
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000001.000100", User: "UBR", Text: "<@UCR> <@UCB> please decide"})
+	now = now.Add(26 * time.Minute)
+	l.CohortTick(context.Background())
+	n := 0
+	for _, g := range d.got {
+		if strings.Contains(g.text, "[cohort]") {
+			n++
+		}
+	}
+	require.Equal(t, 1, n, "the extra non-GM mention does not suppress the GM watch")
 }
