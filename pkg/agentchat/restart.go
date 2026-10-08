@@ -41,23 +41,65 @@ func (c *cli) listenerCmd(ctx context.Context, args []string) error {
 		return err
 	}
 	before, running := c.listenerVersion(ctx)
-	if running {
-		if err := c.stopListener(ctx); err != nil {
-			return err
-		}
-	}
 	out := map[string]any{"ok": true, "home": c.home.Dir, "was_running": running, "previous_version": before}
 	if op == "stop" || (!running && *ifRunning) {
+		if running {
+			if err := c.stopListener(ctx); err != nil {
+				return err
+			}
+		}
 		c.printJSON(out)
 		return nil
 	}
-	if err := c.ensureListener(ctx); err != nil {
+	after, err := c.replaceListener(ctx)
+	if err != nil {
 		return err
 	}
-	after, _ := c.listenerVersion(ctx)
 	out["running"], out["version"], out["binary_version"] = true, after, version.Version
 	c.printJSON(out)
 	return nil
+}
+
+// restartAttempts bounds how often restart retries when some other listener
+// (another session's watch command, run from an older binary) takes the home
+// in the gap between stopping the old listener and starting this one.
+const restartAttempts = 3
+
+// replaceListener stops whatever listener runs for the home and starts this
+// binary's, and succeeds only once the home's listener answers with this
+// binary's own build.
+func (c *cli) replaceListener(ctx context.Context) (string, error) {
+	return replaceWith(
+		func() (string, bool) { return c.listenerVersion(ctx) },
+		func() error { return c.stopListener(ctx) },
+		func() error { return c.ensureListener(ctx) },
+		version.Version, c.home.LogFile)
+}
+
+// replaceWith is replaceListener's protocol: probe reports the running
+// listener's build, stop and start replace it, want is the build that must
+// answer at the end.
+func replaceWith(probe func() (string, bool), stop, start func() error, want, logFile string) (string, error) {
+	got := ""
+	for i := 0; i < restartAttempts; i++ {
+		if _, up := probe(); up {
+			if err := stop(); err != nil {
+				return "", err
+			}
+		}
+		if err := start(); err != nil {
+			return "", err
+		}
+		v, up := probe()
+		if up && v == want {
+			return v, nil
+		}
+		got = v
+		if !up {
+			got = "none (the new listener exited)"
+		}
+	}
+	return "", fmt.Errorf("the home's listener is %s, not this binary's %s, after %d attempts; see %s", got, want, restartAttempts, logFile)
 }
 
 // listenerVersion reports whether the home's listener answers, and its
