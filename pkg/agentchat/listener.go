@@ -75,7 +75,7 @@ type Listener struct {
 	queues        map[string]chan []pending // per-session delivery queues (Async)
 	approvals     map[string]*approval      // approval-hook requests by approval ID
 	closing       bool                      // shutting down: records no new answer (set under mu)
-	notes         sync.WaitGroup            // restart notes being posted
+	inflight      int                       // restart notes and redraws still being posted (under mu)
 	views         cohortViews               // project views for cohort tracking
 	approvalWaits map[string]*approvalWait  // Codex registrations seen waiting on an approval, by session|project
 	unobservable  map[string]bool           // Codex sessions whose daemon hides approval waits (warned once)
@@ -792,6 +792,14 @@ type approvalMsg struct {
 	drawn       bool // shows the owed outcome
 }
 
+// clickAgainNote answers a click the listener could not record.
+const clickAgainNote = "That click arrived while the listener was restarting and was not recorded. Click again in a few seconds."
+
+// copyRegisterWait is how long a click on a copy no hook has registered yet
+// holds up a shutdown: a hook registers each copy right after posting it, so
+// one still unregistered after this is a stale button nothing can collect.
+const copyRegisterWait = 2 * time.Second
+
 // maxPendingClicks bounds the Allow clicks kept waiting for their copies,
 // and clickCopyWait is how long one waits for its copy to register before it
 // is dropped (a hook registers each copy right after posting it). Dropping
@@ -886,6 +894,15 @@ func (l *Listener) WatchApproval(id, channel, ts, text string) int {
 		a.msgs = append(a.msgs, approvalMsg{channel: channel, ts: ts})
 	}
 	a.text, a.polled = text, l.Now()
+	if l.closing {
+		// Shutting down: a waiting click applied now would be lost with this
+		// listener's memory. Drop it and ask the owner to click again.
+		for _, c := range a.clicks {
+			l.note(c.channel, c.ts, clickAgainNote)
+		}
+		a.clicks = nil
+		return len(a.msgs)
+	}
 	a.applyClicks(l.Now())
 	return len(a.msgs)
 }
@@ -938,7 +955,7 @@ func (l *Listener) HandleInteraction(payload []byte) {
 			l.mu.Unlock()
 			l.Log.Info("approval click during shutdown; asking the owner to click again", zap.String("approval", act.Value))
 			l.mu.Lock()
-			l.note(c.channel, c.ts, "That click arrived while the listener was restarting and was not recorded. Click again in a few seconds.")
+			l.note(c.channel, c.ts, clickAgainNote)
 			l.mu.Unlock()
 			continue
 		}
@@ -1116,7 +1133,31 @@ func (l *Listener) EndApproval(id, owed string) {
 	if a := l.approvals[id]; a != nil {
 		a.ended, a.retryAt, a.tries = true, l.Now(), 0
 		a.setOwed(owed)
+		if l.closing && owed != "" {
+			// The sweep that would retry it dies with this listener: redraw
+			// now, before the daemon exits.
+			text, copies := a.text, append([]approvalMsg(nil), a.msgs...)
+			l.track(func() {
+				for _, c := range copies {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					if _, _, _, err := l.API.UpdateMessageContext(ctx, c.channel, c.ts, slack.MsgOptionText(owed, false), slack.MsgOptionBlocks(outcomeBlocks(text, owed)...)); err != nil {
+						l.Log.Warn("redrawing an ended request during shutdown failed", zap.Error(err))
+					}
+					cancel()
+				}
+			})
+		}
 	}
+}
+
+// outcomeBlocks lays out a settled request: its text (if known), then the
+// outcome line.
+func outcomeBlocks(text, line string) []slack.Block {
+	blocks := []slack.Block{slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, line, false, false))}
+	if text != "" {
+		blocks = append([]slack.Block{slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, text, false, false), nil, nil)}, blocks...)
+	}
+	return blocks
 }
 
 // closeForShutdown waits, until deadline, for hooks to collect every answer
@@ -1144,24 +1185,39 @@ func (l *Listener) closeForShutdown(deadline time.Time) bool {
 // blocking; WaitNotes lets a stopping daemon finish posting. Call with l.mu
 // held.
 func (l *Listener) note(channel, ts, text string) {
-	l.notes.Add(1)
-	go func() {
-		defer l.notes.Done()
+	l.track(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if _, _, err := l.API.PostMessageContext(ctx, channel, slack.MsgOptionTS(ts), slack.MsgOptionText(text, false)); err != nil {
 			l.Log.Warn("posting a restart note failed", zap.Error(err))
 		}
+	})
+}
+
+// track runs fn in its own goroutine, counted so WaitNotes can wait for it.
+// Call with l.mu held.
+func (l *Listener) track(fn func()) {
+	l.inflight++
+	go func() {
+		defer func() {
+			l.mu.Lock()
+			l.inflight--
+			l.mu.Unlock()
+		}()
+		fn()
 	}()
 }
 
-// WaitNotes waits up to d for restart notes still being posted.
+// WaitNotes waits up to d for restart notes and redraws still being posted,
+// including any started while it waits.
 func (l *Listener) WaitNotes(d time.Duration) {
-	done := make(chan struct{})
-	go func() { l.notes.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(d):
+	for deadline := time.Now().Add(d); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		l.mu.Lock()
+		n := l.inflight
+		l.mu.Unlock()
+		if n == 0 {
+			return
+		}
 	}
 }
 
@@ -1169,7 +1225,10 @@ func (l *Listener) WaitNotes(d time.Duration) {
 // an Allow click, its hook has not collected yet. Call with l.mu held.
 func (l *Listener) answersWaitingLocked() bool {
 	for _, a := range l.approvals {
-		if a.ended || len(a.msgs) == 0 {
+		if a.ended {
+			continue
+		}
+		if len(a.msgs) == 0 && l.Now().Sub(a.at) >= copyRegisterWait {
 			continue // a click on a request no hook registered: nothing can collect it
 		}
 		if (a.decision != "" && a.decision != decisionTaken) || len(a.clicks) > 0 || a.hint != nil {

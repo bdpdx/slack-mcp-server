@@ -347,10 +347,91 @@ func TestShutdownFenceRecordsNothing(t *testing.T) {
 func TestOrphanAnswerDoesNotBlockShutdown(t *testing.T) {
 	ctx := context.Background()
 	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	now := time.Unix(2000, 0)
+	l.Now = func() time.Time { return now }
 	l.HandleInteraction(clickOn("UBR", decisionDeny, "ghost", "C1", "2000.1", "BCL"))
 	l.HandleInteraction(clickOn("UBR", decisionAllow, "ghost2", "C1", "2000.2", "BCL"))
+	now = now.Add(copyRegisterWait)
 	l.Stop = func() {}
 	assert.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+}
+
+// A denial clicked between a hook posting its copy and registering it holds
+// the shutdown until the copy registers and the hook collects it.
+func TestFreshUnregisteredAnswerHoldsShutdown(t *testing.T) {
+	ctx := context.Background()
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	l.HandleInteraction(clickOn("UBR", decisionDeny, "f", "C1", "2000.1", "BCL"))
+	l.Stop = func() {}
+	done := make(chan ControlResponse, 1)
+	go func() { done <- l.Control(ctx, ControlRequest{Op: "shutdown"}) }()
+	select {
+	case <-done:
+		t.Fatal("fenced while a fresh denial waited for its copy to register")
+	case <-time.After(300 * time.Millisecond):
+	}
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "f", Channel: "C1", TS: "2000.1"}).OK)
+	d, _ := takeApproval(t, l, "f")
+	assert.Equal(t, decisionDeny, d)
+	assert.True(t, (<-done).OK)
+}
+
+// A copy registered after the fence does not apply a waiting click (it
+// would be lost); the click is dropped and the owner asked to click again.
+func TestRegistrationAfterFenceAppliesNoClick(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	l := newTestListener(t, api, &fakeDeliverer{})
+	now := time.Unix(2000, 0)
+	l.Now = func() time.Time { return now }
+	l.HandleInteraction(clickOn("UBR", decisionAllow, "g", "C1", "2000.1", "BCL"))
+	now = now.Add(copyRegisterWait)
+	l.Stop = func() {}
+	require.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "g", Channel: "C1", TS: "2000.1"}).OK)
+	d, _ := takeApproval(t, l, "g")
+	assert.Equal(t, "", d)
+	l.WaitNotes(2 * time.Second)
+	found := false
+	for _, p := range api.posts() {
+		found = found || strings.Contains(p, "Click again")
+	}
+	assert.True(t, found)
+}
+
+// A hook that ends during shutdown with its redraw failed gets the redraw
+// done before the listener exits, not left to a sweep that never runs.
+func TestOwedRedrawDuringShutdown(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	l := newTestListener(t, api, &fakeDeliverer{})
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "h", Channel: "C1", TS: "2000.1", Text: "req"}).OK)
+	takeApproval(t, l, "h")
+	l.Stop = func() {}
+	require.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-end", Approval: "h", Text: "✅ Allowed."}).OK)
+	l.WaitNotes(2 * time.Second)
+	assert.Equal(t, []string{"C1|2000.1|✅ Allowed."}, api.updates())
+}
+
+// WaitNotes waits for work started while it waits, too.
+func TestWaitNotesCoversLateWork(t *testing.T) {
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	finished := make(chan struct{})
+	l.mu.Lock()
+	l.track(func() {
+		time.Sleep(50 * time.Millisecond)
+		l.mu.Lock()
+		l.track(func() { time.Sleep(100 * time.Millisecond); close(finished) })
+		l.mu.Unlock()
+	})
+	l.mu.Unlock()
+	l.WaitNotes(2 * time.Second)
+	select {
+	case <-finished:
+	default:
+		t.Fatal("returned before late work finished")
+	}
 }
 
 // A shutdown refused because answers are waiting fails the restart: the old
