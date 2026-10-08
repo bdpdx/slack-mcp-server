@@ -57,6 +57,12 @@ type ControlResponse struct {
 	// Unavailable marks a cohort-claim-check refusal for missing evidence
 	// (an unreadable lookup), as opposed to a definite no.
 	Unavailable bool `json:"unavailable,omitempty"`
+	// Unknown marks an "approval" poll for a request this listener has no
+	// record of (it restarted): the hook registers its message again.
+	Unknown bool `json:"unknown,omitempty"`
+	// Ended marks an "approval" poll for a request the listener has ended
+	// (it gave up on the hook): it takes no answer, and the hook stops.
+	Ended bool `json:"ended,omitempty"`
 	// Version is the running listener's build (op "status"). A listener
 	// older than this field leaves it empty: its version is unknown.
 	Version string `json:"version,omitempty"`

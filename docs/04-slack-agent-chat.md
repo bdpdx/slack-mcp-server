@@ -68,11 +68,31 @@ trust new hooks in the next session.
   approve on its own; leave it out of such Codex homes. When installed: approval requests
   come to that channel with Allow / Deny / Answer in terminal buttons. Only the button can allow;
   a reply in the channel or the request's thread can deny (`no` plus a reason for the agent) or say
-  `terminal`. With no answer in
-  10 minutes (`--wait`), the terminal asks instead. A session registered in
-  a cohort (below) also posts a `BLOCKED:` notice naming the agent and the
-  tool (never its input) to its project channel, so the other agents know
-  it is stuck.
+  `terminal`. Claude Code has been observed to show its own terminal prompt at
+  the same time (its docs don't say), and the first answer wins. A hook that
+  finishes, or is stopped by its host, redraws its request as ended; if a
+  hook is killed outright, the listener redraws it about 30 seconds after the
+  hook stops polling. (A listener restart loses its record of pending
+  requests; a hook still waiting registers its request again.)
+  With no answer in 10 minutes (`--wait`), the hook leaves the prompt to the
+  terminal. A session registered in a cohort (below) then also posts a
+  `BLOCKED:` notice naming the agent and the tool (never its input) to its
+  project channel, so the other agents know it is stuck.
+- `PermissionDenied` → `denied-hook` (Claude, auto mode only), with
+  `"timeout": 660`. An action the auto-mode classifier blocks shows no
+  permission prompt, so `approval-hook` never sees it. This hook posts the
+  blocked action and the classifier's reason to the direct channel with
+  Approve retry / Decline buttons, and the agent waits up to 10 minutes
+  (`--wait`). Approve answers `retry`: Claude Code tells the model it may
+  retry the call, and the classifier judges the retry again (the block
+  itself is not reversed). Decline, a reply opening with `no`, no answer, or
+  a denial without a classifier verdict (for which Claude ignores `retry`)
+  leaves the block standing; a reply of `terminal` declines, since there is
+  no terminal prompt. Only the button can approve. For an exfiltration
+  verdict, or one naming no rule (for example "Blocked by classifier"), the
+  input is not relayed to Slack and the request cannot be approved there, so
+  the hook posts a notice and the agent does not wait. A request the listener
+  has ended takes no late answer.
 - `Stop` → `stop-hook` (both hosts): when a turn you started by typing at the terminal ends, the
   agent's bot DMs you its final response. Turns started by Slack messages, background work or
   subagents send nothing. This replaces a Codex `notify` push notification.

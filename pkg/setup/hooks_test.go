@@ -47,8 +47,10 @@ func TestClaudeHookSpecs(t *testing.T) {
 	assert.Equal(t, 660, byHook["approval-hook"].Timeout)
 	assert.Equal(t, "AskUserQuestion", byHook["ask-hook"].Matcher)
 	assert.Equal(t, "PreToolUse", byHook["ask-hook"].Event)
-	assert.Len(t, specs, 4)
-	assert.Len(t, CodexHookSpecs(true), 3)
+	assert.Equal(t, "PermissionDenied", byHook["denied-hook"].Event)
+	assert.Equal(t, 660, byHook["denied-hook"].Timeout, "outlasts its 10m wait")
+	assert.Len(t, specs, 5)
+	assert.Len(t, CodexHookSpecs(true), 3, "Codex has no PermissionDenied event")
 }
 
 func countCommands(events map[string]any, hook string) int {

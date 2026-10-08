@@ -19,6 +19,7 @@ type hookEvent struct {
 	ToolName             string          `json:"tool_name"`
 	ToolInput            json.RawMessage `json:"tool_input"`
 	LastAssistantMessage string          `json:"last_assistant_message"`
+	Reason               string          `json:"reason"`    // PermissionDenied: the classifier's reason
 	PromptID             string          `json:"prompt_id"` // Claude Code
 	TurnID               string          `json:"turn_id"`   // Codex
 }
@@ -26,7 +27,7 @@ type hookEvent struct {
 // isQuietHook reports whether cmd is a hook that must never fail or block
 // its host: any error leaves things to the host's normal handling.
 func isQuietHook(cmd string) bool {
-	return cmd == "ask-hook" || cmd == "approval-hook" || cmd == "stop-hook"
+	return cmd == "ask-hook" || cmd == "approval-hook" || cmd == "denied-hook" || cmd == "stop-hook"
 }
 
 var slackEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
@@ -101,6 +102,15 @@ func revealHidden(s string) (string, bool) {
 // render invisibly or reorder text. Such a request must not be allowed from
 // Slack; unsafe says why.
 func FormatApproval(ownerID, agent, tool string, input json.RawMessage) (msg, unsafe string) {
+	detail, unsafe := toolDetail(input)
+	msg = fmt.Sprintf("<@%s> %s needs your approval: %s", ownerID, slackEscaper.Replace(agent), slackEscaper.Replace(tool))
+	return msg + detail, unsafe
+}
+
+// toolDetail renders a tool call's input as a code block for an approval
+// message ("" when there is none), with the reason it cannot be shown
+// exactly, if any (see FormatApproval).
+func toolDetail(input json.RawMessage) (block, unsafe string) {
 	var in map[string]any
 	_ = json.Unmarshal(input, &in)
 	detail := ""
@@ -129,12 +139,11 @@ func FormatApproval(ownerID, agent, tool string, input json.RawMessage) (msg, un
 		unsafe = fmt.Sprintf("it is too long to show in full (%d characters; the first %d are shown)", len(r), maxApprovalDetail)
 		detail = string(r[:maxApprovalDetail]) + "…"
 	}
-	msg = fmt.Sprintf("<@%s> %s needs your approval: %s", ownerID, slackEscaper.Replace(agent), slackEscaper.Replace(tool))
-	if detail != "" {
-		// Inside a code block only the backticks that would close it matter.
-		msg += "\n```" + strings.ReplaceAll(slackEscaper.Replace(detail), "```", "`\u200b``") + "```"
+	if detail == "" {
+		return "", unsafe
 	}
-	return msg, unsafe
+	// Inside a code block only the backticks that would close it matter.
+	return "\n```" + strings.ReplaceAll(slackEscaper.Replace(detail), "```", "`\u200b``") + "```", unsafe
 }
 
 // askHookReason is shown both to the owner in the terminal (Claude Code

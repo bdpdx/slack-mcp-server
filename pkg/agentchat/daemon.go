@@ -177,6 +177,7 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 					l.Sweep(ctx)
 					lastSweep = now
 				}
+				l.SweepApprovals(ctx)
 				if now.Sub(lastCohort) >= cohortInterval {
 					l.CohortTick(ctx)
 					lastCohort = now
