@@ -14,12 +14,12 @@ import (
 
 // approval-hook (PermissionRequest) asks the owner in the session's direct
 // channel, with Allow / Deny / Answer-in-terminal buttons, and answers the
-// host's permission prompt on their behalf. Claude Code shows its own
-// terminal prompt at the same time, and the first answer wins: when the
-// terminal answers, the host stops the hook, which (or, if it was killed
-// outright, the listener once it stops polling) marks the Slack request as
-// ended. Unanswered, the hook waits a limited time and hands the prompt back
-// to the terminal.
+// host's permission prompt on their behalf. Claude Code has been observed to
+// show its own terminal prompt at the same time, the first answer winning.
+// However the hook finishes (answered, waited out, or stopped by its host),
+// it redraws its request and tells the listener; a hook killed outright is
+// caught by the listener once it stops polling. Unanswered, the hook waits a
+// limited time and hands the prompt back to the terminal.
 //
 // Button clicks and replies in the message's thread reach this home's
 // listener (the app's Socket Mode connection), which keeps the owner's
@@ -186,7 +186,7 @@ func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration
 	}
 
 	waitCtx, cancelWait := context.WithTimeout(ctx, wait)
-	decision, reason := c.waitForApproval(waitCtx, channel, ts, id)
+	decision, reason := c.waitForApproval(waitCtx, channel, ts, id, text, approvalHint)
 	cancelWait()
 	if decision == decisionAllow && unsafe != "" {
 		decision = decisionTerminal // there was no Allow button; never allow what was not shown
@@ -208,6 +208,7 @@ func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration
 		)); err != nil {
 		fmt.Fprintf(c.stderr, "slack-agent-chat: updating approval request: %v\n", err)
 	}
+	c.endApproval(finish, id)
 	if decision == "" && ctx.Err() == nil {
 		c.postBlocked(finish, c.hookSession(ev), me.agentName, ev.ToolName, wait)
 	}
@@ -230,10 +231,21 @@ func (c *cli) postBlocked(ctx context.Context, session, agent, tool string, wait
 	}
 }
 
+// approvalHint and deniedHint answer an owner who typed an allow word.
+const (
+	approvalHint = "Replies can only deny (_no_ plus a reason) or send this to the _terminal_; click *Allow* to approve."
+	deniedHint   = "Replies can only decline (_no_ plus a reason); click *Approve retry* to approve."
+)
+
+// hintTimeout bounds the hint post, so a slow Slack call never stalls the
+// polling the listener reads as the hook being alive.
+const hintTimeout = 5 * time.Second
+
 // waitForApproval polls the listener for the owner's answer until one
 // arrives or ctx ends ("" decision). When the owner types an allow word, it
-// explains in the thread that only the button can allow, and keeps waiting.
-func (c *cli) waitForApproval(ctx context.Context, channel, ts, id string) (string, string) {
+// posts hint in the thread and keeps waiting. A listener that lost the
+// request (it restarted) gets the message (text) registered again.
+func (c *cli) waitForApproval(ctx context.Context, channel, ts, id, text, hint string) (string, string) {
 	tick := time.NewTicker(approvalPoll)
 	defer tick.Stop()
 	for {
@@ -244,14 +256,24 @@ func (c *cli) waitForApproval(ctx context.Context, channel, ts, id string) (stri
 		}
 		resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval", Approval: id})
 		switch {
-		case err != nil || resp.Decision == "":
+		case err != nil:
+		case resp.Unknown:
+			_, _ = SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval-watch", Approval: id, Channel: channel, TS: ts, Text: text})
+		case resp.Decision == "":
 		case resp.Decision == decisionHint:
-			if _, _, err := c.bot.PostMessageContext(ctx, channel, slack.MsgOptionTS(ts), slack.MsgOptionText(
-				"Replies can only deny (_no_ plus a reason) or send this to the _terminal_; click *Allow* to approve.", false)); err != nil {
+			post, cancel := context.WithTimeout(ctx, hintTimeout)
+			if _, _, err := c.bot.PostMessageContext(post, channel, slack.MsgOptionTS(ts), slack.MsgOptionText(hint, false)); err != nil {
 				fmt.Fprintf(c.stderr, "slack-agent-chat: posting approval hint: %v\n", err)
 			}
+			cancel()
 		default:
 			return resp.Decision, resp.Text
 		}
 	}
+}
+
+// endApproval tells the listener the hook finished and redrew its request,
+// so the listener's sweep (for hooks killed outright) leaves it alone.
+func (c *cli) endApproval(ctx context.Context, id string) {
+	_, _ = SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval-end", Approval: id})
 }

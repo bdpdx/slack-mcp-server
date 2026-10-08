@@ -706,8 +706,10 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 	case "approval-watch":
 		l.WatchApproval(req.Approval, req.Channel, req.TS, req.Text)
 	case "approval":
-		decision, reason := l.TakeApproval(req.Approval)
-		return ControlResponse{OK: true, Decision: decision, Text: reason}
+		decision, reason, known := l.takeApproval(req.Approval)
+		return ControlResponse{OK: true, Decision: decision, Text: reason, Unknown: !known}
+	case "approval-end":
+		l.EndApproval(req.Approval)
 	case "cohort-register", "cohort-leave", "cohort-duty", "cohort-checkpoint", "cohort-status":
 		return l.cohortControl(ctx, req)
 	case "cohort-claim-check":
@@ -744,8 +746,9 @@ type approval struct {
 
 // approvalAbandoned is how long a registered hook may go without polling
 // (it polls every second) before its request counts as ended: the host
-// answered in the terminal and stopped the hook, or the session ended.
-const approvalAbandoned = 15 * time.Second
+// killed it outright, or the session ended. A hook that finishes, however it
+// finishes, says so (approval-end) after redrawing its own request.
+const approvalAbandoned = 30 * time.Second
 
 // click is an owner's button click on a message posted by this bot.
 type click struct {
@@ -925,24 +928,43 @@ func (l *Listener) markConsumed(m Message) {
 // with its reason, decisionHint once after the owner typed an allow word, or
 // "" while unanswered.
 func (l *Listener) TakeApproval(id string) (decision, reason string) {
+	decision, reason, _ = l.takeApproval(id)
+	return decision, reason
+}
+
+// takeApproval is TakeApproval that also reports whether the request is
+// known (registered or clicked) to this listener.
+func (l *Listener) takeApproval(id string) (decision, reason string, known bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	a := l.approvals[id]
-	if a != nil {
-		a.polled = l.Now()
+	if a == nil {
+		return "", "", false
 	}
+	a.polled = l.Now()
+	known = a.channel != ""
 	switch {
-	case a == nil || a.decision == decisionTaken:
-		return "", ""
+	case a.decision == decisionTaken:
+		return "", "", known
 	case a.decision != "":
 		decision, reason = a.decision, a.reason
 		a.decision = decisionTaken // keep the entry so later replies stay out of the session
-		return decision, reason
+		return decision, reason, known
 	case a.hint:
 		a.hint = false
-		return decisionHint, ""
+		return decisionHint, "", known
 	}
-	return "", ""
+	return "", "", known
+}
+
+// EndApproval records that request id's hook finished and redrew its own
+// message, so the sweep leaves it alone.
+func (l *Listener) EndApproval(id string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if a := l.approvals[id]; a != nil {
+		a.closed = true
+	}
 }
 
 // SweepApprovals redraws each registered request whose hook stopped polling

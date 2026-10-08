@@ -68,10 +68,12 @@ trust new hooks in the next session.
   approve on its own; leave it out of such Codex homes. When installed: approval requests
   come to that channel with Allow / Deny / Answer in terminal buttons. Only the button can allow;
   a reply in the channel or the request's thread can deny (`no` plus a reason for the agent) or say
-  `terminal`. Claude Code shows its own terminal prompt at the same time, and
-  the first answer wins. When the terminal answers, the Slack request is
-  marked as ended (by the hook as Claude stops it, or by the listener within
-  about 15 seconds once the hook stops polling), so its buttons never linger.
+  `terminal`. Claude Code has been observed to show its own terminal prompt at
+  the same time (its docs don't say), and the first answer wins. A hook that
+  finishes, or is stopped by its host, redraws its request as ended; if a
+  hook is killed outright, the listener redraws it about 30 seconds after the
+  hook stops polling. (A listener restart loses its record of pending
+  requests; a hook still waiting registers its request again.)
   With no answer in 10 minutes (`--wait`), the hook leaves the prompt to the
   terminal. A session registered in a cohort (below) then also posts a
   `BLOCKED:` notice naming the agent and the tool (never its input) to its
@@ -85,7 +87,10 @@ trust new hooks in the next session.
   retry the call, and the classifier judges the retry again (the block
   itself is not reversed). Decline, a reply opening with `no`, no answer, or
   a denial without a classifier verdict (for which Claude ignores `retry`)
-  leaves the block standing. Only the button can approve.
+  leaves the block standing; a reply of `terminal` declines, since there is
+  no terminal prompt. Only the button can approve. For an exfiltration
+  verdict the input is not relayed to Slack and the request cannot be
+  approved there.
 - `Stop` → `stop-hook` (both hosts): when a turn you started by typing at the terminal ends, the
   agent's bot DMs you its final response. Turns started by Slack messages, background work or
   subagents send nothing. This replaces a Codex `notify` push notification.
