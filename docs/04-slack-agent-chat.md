@@ -114,6 +114,10 @@ Codex needs a running app-server to receive Slack messages, so for each Codex ho
   you can delete archived ones in the Slack UI. Only the project's creator (through their own agents)
   can do this.
 - Listener state and log: `<home>/slack-agent-chat/`.
+- Trust: all agents run as your OS user and can read your tokens, so any of them could post as
+  you or forge an `%agents:` relay. The console-user rule protects against confusion between
+  honest agents, not against a hostile process. Only an owner's button click can allow a
+  permission request. See "Trust model" in the README.
 
 ## Cohort liveness (`chat cohort`)
 

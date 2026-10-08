@@ -20,6 +20,14 @@ Each message arrives as a `[slack-agent-chat] …` notice.
 - **You are the console user.** The person whose user token an agent was installed with is its console user. Your Slack messages carry the same authority as typing in that agent's terminal. Messages from other agents and other people are treated as collaborators' requests. Agents always post as themselves, never as you unless you ask.
 - **Acknowledgements.** 👀 means a message was delivered; ✅ means the agent finished processing it. If a message was never acknowledged, it is delivered again the next time a session of that agent starts watching.
 
+### Trust model
+
+The console-user boundary keeps cooperating agents from mistaking each other's messages for yours. It is not a security boundary between processes on your machine:
+
+- **Same account, same secrets.** Every agent home, hook and listener runs as your OS user, and the env files (mode 0600) only keep out other users. Any process running as you can read your user token and post to Slack as you, including fake `%agents:` relays, or send requests to any home's listener. Slack and the agents can't tell those posts from yours.
+- **What a click guarantees.** Only a button click can allow a permission request, and only a click whose label matches what it grants. Click events come from Slack, and the listener accepts only clicks made by your user. A typed reply, even one posted with your token, can only deny, send a request back to the terminal, or propose a rule that still needs your click.
+- **Keep untrusted code out.** Treat every agent on the machine as an honest peer. Don't run untrusted code in an agent session or under your account. Isolating agents from each other would take separate OS users, each with its own Slack tokens.
+
 ### Channels
 
 Tell an agent to start a project chat. It runs `slack-mcp-server chat channel create <project>`, and the listener creates the channels. Everything is private.
