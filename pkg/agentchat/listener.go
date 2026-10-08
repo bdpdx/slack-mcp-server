@@ -75,7 +75,7 @@ type Listener struct {
 	queues        map[string]chan []pending // per-session delivery queues (Async)
 	queued        int                       // deliveries waiting on those queues (under mu)
 	delivering    int                       // deliveries in progress, until marked (under mu)
-	backlogRetry  map[string]backlogRetry   // kept backlogs' retry backoff by session (under mu)
+	backlogRetry  map[string]backlogRetry   // kept backlogs' retry backoff by session|channel (under mu)
 	approvals     map[string]*approval      // approval-hook requests by approval ID
 	closing       bool                      // shutting down: records no new answer (set under mu)
 	inflight      int                       // restart notes and redraws still being posted (under mu)
@@ -628,6 +628,14 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 	}
 	items := append(asked, newer...)
 	sort.SliceStable(items, func(i, j int) bool { return TSLess(items[i].msg.TS, items[j].msg.TS) })
+	// Drop channels the session stopped watching while history was read.
+	l.mu.Lock()
+	if cur := l.state.Subscriptions[sub.SessionID]; cur != nil {
+		items = slices.DeleteFunc(items, func(p pending) bool { return !slices.Contains(cur.Channels, p.msg.Channel) })
+	} else {
+		items = nil
+	}
+	l.mu.Unlock()
 	outcome := deliverNone
 	if len(items) > 0 {
 		outcome = l.deliverTo(ctx, sub, items)
@@ -641,7 +649,7 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 	}
 }
 
-// backlogRetry backs off retries of a session's kept backlogs.
+// backlogRetry backs off retries of one kept backlog.
 type backlogRetry struct {
 	tries int
 	next  time.Time
@@ -655,42 +663,48 @@ const (
 )
 
 // RetryBacklogs sends the kept first-join backlogs of watching sessions
-// whose earlier delivery or history read failed, backing off per session
+// whose earlier delivery or history read failed, backing off per channel
 // while they keep failing.
 func (l *Listener) RetryBacklogs(ctx context.Context) {
 	now := time.Now()
+	type job struct {
+		sub     *Subscription
+		first   map[string]bool
+		backlog int
+	}
+	var jobs []job
 	l.mu.Lock()
-	var subs []*Subscription
 	for _, sub := range l.state.Subscriptions {
-		if r, ok := l.backlogRetry[sub.SessionID]; ok && now.Before(r.next) {
-			continue
-		}
+		j := job{sub: snapshot(sub), first: map[string]bool{}}
 		for _, ch := range sub.Channels {
-			if l.state.Backlogs[sub.SessionID+"|"+ch] > 0 {
-				subs = append(subs, snapshot(sub))
-				break
+			k := sub.SessionID + "|" + ch
+			n := l.state.Backlogs[k]
+			if r, ok := l.backlogRetry[k]; n == 0 || (ok && now.Before(r.next)) {
+				continue
 			}
+			j.first[ch], j.backlog = true, max(j.backlog, n)
+		}
+		if len(j.first) > 0 {
+			jobs = append(jobs, j)
 		}
 	}
 	l.mu.Unlock()
-	for _, sub := range subs {
-		first, backlog := l.keptBacklogs(sub)
-		l.recoverKept(ctx, sub, sub.Channels, first, backlog, true)
+	for _, j := range jobs {
+		l.recoverKept(ctx, j.sub, j.sub.Channels, j.first, j.backlog, true)
 		l.mu.Lock()
-		still := false
-		for _, ch := range sub.Channels {
-			still = still || l.state.Backlogs[sub.SessionID+"|"+ch] > 0
-		}
-		if still {
-			r := l.backlogRetry[sub.SessionID]
-			r.tries++
-			r.next = time.Now().Add(min(backlogRetryMin<<min(r.tries, 6), backlogRetryMax))
+		for ch := range j.first {
+			k := j.sub.SessionID + "|" + ch
+			if l.state.Backlogs[k] == 0 {
+				delete(l.backlogRetry, k)
+				continue
+			}
 			if l.backlogRetry == nil {
 				l.backlogRetry = map[string]backlogRetry{}
 			}
-			l.backlogRetry[sub.SessionID] = r
-		} else {
-			delete(l.backlogRetry, sub.SessionID)
+			r := l.backlogRetry[k]
+			r.tries++
+			r.next = time.Now().Add(min(backlogRetryMin<<min(r.tries-1, 6), backlogRetryMax)) // 1, 2, 4 … 60 min
+			l.backlogRetry[k] = r
 		}
 		l.mu.Unlock()
 	}
@@ -866,6 +880,7 @@ func (l *Listener) Unsubscribe(sessionID, channel string) {
 		if s == sessionID && (channel == "" || ch == channel || len(sub.Channels) == 0) {
 			delete(l.state.Backlogs, k)
 			delete(l.state.BacklogBefore, k)
+			delete(l.backlogRetry, k)
 		}
 	}
 	if channel == "" || len(sub.Channels) == 0 {

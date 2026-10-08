@@ -689,10 +689,10 @@ func TestFailedBacklogIsRetried(t *testing.T) {
 
 	l.RetryBacklogs(ctx) // still failing: backs off
 	l.mu.Lock()
-	r := l.backlogRetry["s4"]
+	r := l.backlogRetry["s4|C1"]
 	l.mu.Unlock()
 	assert.Equal(t, 1, r.tries)
-	assert.True(t, r.next.After(time.Now().Add(backlogRetryMin)), "the next try waits longer than the minimum")
+	assert.WithinDuration(t, time.Now().Add(backlogRetryMin), r.next, 5*time.Second, "the first backoff is the minimum")
 	d.mu.Lock()
 	d.errs = nil
 	d.mu.Unlock()
@@ -734,4 +734,37 @@ func TestRecoveryCapSparesTheBacklog(t *testing.T) {
 	assert.Contains(t, d2.got[0].text, "before the watch")
 	assert.Equal(t, maxRecovery+1, strings.Count(d2.got[0].text, "> "), "the backlog plus the newest gap messages up to the cap")
 	assert.Contains(t, d2.got[0].text, fmt.Sprintf("gap %d", maxRecovery+9))
+}
+
+// Recovery sends nothing from a channel the session stopped watching while
+// history was being read.
+func TestRecoveryDropsUnwatchedChannels(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	api.history["C1"] = []slack.Message{msg("1999.5", "UBR", "old")}
+	d := &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	sub := claudeSub("s5")
+	require.NoError(t, l.Subscribe(ctx, sub, 0))
+	stale := snapshot(l.state.Subscriptions["s5"])
+	l.Unsubscribe("s5", "C1")
+	l.recover(ctx, stale, stale.Channels, map[string]bool{"C1": true}, 3)
+	assert.Empty(t, d.got)
+}
+
+// Backoff is per channel: a channel that newly fails is retried on its own
+// schedule, not behind another channel's backoff, and unsubscribing clears it.
+func TestBacklogBackoffIsPerChannel(t *testing.T) {
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	l.state.Subscriptions["s6"] = &Subscription{SessionID: "s6", Kind: KindClaude, Socket: "/s", Token: "t", Channels: []string{"C1", "C2"}}
+	l.state.Backlogs = map[string]int{"s6|C1": 2, "s6|C2": 2}
+	l.backlogRetry = map[string]backlogRetry{"s6|C1": {tries: 3, next: time.Now().Add(time.Hour)}}
+	api := l.API.(*fakeSlack)
+	api.failReads = true
+	l.RetryBacklogs(context.Background())
+	assert.Equal(t, 3, l.backlogRetry["s6|C1"].tries, "C1 is still backing off: not retried")
+	assert.Equal(t, 1, l.backlogRetry["s6|C2"].tries, "C2 was retried on its own schedule")
+	l.Unsubscribe("s6", "C2")
+	_, kept := l.backlogRetry["s6|C2"]
+	assert.False(t, kept, "unsubscribing clears its backoff")
 }
