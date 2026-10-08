@@ -280,7 +280,10 @@ func (l *Listener) trackCohort(ctx context.Context, m Message) {
 		if fresh, err := l.projectView(ctx, reg.Root, reg.Project, true); err == nil {
 			p = fresh
 		}
-		if l.mayNameUncachedGM(ctx, m, p) {
+		// Keep only what this view cannot classify: a message that already
+		// names the current GM is a GM signal now, and keeping it would replay
+		// it after a live answer.
+		if l.mayNameUncachedGM(ctx, m, p) && !l.namesGM(ctx, m, p) {
 			l.rememberRecheck(m)
 		}
 	}

@@ -761,3 +761,34 @@ func TestCohortNewGMMixedMentionAfterRemoteClaim(t *testing.T) {
 	}
 	require.Equal(t, 1, n, "the extra non-GM mention does not suppress the GM watch")
 }
+
+// A replayed joint ask is not kept again: after the new GM answers it live,
+// later ticks neither recreate the watch nor, if Slack reads fail, raise a
+// false outage for it.
+func TestCohortReplayedJointAskIsNotKeptAgain(t *testing.T) {
+	f := newCohortFixture(t)
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100",
+		User: "UBR", Text: "<@UCR> <@UCB> please decide"})
+	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "gm.json"),
+		[]byte(`{"term":1,"gm":"codex-r","claim_id":"changed-authority"}`), 0o600))
+	f.at(2 * time.Minute)
+	f.tick()
+	require.Equal(t, 2, f.watchCount())
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000150.000100", ThreadTS: "1800000000.000100", User: "UCR", Text: "on it"})
+	require.Equal(t, 0, f.watchCount(), "answered live")
+	for _, l := range f.homes() {
+		l.mu.Lock()
+		kept := len(l.rechecks)
+		l.mu.Unlock()
+		assert.Equal(t, 0, kept, "nothing left to replay")
+	}
+	f.api.mu.Lock()
+	f.api.failReads = true
+	f.api.mu.Unlock()
+	for _, d := range []time.Duration{3, 8, 26} {
+		f.at(d * time.Minute)
+		f.tick()
+	}
+	assert.Equal(t, 0, f.watchCount())
+	assert.Empty(t, f.notices("s2"))
+}
