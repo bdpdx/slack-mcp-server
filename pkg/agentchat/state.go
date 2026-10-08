@@ -53,6 +53,10 @@ type State struct {
 	// Backlogs holds, by session|channel, a first-join backlog a stopping
 	// listener could not deliver, for the next listener's recovery to send.
 	Backlogs map[string]int `json:"backlogs,omitempty"`
+	// BacklogBefore holds, by the same key, the join timestamp a kept
+	// backlog counts back from: the backlog is the messages before the
+	// watch started, however late it is finally sent.
+	BacklogBefore map[string]string `json:"backlog_before,omitempty"`
 }
 
 // Recheck is a message kept for GM classification until Until.

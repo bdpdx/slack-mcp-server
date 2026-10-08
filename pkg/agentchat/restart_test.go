@@ -3,6 +3,7 @@ package agentchat
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -661,9 +662,11 @@ func TestKeptBacklogIncludesTheGap(t *testing.T) {
 	require.NoError(t, err)
 	l2.RecoverAll(ctx)
 	require.Len(t, d2.got, 1)
-	assert.Equal(t, 1, strings.Count(d2.got[0].text, "gap two"), "the backlog and the gap overlap: sent once")
-	assert.Equal(t, 1, strings.Count(d2.got[0].text, "gap one"), "a gap message older than the backlog window is not held back")
-	assert.NotContains(t, d2.got[0].text, "before", "the backlog window (2) is the two newest; the rest of the gap comes from the join")
+	text := d2.got[0].text
+	assert.Equal(t, 1, strings.Count(text, "before"), "the backlog counts back from the watch's start, however many messages followed")
+	assert.Equal(t, 1, strings.Count(text, "gap one"), "messages since the join follow it")
+	assert.Equal(t, 1, strings.Count(text, "gap two"))
+	assert.Less(t, strings.Index(text, "before"), strings.Index(text, "gap one"), "oldest first")
 	assert.Empty(t, l2.state.Backlogs, "cleared once delivered")
 
 	d3 := &fakeDeliverer{}
@@ -684,13 +687,51 @@ func TestFailedBacklogIsRetried(t *testing.T) {
 	assert.Empty(t, d.got)
 	assert.Equal(t, 3, l.state.Backlogs["s4|C1"], "kept after the failure")
 
+	l.RetryBacklogs(ctx) // still failing: backs off
+	l.mu.Lock()
+	r := l.backlogRetry["s4"]
+	l.mu.Unlock()
+	assert.Equal(t, 1, r.tries)
+	assert.True(t, r.next.After(time.Now().Add(backlogRetryMin)), "the next try waits longer than the minimum")
 	d.mu.Lock()
 	d.errs = nil
 	d.mu.Unlock()
+	l.mu.Lock()
+	l.backlogRetry = nil // as if the backoff had elapsed
+	l.mu.Unlock()
 	l.RetryBacklogs(ctx)
 	require.Len(t, d.got, 1)
 	assert.Contains(t, d.got[0].text, "context")
 	assert.Empty(t, l.state.Backlogs, "cleared once delivered")
 	l.RetryBacklogs(ctx)
 	assert.Len(t, d.got, 1, "not sent again")
+}
+
+// A long restart gap is capped from the oldest end, but never cuts the
+// requested backlog.
+func TestRecoveryCapSparesTheBacklog(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	path := filepath.Join(t.TempDir(), "state.json")
+	l1, err := NewListener(api, &fakeDeliverer{}, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	l1.Now = func() time.Time { return time.Unix(2000, 0) }
+	l1.Stop = func() {}
+	api.history["C1"] = []slack.Message{msg("1999.5", "UBR", "before the watch")}
+	require.True(t, l1.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+	require.NoError(t, l1.Subscribe(ctx, claudeSub("s2"), 1))
+
+	var hist []slack.Message
+	for i := maxRecovery + 9; i >= 0; i-- { // newest first
+		hist = append(hist, msg(fmt.Sprintf("%d.000100", 2001+i), "UBR", fmt.Sprintf("gap %d", i)))
+	}
+	api.history["C1"] = append(hist, msg("1999.5", "UBR", "before the watch"))
+	d2 := &fakeDeliverer{}
+	l2, err := NewListener(api, d2, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	l2.RecoverAll(ctx)
+	require.Len(t, d2.got, 1)
+	assert.Contains(t, d2.got[0].text, "before the watch")
+	assert.Equal(t, maxRecovery+1, strings.Count(d2.got[0].text, "> "), "the backlog plus the newest gap messages up to the cap")
+	assert.Contains(t, d2.got[0].text, fmt.Sprintf("gap %d", maxRecovery+9))
 }

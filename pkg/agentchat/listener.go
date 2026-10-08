@@ -75,6 +75,7 @@ type Listener struct {
 	queues        map[string]chan []pending // per-session delivery queues (Async)
 	queued        int                       // deliveries waiting on those queues (under mu)
 	delivering    int                       // deliveries in progress, until marked (under mu)
+	backlogRetry  map[string]backlogRetry   // kept backlogs' retry backoff by session (under mu)
 	approvals     map[string]*approval      // approval-hook requests by approval ID
 	closing       bool                      // shutting down: records no new answer (set under mu)
 	inflight      int                       // restart notes and redraws still being posted (under mu)
@@ -574,25 +575,29 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 			l.setBacklogs(sub.SessionID, backlogs, backlog)
 		}
 	}
-	var items []pending
-	readFailed := false // a backlog's history read failed: keep it to retry
+	var asked, newer []pending // the requested backlogs, and messages since the join
+	readFailed := false        // a kept backlog's history read failed: keep it to retry
 	seen := map[string]bool{}
-	add := func(p pending) {
+	add := func(to *[]pending, p pending) {
 		if k := p.msg.Channel + "|" + p.msg.TS; !seen[k] {
 			seen[k] = true
-			items = append(items, p)
+			*to = append(*to, p)
 		}
 	}
 	for _, ch := range channels {
 		if first[ch] {
 			if backlog > 0 {
-				found, err := l.routedBacklog(ctx, ch, backlog)
+				before := ""
+				if kept {
+					before = l.backlogBefore(sub.SessionID, ch)
+				}
+				found, err := l.routedBacklog(ctx, ch, backlog, before)
 				if err != nil {
 					l.Log.Warn("reading history failed", zap.String("channel", ch), zap.Error(err))
 					readFailed = true
 				}
 				for _, p := range found {
-					add(p)
+					add(&asked, p)
 				}
 			}
 			if !kept {
@@ -605,19 +610,24 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 		msgs, err := l.pendingSince(ctx, ch, join)
 		if err != nil {
 			l.Log.Warn("reading history failed", zap.String("channel", ch), zap.Error(err))
+			readFailed = readFailed || (kept && first[ch])
 			continue
 		}
 		for _, m := range msgs {
 			if !m.Deliverable() || m.From(l.Self) {
 				continue
 			}
-			add(pending{m, l.notice(ctx, m)})
+			add(&newer, pending{m, l.notice(ctx, m)})
 		}
 	}
-	sort.SliceStable(items, func(i, j int) bool { return TSLess(items[i].msg.TS, items[j].msg.TS) })
-	if len(items) > maxRecovery {
-		items = items[len(items)-maxRecovery:]
+	// The recovery cap bounds the messages since the join; a requested
+	// backlog (at most its own size) is never cut by it.
+	sort.SliceStable(newer, func(i, j int) bool { return TSLess(newer[i].msg.TS, newer[j].msg.TS) })
+	if len(newer) > maxRecovery {
+		newer = newer[len(newer)-maxRecovery:]
 	}
+	items := append(asked, newer...)
+	sort.SliceStable(items, func(i, j int) bool { return TSLess(items[i].msg.TS, items[j].msg.TS) })
 	outcome := deliverNone
 	if len(items) > 0 {
 		outcome = l.deliverTo(ctx, sub, items)
@@ -631,15 +641,33 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 	}
 }
 
+// backlogRetry backs off retries of a session's kept backlogs.
+type backlogRetry struct {
+	tries int
+	next  time.Time
+}
+
+// Kept backlogs are retried with backoff from backlogRetryMin to
+// backlogRetryMax.
+const (
+	backlogRetryMin = time.Minute
+	backlogRetryMax = time.Hour
+)
+
 // RetryBacklogs sends the kept first-join backlogs of watching sessions
-// whose earlier delivery or history read failed.
+// whose earlier delivery or history read failed, backing off per session
+// while they keep failing.
 func (l *Listener) RetryBacklogs(ctx context.Context) {
+	now := time.Now()
 	l.mu.Lock()
 	var subs []*Subscription
 	for _, sub := range l.state.Subscriptions {
+		if r, ok := l.backlogRetry[sub.SessionID]; ok && now.Before(r.next) {
+			continue
+		}
 		for _, ch := range sub.Channels {
 			if l.state.Backlogs[sub.SessionID+"|"+ch] > 0 {
-				subs = append(subs, sub)
+				subs = append(subs, snapshot(sub))
 				break
 			}
 		}
@@ -648,7 +676,32 @@ func (l *Listener) RetryBacklogs(ctx context.Context) {
 	for _, sub := range subs {
 		first, backlog := l.keptBacklogs(sub)
 		l.recoverKept(ctx, sub, sub.Channels, first, backlog, true)
+		l.mu.Lock()
+		still := false
+		for _, ch := range sub.Channels {
+			still = still || l.state.Backlogs[sub.SessionID+"|"+ch] > 0
+		}
+		if still {
+			r := l.backlogRetry[sub.SessionID]
+			r.tries++
+			r.next = time.Now().Add(min(backlogRetryMin<<min(r.tries, 6), backlogRetryMax))
+			if l.backlogRetry == nil {
+				l.backlogRetry = map[string]backlogRetry{}
+			}
+			l.backlogRetry[sub.SessionID] = r
+		} else {
+			delete(l.backlogRetry, sub.SessionID)
+		}
+		l.mu.Unlock()
 	}
+}
+
+// snapshot copies sub with its own channel list, so it can be used outside
+// l.mu while Unsubscribe edits the original. Call with l.mu held.
+func snapshot(sub *Subscription) *Subscription {
+	c := *sub
+	c.Channels = slices.Clone(sub.Channels)
+	return &c
 }
 
 // setBacklogs keeps (n > 0) or clears (n == 0) the first-join backlog of
@@ -659,14 +712,38 @@ func (l *Listener) setBacklogs(session string, channels []string, n int) {
 	if n > 0 && l.state.Backlogs == nil {
 		l.state.Backlogs = map[string]int{}
 	}
+	if n > 0 && l.state.BacklogBefore == nil {
+		l.state.BacklogBefore = map[string]string{}
+	}
+	changed := false
 	for _, ch := range channels {
-		if n > 0 {
-			l.state.Backlogs[session+"|"+ch] = n
-		} else {
-			delete(l.state.Backlogs, session+"|"+ch)
+		k := session + "|" + ch
+		switch {
+		case n > 0:
+			if l.state.Backlogs[k] != n {
+				l.state.Backlogs[k], changed = n, true
+			}
+			if _, ok := l.state.BacklogBefore[k]; !ok {
+				// Counted back from the watch's start, not from when it is sent.
+				l.state.BacklogBefore[k], changed = l.state.JoinTS[ch], true
+			}
+		case l.state.Backlogs[k] > 0 || l.state.BacklogBefore[k] != "":
+			delete(l.state.Backlogs, k)
+			delete(l.state.BacklogBefore, k)
+			changed = true
 		}
 	}
-	l.saveStateLocked()
+	if changed {
+		l.saveStateLocked()
+	}
+}
+
+// backlogBefore is the join timestamp session's kept backlog for channel
+// counts back from ("" when unknown: the newest messages).
+func (l *Listener) backlogBefore(session, channel string) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.state.BacklogBefore[session+"|"+channel]
 }
 
 // Subscribe registers sub and delivers its backlog or pending messages.
@@ -682,11 +759,12 @@ func (l *Listener) Subscribe(ctx context.Context, sub *Subscription, backlog int
 // routedBacklog returns up to n of the channel's most recent messages that
 // this agent would have received, oldest first, paging back through at most
 // 1000 messages of history.
-func (l *Listener) routedBacklog(ctx context.Context, channel string, n int) ([]pending, error) {
+func (l *Listener) routedBacklog(ctx context.Context, channel string, n int, before string) ([]pending, error) {
 	var found []pending
 	cursor := ""
 	for page := 0; page < 5 && len(found) < n; page++ {
-		resp, err := l.API.GetConversationHistoryContext(ctx, &slack.GetConversationHistoryParameters{ChannelID: channel, Cursor: cursor, Limit: 200})
+		// before (when set) bounds the window: the n newest at or before it.
+		resp, err := l.API.GetConversationHistoryContext(ctx, &slack.GetConversationHistoryParameters{ChannelID: channel, Cursor: cursor, Limit: 200, Latest: before, Inclusive: before != ""})
 		if err != nil {
 			return nil, err
 		}
@@ -787,6 +865,7 @@ func (l *Listener) Unsubscribe(sessionID, channel string) {
 		s, ch, _ := strings.Cut(k, "|")
 		if s == sessionID && (channel == "" || ch == channel || len(sub.Channels) == 0) {
 			delete(l.state.Backlogs, k)
+			delete(l.state.BacklogBefore, k)
 		}
 	}
 	if channel == "" || len(sub.Channels) == 0 {
@@ -1490,13 +1569,14 @@ func (l *Listener) RecoverAll(ctx context.Context) {
 	l.mu.Lock()
 	subs := make([]*Subscription, 0, len(l.state.Subscriptions))
 	for _, sub := range l.state.Subscriptions {
-		subs = append(subs, sub)
+		subs = append(subs, snapshot(sub))
 	}
 	stale := false
 	for k := range l.state.Backlogs {
 		s, ch, _ := strings.Cut(k, "|")
 		if sub := l.state.Subscriptions[s]; sub == nil || !slices.Contains(sub.Channels, ch) {
 			delete(l.state.Backlogs, k) // its watch ended before this listener started
+			delete(l.state.BacklogBefore, k)
 			stale = true
 		}
 	}
