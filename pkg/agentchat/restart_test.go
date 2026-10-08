@@ -707,43 +707,89 @@ func TestFailedBacklogIsRetried(t *testing.T) {
 	assert.Len(t, d.got, 1, "not sent again")
 }
 
-// A long backlog is delivered whole, oldest first, in consecutive parts, each
-// telling the agent to read every part before acting.
+// A requested backlog is delivered whole, oldest first, in parts whose
+// headers give the totals.
 func TestLongBacklogIsDeliveredInParts(t *testing.T) {
 	ctx := context.Background()
 	api := newFakeSlack()
-	path := filepath.Join(t.TempDir(), "state.json")
-	l1, err := NewListener(api, &fakeDeliverer{}, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
-	require.NoError(t, err)
-	l1.Now = func() time.Time { return time.Unix(2000, 0) }
-	l1.Stop = func() {}
-	api.history["C1"] = []slack.Message{msg("1999.5", "UBR", "before the watch")}
-	require.True(t, l1.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
-	require.NoError(t, l1.Subscribe(ctx, claudeSub("s2"), 1))
-
 	var hist []slack.Message
 	for i := maxRecovery + 9; i >= 0; i-- { // newest first
-		hist = append(hist, msg(fmt.Sprintf("%d.000100", 2001+i), "UBR", fmt.Sprintf("gap %03d", i)))
+		hist = append(hist, msg(fmt.Sprintf("%d.000100", 1000+i), "UBR", fmt.Sprintf("old %03d", i)))
 	}
-	api.history["C1"] = append(hist, msg("1999.5", "UBR", "before the watch"))
-	d2 := &fakeDeliverer{}
-	l2, err := NewListener(api, d2, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
-	require.NoError(t, err)
-	l2.RecoverAll(ctx)
-	require.Len(t, d2.got, 2, "two parts")
-	first, last := d2.got[0].text, d2.got[1].text
-	assert.Contains(t, first, "part 1 of 2")
-	assert.Contains(t, first, "read every part before acting")
-	assert.Contains(t, last, "part 2 of 2")
-	assert.Contains(t, last, "last part")
-	assert.Contains(t, first, "before the watch", "the oldest message comes first")
-	assert.Contains(t, first, "gap 000")
-	assert.Contains(t, last, fmt.Sprintf("gap %03d", maxRecovery+9), "the newest comes last")
+	api.history["C1"] = hist
+	d := &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s2"), maxRecovery+10))
+	require.Len(t, d.got, 2, "two parts")
+	first, last := d.got[0].text, d.got[1].text
+	total := maxRecovery + 10
+	assert.Contains(t, first, fmt.Sprintf("Catch-up: %d messages, oldest first, in 2 parts (part 1 of 2: messages 1–%d of %d)", total, maxRecovery, total))
+	assert.Contains(t, first, fmt.Sprintf("Do not act on any message until you have read all %d", total))
+	assert.Contains(t, last, fmt.Sprintf("part 2 of 2: messages %d–%d of %d", maxRecovery+1, total, total))
+	assert.Contains(t, last, "This is the last part")
 	all := first + last
-	for i := 0; i <= maxRecovery+9; i++ {
-		assert.Equal(t, 1, strings.Count(all, fmt.Sprintf("gap %03d", i)), "every message once")
+	for i := 0; i < total; i++ {
+		assert.Equal(t, 1, strings.Count(all, fmt.Sprintf("old %03d", i)), "every message once")
 	}
-	assert.Less(t, strings.Index(all, "gap 010"), strings.Index(all, "gap 011"), "in order")
+	assert.Less(t, strings.Index(all, "old 010"), strings.Index(all, "old 011"), "in order")
+	assert.NotContains(t, all, "older unacknowledged", "a requested backlog is never cut")
+}
+
+// Of the unacknowledged messages since the join, only the newest
+// maxRecovery go, oldest first, and the notice says how many were not sent.
+func TestCatchUpSendsNewestWithSkippedCount(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	d := &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0)) // the channel's join point = 2000
+	var hist []slack.Message
+	for i := maxRecovery + 6; i >= 0; i-- { // newest first, all after the join
+		hist = append(hist, msg(fmt.Sprintf("%d.000100", 2001+i), "UBR", fmt.Sprintf("m %03d", i)))
+	}
+	api.history["C1"] = hist
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s9"), 0)) // a new session catches up
+	require.Len(t, d.got, 1)
+	text := d.got[0].text
+	assert.Contains(t, text, fmt.Sprintf("Catch-up: %d messages, oldest first.", maxRecovery))
+	assert.Contains(t, text, "7 older unacknowledged messages were not sent")
+	assert.NotContains(t, text, "m 006\n")
+	assert.Equal(t, 0, strings.Count(text, "m 000"), "the oldest are the ones not sent")
+	assert.Contains(t, text, fmt.Sprintf("m %03d", maxRecovery+6))
+	assert.Less(t, strings.Index(text, "m 007"), strings.Index(text, "m 008"), "oldest first")
+}
+
+// A live message that arrives while a catch-up is being sent waits until
+// the whole catch-up is out, so it never lands between parts.
+func TestLiveMessageWaitsForCatchUp(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	var hist []slack.Message
+	for i := 3*maxRecovery + 19; i >= 0; i-- {
+		hist = append(hist, msg(fmt.Sprintf("%d.000100", 1000+i), "UBR", fmt.Sprintf("old %03d", i)))
+	}
+	api.history["C1"] = hist
+	d := &heldDeliverer{entered: make(chan struct{}, 16), release: make(chan struct{})}
+	l, err := NewListener(api, d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
+	require.NoError(t, err)
+	l.Async = true
+	done := make(chan struct{})
+	go func() { _ = l.Subscribe(ctx, claudeSub("s3"), 4*maxRecovery); close(done) }()
+	<-d.entered // part 1 under way
+	l.HandleMessage(ctx, Message{Channel: "C1", TS: "9000.000100", User: "UBR", Text: "live news"})
+	close(d.release)
+	<-done
+	require.Eventually(t, func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return len(d.got) == 5
+	}, 5*time.Second, 10*time.Millisecond)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i := 0; i < 4; i++ {
+		assert.Contains(t, d.got[i].text, fmt.Sprintf("part %d of 4", i+1))
+	}
+	assert.Contains(t, d.got[4].text, "live news", "the live message comes after the last part")
 }
 
 // Recovery sends nothing from a channel the session stopped watching while

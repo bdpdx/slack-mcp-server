@@ -440,54 +440,74 @@ const (
 // It reports what happened, so a caller can keep what it cannot redo from
 // history.
 func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pending) deliverOutcome {
-	return l.deliverPart(ctx, sub, items, 1, 1)
-}
-
-// deliverParts delivers items, oldest first, in consecutive parts of at most
-// maxRecovery messages, so a long backlog is never reordered or cut. It
-// stops at the first part that is not delivered (later parts must not
-// overtake it) and reports that part's outcome.
-func (l *Listener) deliverParts(ctx context.Context, sub *Subscription, items []pending) deliverOutcome {
-	parts := (len(items) + maxRecovery - 1) / maxRecovery
-	outcome := deliverNone
-	for i := 0; i < parts; i++ {
-		chunk := items[i*maxRecovery : min((i+1)*maxRecovery, len(items))]
-		switch o := l.deliverPart(ctx, sub, chunk, i+1, parts); o {
-		case deliverDone:
-			outcome = deliverDone
-		case deliverNone:
-		default:
-			return o
-		}
-	}
-	return outcome
-}
-
-// deliverPart is deliverTo for part of parts of a backlog.
-func (l *Listener) deliverPart(ctx context.Context, sub *Subscription, items []pending, part, parts int) deliverOutcome {
 	// One delivery per session at a time, so live events and recovery cannot
 	// both push the same message.
 	sl := l.sessionLock(sub.SessionID)
 	sl.Lock()
 	defer sl.Unlock()
+	return l.deliverLocked(ctx, sub, l.freshItems(sub, items), catchUp{})
+}
+
+// catchUp numbers one part of a catch-up for its notice header: part of
+// parts, holding messages start.. of total, with skipped older
+// unacknowledged messages not sent. parts == 0 marks a live delivery.
+type catchUp struct {
+	part, parts, start, total, skipped int
+}
+
+// freshItems drops items already delivered to sub.
+func (l *Listener) freshItems(sub *Subscription, items []pending) []pending {
 	l.mu.Lock()
+	defer l.mu.Unlock()
 	var fresh []pending
 	for _, it := range items {
 		if !l.state.WasDelivered(sub.SessionID, it.msg.Channel, it.msg.TS) {
 			fresh = append(fresh, it)
 		}
 	}
-	l.mu.Unlock()
+	return fresh
+}
+
+// deliverParts sends a catch-up, oldest first, in consecutive parts of at
+// most maxRecovery messages, each header giving the totals so the agent
+// knows how much to read before acting. It stops at the first part that is
+// not delivered (later parts must not overtake it) and reports that part's
+// outcome. Call with sub's session lock held, so no live delivery lands
+// between parts.
+func (l *Listener) deliverParts(ctx context.Context, sub *Subscription, items []pending, skipped int) deliverOutcome {
+	fresh := l.freshItems(sub, items)
 	if len(fresh) == 0 {
 		return deliverNone
 	}
-	text := fresh[0].notice.Format()
-	if len(fresh) > 1 || parts > 1 {
-		notices := make([]Notice, len(fresh))
-		for i, it := range fresh {
-			notices[i] = it.notice
+	parts := (len(fresh) + maxRecovery - 1) / maxRecovery
+	for i := 0; i < parts; i++ {
+		chunk := fresh[i*maxRecovery : min((i+1)*maxRecovery, len(fresh))]
+		h := catchUp{part: i + 1, parts: parts, start: i*maxRecovery + 1, total: len(fresh), skipped: skipped}
+		if o := l.deliverLocked(ctx, sub, chunk, h); o != deliverDone {
+			return o
 		}
-		text = FormatBatchPart(notices, part, parts)
+	}
+	return deliverDone
+}
+
+// deliverLocked delivers fresh (not yet delivered) items as one notice and
+// marks them. Call with sub's session lock held.
+func (l *Listener) deliverLocked(ctx context.Context, sub *Subscription, fresh []pending, h catchUp) deliverOutcome {
+	if len(fresh) == 0 {
+		return deliverNone
+	}
+	notices := make([]Notice, len(fresh))
+	for i, it := range fresh {
+		notices[i] = it.notice
+	}
+	var text string
+	switch {
+	case h.parts > 0:
+		text = FormatCatchUp(notices, h.part, h.parts, h.start, h.total, h.skipped)
+	case len(fresh) == 1:
+		text = fresh[0].notice.Format()
+	default:
+		text = FormatBatch(notices)
 	}
 	last := fresh[len(fresh)-1].msg
 	if !l.beginDelivery() {
@@ -598,6 +618,11 @@ func (l *Listener) recover(ctx context.Context, sub *Subscription, channels []st
 // once its delivery is settled, so a listener that exits mid-recovery (even
 // while still reading history) leaves it for the next one.
 func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels []string, first map[string]bool, sizes map[string]int, kept bool) {
+	// Hold this session's live deliveries until the whole catch-up is sent,
+	// so nothing newer reaches the agent before the older messages.
+	sl := l.sessionLock(sub.SessionID)
+	sl.Lock()
+	defer sl.Unlock()
 	var backlogs []string // first-join channels whose backlog (sizes) was requested
 	for _, ch := range channels {
 		if first[ch] && sizes[ch] > 0 {
@@ -652,8 +677,16 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 			add(&newer, pending{m, l.notice(ctx, m)})
 		}
 	}
-	// Everything goes, oldest first; a long backlog is split into parts
-	// (deliverParts), never cut or reordered.
+	// A requested backlog goes whole. Of the unacknowledged messages since
+	// the join, the newest maxRecovery go; the notice says how many older
+	// ones were not sent. Everything is sent oldest first.
+	newer = l.freshItems(sub, newer)
+	sort.SliceStable(newer, func(i, j int) bool { return TSLess(newer[i].msg.TS, newer[j].msg.TS) })
+	skipped := 0
+	if len(newer) > maxRecovery {
+		skipped = len(newer) - maxRecovery
+		newer = newer[skipped:]
+	}
 	items := append(asked, newer...)
 	sort.SliceStable(items, func(i, j int) bool { return TSLess(items[i].msg.TS, items[j].msg.TS) })
 	// Drop channels the session stopped watching while history was read.
@@ -666,7 +699,7 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 	l.mu.Unlock()
 	outcome := deliverNone
 	if len(items) > 0 {
-		outcome = l.deliverParts(ctx, sub, items)
+		outcome = l.deliverParts(ctx, sub, items, skipped)
 	}
 	switch {
 	case outcome == deliverRefused, outcome == deliverFailed, readFailed:
