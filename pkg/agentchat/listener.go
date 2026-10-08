@@ -541,19 +541,48 @@ func (l *Listener) register(sub *Subscription) (*Subscription, map[string]bool, 
 // recover pushes what sub should already have: the last backlog messages on
 // a first join, or pending (unacknowledged) messages since the join point.
 func (l *Listener) recover(ctx context.Context, sub *Subscription, channels []string, first map[string]bool, backlog int) {
-	var items []pending
+	l.recoverKept(ctx, sub, channels, first, backlog, false)
+}
+
+// recoverKept is recover. kept says the first-join backlogs were kept by a
+// previous listener that could not deliver them, so messages newer than the
+// join are read as well (and merged without duplicates).
+//
+// A requested backlog is kept in the state file from the start and cleared
+// once its delivery is settled, so a listener that exits mid-recovery (even
+// while still reading history) leaves it for the next one.
+func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels []string, first map[string]bool, backlog int, kept bool) {
 	var backlogs []string // first-join channels whose backlog was requested
+	if backlog > 0 {
+		for _, ch := range channels {
+			if first[ch] {
+				backlogs = append(backlogs, ch)
+			}
+		}
+		l.setBacklogs(sub.SessionID, backlogs, backlog)
+	}
+	var items []pending
+	seen := map[string]bool{}
+	add := func(p pending) {
+		if k := p.msg.Channel + "|" + p.msg.TS; !seen[k] {
+			seen[k] = true
+			items = append(items, p)
+		}
+	}
 	for _, ch := range channels {
 		if first[ch] {
 			if backlog > 0 {
-				backlogs = append(backlogs, ch)
 				found, err := l.routedBacklog(ctx, ch, backlog)
 				if err != nil {
 					l.Log.Warn("reading history failed", zap.String("channel", ch), zap.Error(err))
 				}
-				items = append(items, found...)
+				for _, p := range found {
+					add(p)
+				}
 			}
-			continue
+			if !kept {
+				continue
+			}
 		}
 		l.mu.Lock()
 		join := l.state.JoinTS[ch]
@@ -567,26 +596,37 @@ func (l *Listener) recover(ctx context.Context, sub *Subscription, channels []st
 			if !m.Deliverable() || m.From(l.Self) {
 				continue
 			}
-			items = append(items, pending{m, l.notice(ctx, m)})
+			add(pending{m, l.notice(ctx, m)})
 		}
 	}
 	sort.SliceStable(items, func(i, j int) bool { return TSLess(items[i].msg.TS, items[j].msg.TS) })
 	if len(items) > maxRecovery {
 		items = items[len(items)-maxRecovery:]
 	}
-	if len(items) > 0 && l.deliverTo(ctx, sub, items) && len(backlogs) > 0 {
-		// Shutting down: the next listener's recovery only reads messages
-		// newer than the join, so keep the requested backlog for it.
-		l.mu.Lock()
-		if l.state.Backlogs == nil {
-			l.state.Backlogs = map[string]int{}
-		}
-		for _, ch := range backlogs {
-			l.state.Backlogs[sub.SessionID+"|"+ch] = backlog
-		}
-		l.saveStateLocked()
-		l.mu.Unlock()
+	if len(items) > 0 && l.deliverTo(ctx, sub, items) {
+		return // shutting down: the kept backlogs stay for the next listener
 	}
+	if len(backlogs) > 0 {
+		l.setBacklogs(sub.SessionID, backlogs, 0) // settled
+	}
+}
+
+// setBacklogs keeps (n > 0) or clears (n == 0) the first-join backlog of
+// session's channels in the state file.
+func (l *Listener) setBacklogs(session string, channels []string, n int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if n > 0 && l.state.Backlogs == nil {
+		l.state.Backlogs = map[string]int{}
+	}
+	for _, ch := range channels {
+		if n > 0 {
+			l.state.Backlogs[session+"|"+ch] = n
+		} else {
+			delete(l.state.Backlogs, session+"|"+ch)
+		}
+	}
+	l.saveStateLocked()
 }
 
 // Subscribe registers sub and delivers its backlog or pending messages.
@@ -701,6 +741,12 @@ func (l *Listener) Unsubscribe(sessionID, channel string) {
 	for k, r := range l.state.Cohort {
 		if r.SessionID == sessionID && (channel == "" || r.Channel == channel || len(sub.Channels) == 0) {
 			delete(l.state.Cohort, k)
+		}
+	}
+	for k := range l.state.Backlogs {
+		s, ch, _ := strings.Cut(k, "|")
+		if s == sessionID && (channel == "" || ch == channel || len(sub.Channels) == 0) {
+			delete(l.state.Backlogs, k)
 		}
 	}
 	if channel == "" || len(sub.Channels) == 0 {
@@ -1406,29 +1452,30 @@ func (l *Listener) RecoverAll(ctx context.Context) {
 	for _, sub := range l.state.Subscriptions {
 		subs = append(subs, sub)
 	}
+	for k := range l.state.Backlogs {
+		s, ch, _ := strings.Cut(k, "|")
+		if sub := l.state.Subscriptions[s]; sub == nil || !slices.Contains(sub.Channels, ch) {
+			delete(l.state.Backlogs, k) // its watch ended before this listener started
+		}
+	}
 	l.mu.Unlock()
 	for _, sub := range subs {
-		first, backlog := l.takeBacklogs(sub)
-		l.recover(ctx, sub, sub.Channels, first, backlog)
+		first, backlog := l.keptBacklogs(sub)
+		l.recoverKept(ctx, sub, sub.Channels, first, backlog, len(first) > 0)
 	}
 }
 
-// takeBacklogs removes and returns the first-join backlogs a previous
-// listener kept for sub (see recover): the channels to treat as first
-// joined, and the largest backlog asked.
-func (l *Listener) takeBacklogs(sub *Subscription) (map[string]bool, int) {
+// keptBacklogs returns the first-join backlogs kept for sub by a previous
+// listener (see recoverKept): the channels to treat as first joined, and the
+// largest backlog asked. recoverKept clears them once delivered.
+func (l *Listener) keptBacklogs(sub *Subscription) (map[string]bool, int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	first, backlog := map[string]bool{}, 0
 	for _, ch := range sub.Channels {
-		k := sub.SessionID + "|" + ch
-		if n := l.state.Backlogs[k]; n > 0 {
+		if n := l.state.Backlogs[sub.SessionID+"|"+ch]; n > 0 {
 			first[ch], backlog = true, max(backlog, n)
-			delete(l.state.Backlogs, k)
 		}
-	}
-	if len(first) > 0 {
-		l.saveStateLocked()
 	}
 	return first, backlog
 }

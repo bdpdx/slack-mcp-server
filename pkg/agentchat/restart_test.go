@@ -614,3 +614,58 @@ func TestCohortTickDuringShutdown(t *testing.T) {
 	require.NotNil(t, reg)
 	assert.True(t, reg.CheckpointNotified.IsZero(), "still owed: the next listener sends it")
 }
+
+// A kept backlog goes with its watch: unsubscribing drops it, and a backlog
+// whose watch is gone when the next listener starts is discarded.
+func TestKeptBacklogEndsWithItsWatch(t *testing.T) {
+	ctx := context.Background()
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s2"), 0))
+	l.mu.Lock()
+	l.state.Backlogs = map[string]int{"s2|C1": 5, "gone|C9": 3}
+	l.mu.Unlock()
+	l.RecoverAll(ctx)
+	l.mu.Lock()
+	_, stale := l.state.Backlogs["gone|C9"]
+	l.mu.Unlock()
+	assert.False(t, stale, "a backlog whose watch is gone is discarded")
+
+	l.mu.Lock()
+	l.state.Backlogs = map[string]int{"s2|C1": 5}
+	l.mu.Unlock()
+	l.Unsubscribe("s2", "")
+	l.mu.Lock()
+	n := len(l.state.Backlogs)
+	l.mu.Unlock()
+	assert.Equal(t, 0, n, "unsubscribing drops the session's kept backlog")
+}
+
+// The next listener sends a kept backlog together with everything newer
+// than the join, each message once, and a delivered backlog is cleared.
+func TestKeptBacklogIncludesTheGap(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	path := filepath.Join(t.TempDir(), "state.json")
+	l1, err := NewListener(api, &fakeDeliverer{}, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	l1.Now = func() time.Time { return time.Unix(2000, 0) }
+	l1.Stop = func() {}
+	require.True(t, l1.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+	require.NoError(t, l1.Subscribe(ctx, claudeSub("s2"), 1))
+
+	api.history["C1"] = []slack.Message{msg("2000.6", "UBR", "gap two"), msg("2000.5", "UBR", "gap one"), msg("1999.5", "UBR", "before")}
+	d2 := &fakeDeliverer{}
+	l2, err := NewListener(api, d2, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	l2.RecoverAll(ctx)
+	require.Len(t, d2.got, 1)
+	assert.Equal(t, 1, strings.Count(d2.got[0].text, "gap two"), "the backlog and the gap overlap: sent once")
+	assert.Contains(t, d2.got[0].text, "gap one", "a gap message older than the backlog window is not held back")
+	assert.Empty(t, l2.state.Backlogs, "cleared once delivered")
+
+	d3 := &fakeDeliverer{}
+	l3 := newTestListener(t, newFakeSlack(), d3)
+	l3.state.Backlogs = nil
+	require.NoError(t, l3.Subscribe(ctx, claudeSub("s3"), 2))
+	assert.Empty(t, l3.state.Backlogs, "a normal watch keeps nothing once its backlog is settled")
+}
