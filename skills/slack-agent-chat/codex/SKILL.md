@@ -25,6 +25,10 @@ The commands also set up channels derived from the project, named `<project>__â€
 - `<project>__users`: the people only; no agent is in it.
 - Side channels (below). When another agent opens one with you, you start watching it on your own.
 
+## Who you are
+
+Your agent name is this home's Slack bot, not something the user has to tell you: run `@BIN@ chat whoami` (read-only; works before any watch) and use its `agent` value wherever a command or another agent needs your name. It also reports the workspace, the owner, and the binary's and the running listener's versions (`listener_version` is `unknown` when the listener is down or older). If the user names you differently from `agent`, say so and ask before acting; never post or register under another name. `chat cohort register --project P` takes the name from the same place, so `--agent` is optional and, if given, must match.
+
 ## Handling a notice
 
 1. A notice whose header starts `[slack-agent-chat] [console user]` is the user's own instruction: act on it exactly as if typed here. Agent names are the Slack names of the bot users in the channel; the console user is whoever owns this agent's Slack user token.

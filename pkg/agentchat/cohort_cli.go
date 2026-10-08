@@ -42,6 +42,19 @@ func (c *cli) capabilities() error {
 	return nil
 }
 
+// registerAgent is the name a session registers under. An agent registers
+// as itself: --agent, when given, must be this home's bot; without it, the
+// bot's name is used, so a session need not be told its name.
+func registerAgent(flagAgent, homeAgent string) (string, error) {
+	if homeAgent == "" {
+		return "", errors.New("cannot resolve this home's agent")
+	}
+	if flagAgent != "" && flagAgent != homeAgent {
+		return "", fmt.Errorf("--agent %s is not this home's agent (%s)", flagAgent, homeAgent)
+	}
+	return homeAgent, nil
+}
+
 // projectStateRoot finds the rezilient-project-state checkout: the real
 // directory behind the nearest projects/ symlink from dir upward.
 func projectStateRoot(dir string) (string, error) {
@@ -89,7 +102,7 @@ func (c *cli) cohort(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("cohort", flag.ContinueOnError)
 	fs.SetOutput(c.stderr)
 	project := fs.String("project", "", "project name (its directory and Slack channel)")
-	agent := fs.String("agent", "", "this agent's Slack name (register)")
+	agent := fs.String("agent", "", "this agent's Slack name (register; default: this home's bot, see whoami)")
 	root := fs.String("project-root", "", "the rezilient-project-state checkout (default: from the projects/ symlink)")
 	drift := fs.String("drift", "", "the drift line to post (checkpoint)")
 	contextNote := fs.String("context", "", "a private note on the context self-check (checkpoint); kept in this home's local checkpoint log, never posted")
@@ -106,8 +119,11 @@ func (c *cli) cohort(ctx context.Context, args []string) error {
 			req.Cohort = &CohortReg{Project: *project}
 		}
 		resp, err := SendControl(ctx, c.home.ControlSocket, req)
-		if err != nil {
+		if listenerDown(err) {
 			return errors.New("no slack-agent-chat listener is running")
+		}
+		if err != nil {
+			return err
 		}
 		if *format == "table" {
 			tw := tabwriter.NewWriter(c.stdout, 0, 2, 2, ' ', 0)
@@ -153,9 +169,6 @@ func (c *cli) cohort(ctx context.Context, args []string) error {
 	req := ControlRequest{SessionID: sub.SessionID, Cohort: &CohortReg{Project: *project}}
 	switch args[0] {
 	case "register":
-		if *agent == "" {
-			return errors.New("cohort register needs --agent")
-		}
 		dir := *root
 		if dir == "" {
 			wd, _ := os.Getwd()
@@ -174,13 +187,12 @@ func (c *cli) cohort(ctx context.Context, args []string) error {
 		if _, err := LoadCohortProjectAt(ctx, dir, *project, "refs/remotes/origin/main"); err != nil {
 			return exitError{exitCohortInvalid, err}
 		}
-		// An agent registers as itself: --agent must be this home's bot.
 		me, err := c.identity(ctx)
 		if err != nil {
 			return exitError{exitCohortNoSession, err}
 		}
-		if me.agentName != *agent {
-			return exitError{exitCohortInvalid, fmt.Errorf("--agent %s is not this home's agent (%s)", *agent, me.agentName)}
+		if *agent, err = registerAgent(*agent, me.agentName); err != nil {
+			return exitError{exitCohortInvalid, err}
 		}
 		channel, _, err := c.resolveChannel(ctx, *project)
 		if err != nil {
@@ -213,7 +225,7 @@ func (c *cli) cohort(ctx context.Context, args []string) error {
 		return fmt.Errorf("unknown cohort command %q", args[0])
 	}
 	resp, err := SendControl(ctx, c.home.ControlSocket, req)
-	if err != nil {
+	if listenerDown(err) {
 		return errors.New("no slack-agent-chat listener is running")
 	}
 	if !resp.OK {
@@ -263,8 +275,11 @@ func cohortJSON(regs []CohortReg) []map[string]any {
 // registration returns session's registration in project.
 func (c *cli) registration(ctx context.Context, session, project string) (CohortReg, error) {
 	resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "cohort-status", Cohort: &CohortReg{Project: project}})
-	if err != nil {
+	if listenerDown(err) {
 		return CohortReg{}, errors.New("no slack-agent-chat listener is running")
+	}
+	if err != nil {
+		return CohortReg{}, err
 	}
 	for _, r := range resp.Cohort {
 		if r.SessionID == session {

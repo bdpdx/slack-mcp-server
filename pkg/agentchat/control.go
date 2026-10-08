@@ -15,6 +15,21 @@ import (
 // ErrListenerRunning means another listener already owns the control socket.
 var ErrListenerRunning = errors.New("a listener is already running for this home")
 
+// RefusedError is a reply the listener sent with ok=false: the listener is
+// running and answered, but declined the request. Its text is the
+// listener's reason, unchanged.
+type RefusedError struct{ Reason string }
+
+func (e *RefusedError) Error() string { return e.Reason }
+
+// listenerDown reports whether err from SendControl means no listener
+// answered (no socket, a dropped connection, a timeout), as opposed to a
+// listener that answered with a refusal.
+func listenerDown(err error) bool {
+	var refused *RefusedError
+	return err != nil && !errors.As(err, &refused)
+}
+
 // ControlRequest is one command sent to the listener.
 type ControlRequest struct {
 	Op           string        `json:"op"`
@@ -42,6 +57,9 @@ type ControlResponse struct {
 	// Unavailable marks a cohort-claim-check refusal for missing evidence
 	// (an unreadable lookup), as opposed to a definite no.
 	Unavailable bool `json:"unavailable,omitempty"`
+	// Version is the running listener's build (op "status"). A listener
+	// older than this field leaves it empty: its version is unknown.
+	Version string `json:"version,omitempty"`
 }
 
 // SessionStatus describes one subscribed session.
@@ -164,7 +182,7 @@ func SendControl(ctx context.Context, socket string, req ControlRequest) (Contro
 		return ControlResponse{}, err
 	}
 	if !resp.OK {
-		return resp, errors.New(resp.Error)
+		return resp, &RefusedError{Reason: resp.Error}
 	}
 	return resp, nil
 }

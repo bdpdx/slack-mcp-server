@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/slack-go/slack"
@@ -150,11 +151,14 @@ func (c *cli) claimEligible(ctx context.Context, project, agent string, term int
 	}
 	resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "cohort-claim-check", SessionID: sub.SessionID,
 		Cohort: &CohortReg{Project: project, Agent: agent}, Expect: &GMState{Term: term, GM: gm}, UserDirected: userDirected})
-	if err != nil {
+	if listenerDown(err) {
 		return fmt.Errorf("%w: no slack-agent-chat listener is running", ErrAdmitUnavailable)
 	}
 	if !resp.OK {
-		if resp.Unavailable {
+		// A listener older than this binary (install.sh replaces the binary
+		// but leaves a running listener) does not know the op, or predates
+		// the Unavailable flag: its refusal is missing evidence, not a no.
+		if resp.Unavailable || strings.HasPrefix(resp.Error, "unknown op ") {
 			return fmt.Errorf("%w: %s", ErrAdmitUnavailable, resp.Error)
 		}
 		return fmt.Errorf("not eligible to claim: %s", resp.Error)
