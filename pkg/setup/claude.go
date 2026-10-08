@@ -15,6 +15,7 @@ type Result struct {
 	Type      string   // TypeClaude or TypeCodex
 	Installed bool     // the home was set up completely
 	Fresh     bool     // set up new or reinstalled (new tokens), not just updated
+	Stale     bool     // running sessions keep old hooks or MCP settings until they restart
 	Changed   []string // files written or registrations made
 	Manual    []string // commands the user must run
 	Notes     []string // anything else to tell the user
@@ -78,6 +79,7 @@ func InstallClaude(home, userHome, bin string, r Runner, now time.Time) (Result,
 		return res, err
 	} else if wrote {
 		res.Changed = append(res.Changed, settings)
+		res.Stale = true // Claude Code reads hooks when a session starts
 	}
 	manual, err := RegisterMCP(r, TypeClaude, home, userHome, bin)
 	if err != nil {

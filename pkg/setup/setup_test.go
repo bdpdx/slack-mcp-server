@@ -292,6 +292,15 @@ func TestPrintSummary(t *testing.T) {
 	assert.NotContains(t, b.String(), "estart")
 
 	b.Reset()
+	changed := []Result{{Home: "/u/.claude", Type: TypeClaude, Installed: true, Stale: true}, {Home: "/u/.codex", Type: TypeCodex, Installed: true}}
+	printSummary(&b, "/b/slack-mcp-server", changed, false)
+	out = b.String()
+	assert.Contains(t, out, "1. Restart agent sessions in /u/.claude: setup changed hooks or Slack MCP settings", "an update that changed hooks names that home")
+	assert.NotContains(t, out, "/u/.codex:")
+	assert.NotContains(t, out, "Trust the hooks", "the Codex home's hooks did not change")
+	assert.NotContains(t, out, "project chat")
+
+	b.Reset()
 	printSummary(&b, "/b/slack-mcp-server", both, true)
 	assert.NotContains(t, b.String(), "Remaining steps:", "not after an abort")
 	assert.Contains(t, b.String(), "Setup stopped before it finished")

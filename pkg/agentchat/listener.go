@@ -73,7 +73,8 @@ type Listener struct {
 	relays        map[string]time.Time      // expected %agents echoes: session|channel|text → expiry
 	sessLock      map[string]*sync.Mutex    // serializes deliveries per session
 	queues        map[string]chan []pending // per-session delivery queues (Async)
-	queued        int                       // deliveries queued or in progress on those queues (under mu)
+	queued        int                       // deliveries waiting on those queues (under mu)
+	delivering    int                       // deliveries in progress, until marked (under mu)
 	approvals     map[string]*approval      // approval-hook requests by approval ID
 	closing       bool                      // shutting down: records no new answer (set under mu)
 	inflight      int                       // restart notes and redraws still being posted (under mu)
@@ -322,13 +323,35 @@ func (l *Listener) dispatch(ctx context.Context, sub *Subscription, items []pend
 	}
 }
 
-// waitDeliveries waits up to d for the delivery queues to empty, so a
-// stopping listener never exits between delivering a message and marking it
-// delivered (which would deliver it twice after a restart).
+// beginDelivery counts a delivery in progress, or refuses once the listener
+// is shutting down: a delivery started after the fence could be cut off
+// between reaching the session and being marked, and then delivered again
+// after the restart. A refused delivery is left for the next listener.
+func (l *Listener) beginDelivery() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closing {
+		return false
+	}
+	l.delivering++
+	return true
+}
+
+func (l *Listener) endDelivery() {
+	l.mu.Lock()
+	l.delivering--
+	l.mu.Unlock()
+}
+
+// waitDeliveries waits up to d for every delivery in progress (queued,
+// backlog, cohort notice) to finish and be marked, so a stopping listener
+// never exits between delivering a message and marking it delivered. Queued
+// deliveries not yet started are refused by beginDelivery and left for the
+// next listener.
 func (l *Listener) waitDeliveries(d time.Duration) {
 	for deadline := time.Now().Add(d); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
 		l.mu.Lock()
-		n := l.queued
+		n := l.queued + l.delivering
 		l.mu.Unlock()
 		if n == 0 {
 			return
@@ -428,6 +451,10 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 		text = FormatBatch(notices)
 	}
 	last := fresh[len(fresh)-1].msg
+	if !l.beginDelivery() {
+		return // shutting down: left unmarked for the next listener
+	}
+	defer l.endDelivery() // after the delivery is marked below
 	method, err := l.Deliverer.Deliver(ctx, sub, clientMessageID(sub.SessionID, last.Channel, last.TS), text)
 	if err != nil {
 		if errors.Is(err, ErrSessionGone) {

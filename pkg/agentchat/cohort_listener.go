@@ -1040,6 +1040,10 @@ func (l *Listener) deliverCohort(ctx context.Context, sub *Subscription, key, te
 	sl := l.sessionLock(sub.SessionID)
 	sl.Lock()
 	defer sl.Unlock()
+	if !l.beginDelivery() {
+		return errors.New("listener shutting down; the next listener sends this notice")
+	}
+	defer l.endDelivery()
 	if _, err := l.Deliverer.Deliver(ctx, sub, clientMessageID(sub.SessionID, "cohort", key), text); err != nil {
 		l.Log.Warn("cohort notice delivery failed", zap.String("session", sub.SessionID), zap.Error(err))
 		return err

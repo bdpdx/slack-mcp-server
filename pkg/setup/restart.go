@@ -44,7 +44,7 @@ func RestartListeners(w io.Writer, r Runner, bin string, homes []Home) (failed b
 		var err error
 		if sr, ok := r.(StreamRunner); ok {
 			fmt.Fprintf(w, "  %s:\n", h.Path) // its progress follows as it runs
-			out, err = sr.RunStream(w, nil, bin, args...)
+			out, err = sr.RunStream(&indenter{w: w, prefix: "    "}, nil, bin, args...)
 			fmt.Fprintf(w, "    %s\n", restartLine(out, err))
 		} else {
 			out, err = r.Run(nil, bin, args...)
@@ -80,6 +80,31 @@ func restartLine(out string, err error) string {
 		return "already running this build (" + res.Version + ")"
 	}
 	return fmt.Sprintf("restarted on the new binary (%s → %s); watches carried over", res.Previous, res.Version)
+}
+
+// indenter prefixes every line written through it.
+type indenter struct {
+	w      io.Writer
+	prefix string
+	mid    bool // inside a line
+}
+
+func (in *indenter) Write(p []byte) (int, error) {
+	var b []byte
+	for _, c := range p {
+		if !in.mid {
+			b = append(b, in.prefix...)
+			in.mid = true
+		}
+		b = append(b, c)
+		if c == '\n' {
+			in.mid = false
+		}
+	}
+	if _, err := in.w.Write(b); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 func lastLine(s string) string {

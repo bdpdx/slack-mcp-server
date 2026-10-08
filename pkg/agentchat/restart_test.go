@@ -500,10 +500,12 @@ func TestLateRegistrationClearsUncollectedDecision(t *testing.T) {
 // heldDeliverer holds each delivery until release is closed.
 type heldDeliverer struct {
 	fakeDeliverer
+	entered chan struct{} // receives once per delivery that has started
 	release chan struct{}
 }
 
 func (d *heldDeliverer) Deliver(ctx context.Context, sub *Subscription, clientID, text string) (string, error) {
+	d.entered <- struct{}{}
 	<-d.release
 	return d.fakeDeliverer.Deliver(ctx, sub, clientID, text)
 }
@@ -512,12 +514,13 @@ func (d *heldDeliverer) Deliver(ctx context.Context, sub *Subscription, clientID
 // listener stops, so the next listener never delivers it a second time.
 func TestShutdownWaitsForDeliveries(t *testing.T) {
 	ctx := context.Background()
-	d := &heldDeliverer{release: make(chan struct{})}
+	d := &heldDeliverer{entered: make(chan struct{}, 4), release: make(chan struct{})}
 	l, err := NewListener(newFakeSlack(), d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
 	require.NoError(t, err)
 	l.Async = true
 	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0))
 	l.HandleMessage(ctx, Message{Channel: "C1", TS: "2000.5", User: "UBR", Text: "hello"})
+	<-d.entered // the delivery is under way
 	stopped := make(chan struct{})
 	l.Stop = func() { close(stopped) }
 	require.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
@@ -548,4 +551,21 @@ func TestRechecksSurviveRestart(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, l2.state.Rechecks, 1)
 	assert.Equal(t, "<@UGM> are you there?", l2.state.Rechecks[watchKey("C1", "2000.1")].M.Text)
+}
+
+// A delivery not yet started when the restart begins is not started at all:
+// it stays unmarked for the next listener, which delivers it once.
+func TestShutdownStartsNoNewDelivery(t *testing.T) {
+	ctx := context.Background()
+	d := &heldDeliverer{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	close(d.release)
+	l, err := NewListener(newFakeSlack(), d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
+	require.NoError(t, err)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0))
+	l.Stop = func() {}
+	require.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+	l.deliverTo(ctx, l.state.Subscriptions["s1"], []pending{{msg: Message{Channel: "C1", TS: "2000.6", User: "UBR", Text: "late"}}})
+	assert.Empty(t, d.got, "nothing delivered after the fence")
+	assert.False(t, l.state.WasDelivered("s1", "C1", "2000.6"), "left for the next listener")
+	assert.Error(t, l.deliverCohort(ctx, l.state.Subscriptions["s1"], "k", "notice"), "cohort notices wait for the next listener too")
 }

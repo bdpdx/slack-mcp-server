@@ -71,6 +71,6 @@ func TestRestartListenersStreamsProgress(t *testing.T) {
 	failed := RestartListeners(&w, r, "/bin/smcp", []Home{{Path: "/h/a", HasEnv: true}, {Path: "/h/b", HasEnv: true}})
 	assert.True(t, failed)
 	assert.Equal(t, "\nListeners\n"+
-		"  /h/a:\nprogress for /h/a/slack-mcp-server.env\n    restarted on the new binary (v1 → v2); watches carried over\n"+
-		"  /h/b:\nprogress for /h/b/slack-mcp-server.env\n    restart FAILED: exit status 1 (the reason is printed above)\n", w.String())
+		"  /h/a:\n    progress for /h/a/slack-mcp-server.env\n    restarted on the new binary (v1 → v2); watches carried over\n"+
+		"  /h/b:\n    progress for /h/b/slack-mcp-server.env\n    restart FAILED: exit status 1 (the reason is printed above)\n", w.String())
 }
