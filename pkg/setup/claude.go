@@ -80,7 +80,6 @@ func InstallClaude(home, userHome, bin string, r Runner, now time.Time) (Result,
 		return res, err
 	} else if wrote {
 		res.Changed = append(res.Changed, settings)
-		res.Stale = true // Claude Code reads hooks when a session starts
 	}
 	manual, err := RegisterMCP(r, TypeClaude, home, userHome, bin)
 	if err != nil {

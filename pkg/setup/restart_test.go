@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type restartRunner struct {
@@ -73,4 +76,30 @@ func TestRestartListenersStreamsProgress(t *testing.T) {
 	assert.Equal(t, "\nListeners\n"+
 		"  /h/a:\n    progress for /h/a/slack-mcp-server.env\n    restarted on the new binary (v1 → v2); watches carried over\n"+
 		"  /h/b:\n    progress for /h/b/slack-mcp-server.env\n    restart FAILED: exit status 1 (the reason is printed above)\n", w.String())
+}
+
+// A session file counts as changed only when its content differs: JSON by
+// value (reordered keys are the same), anything else byte for byte.
+func TestSameContent(t *testing.T) {
+	assert.True(t, sameContent("settings.json", []byte(`{"a":1,"b":[2]}`), []byte("{\n  \"b\": [2],\n  \"a\": 1\n}")))
+	assert.False(t, sameContent("settings.json", []byte(`{"a":1}`), []byte(`{"a":2}`)))
+	assert.True(t, sameContent("config.toml", []byte("x = 1\n"), []byte("x = 1\n")))
+	assert.False(t, sameContent("config.toml", []byte("x = 1\n"), []byte("x = 2\n")))
+	assert.False(t, sameContent("hooks.json", nil, []byte(`{}`)), "a file that appeared is a change")
+	assert.True(t, sameContent("hooks.json", nil, nil))
+}
+
+// Setup's own writes that end where they started (re-registering the MCP
+// server, then restoring a line) leave a home not stale.
+func TestSnapshotSessionFiles(t *testing.T) {
+	home := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(home, "config.toml"), []byte("a = 1\n"), 0o600))
+	before := snapshotSessionFiles(home)
+	assert.Contains(t, before, "rules/default.rules", "Codex's execpolicy file is compared too")
+	require.NoError(t, os.WriteFile(filepath.Join(home, "config.toml"), []byte("a = 2\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "config.toml"), []byte("a = 1\n"), 0o600))
+	after := snapshotSessionFiles(home)
+	for name := range before {
+		assert.True(t, sameContent(name, before[name], after[name]), name)
+	}
 }

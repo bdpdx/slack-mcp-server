@@ -3,6 +3,7 @@ package setup
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -238,10 +240,22 @@ func processHome(ctx context.Context, o Options, st *State, h Home) (Result, boo
 		bot, notes = name, n
 	}
 	oldBin := ExistingBin([]Home{h})
+	before := snapshotSessionFiles(h.Path)
 	res, err := installHome(o, h)
 	res.Fresh = action != actUpdate
-	if oldBin != "" && oldBin != o.Bin {
-		res.Stale = true // its sessions' Slack MCP server still runs the old path
+	// Running sessions need a restart only if what they read at start
+	// actually differs now. Setup's writes alone don't say so: re-registering
+	// the MCP server rewrites config.toml and setup then restores it, and a
+	// JSON rewrite can only reorder keys.
+	after := snapshotSessionFiles(h.Path)
+	res.Stale = oldBin != "" && oldBin != o.Bin // its sessions' MCP server still runs the old path
+	for name, was := range before {
+		if !sameContent(name, was, after[name]) {
+			res.Stale = true
+		}
+		if name == "hooks.json" && !bytes.Equal(was, after[name]) {
+			res.Hooks = true // Codex asks to trust hooks whose file changed at all
+		}
 	}
 	res.Notes = append(res.Notes, notes...)
 	if err != nil {
@@ -632,4 +646,35 @@ func printSummary(w io.Writer, bin string, results []Result, aborted bool) {
 	for i, s := range steps {
 		fmt.Fprintf(w, "  %d. %s\n", i+1, s)
 	}
+}
+
+// sessionFiles are the files in a home that agent sessions read when they
+// start: hooks and MCP settings.
+var sessionFiles = []string{"settings.json", "hooks.json", "config.toml", "rules/default.rules"}
+
+// snapshotSessionFiles reads home's session files (nil for a missing one).
+func snapshotSessionFiles(home string) map[string][]byte {
+	snap := map[string][]byte{}
+	for _, name := range sessionFiles {
+		data, _ := os.ReadFile(filepath.Join(home, name))
+		snap[name] = data
+	}
+	return snap
+}
+
+// sameContent reports whether two versions of a session file mean the same
+// thing: JSON compared by value (key order and formatting don't matter),
+// anything else byte for byte.
+func sameContent(name string, a, b []byte) bool {
+	if bytes.Equal(a, b) {
+		return true
+	}
+	if !strings.HasSuffix(name, ".json") || len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	var va, vb any
+	if json.Unmarshal(a, &va) != nil || json.Unmarshal(b, &vb) != nil {
+		return false
+	}
+	return reflect.DeepEqual(va, vb)
 }
