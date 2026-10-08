@@ -237,7 +237,12 @@ func processHome(ctx context.Context, o Options, st *State, h Home) (Result, boo
 		}
 		bot, notes = name, n
 	}
+	oldBin := ExistingBin([]Home{h})
 	res, err := installHome(o, h)
+	res.Fresh = action != actUpdate
+	if oldBin != "" && oldBin != o.Bin {
+		res.Stale = true // its sessions' Slack MCP server still runs the old path
+	}
 	res.Notes = append(res.Notes, notes...)
 	if err != nil {
 		return res, false, err
@@ -571,7 +576,8 @@ func printSummary(w io.Writer, bin string, results []Result, aborted bool) {
 	} else {
 		fmt.Fprintf(w, "\nslack-mcp-server is installed at %s\n", bin)
 	}
-	installed, codex, icon := false, false, false
+	installed, fresh, codex, icon := false, false, false, false
+	var stale []string // updated homes whose running sessions need a restart
 	for _, r := range results {
 		fmt.Fprintf(w, "\n%s\n", r.Home)
 		for _, c := range r.Changed {
@@ -585,7 +591,11 @@ func printSummary(w io.Writer, bin string, results []Result, aborted bool) {
 			icon = icon || (r.Installed && strings.HasPrefix(n, "Set an icon for "))
 		}
 		installed = installed || r.Installed
-		codex = codex || (r.Installed && r.Type == TypeCodex)
+		fresh = fresh || (r.Installed && r.Fresh)
+		if r.Installed && !r.Fresh && r.Stale {
+			stale = append(stale, r.Home)
+		}
+		codex = codex || (r.Installed && (r.Fresh || r.Hooks) && r.Type == TypeCodex)
 	}
 	if aborted {
 		fmt.Fprintln(w, "\nSetup stopped before it finished. Run ./install.sh again to set up the remaining homes.")
@@ -594,15 +604,30 @@ func printSummary(w io.Writer, bin string, results []Result, aborted bool) {
 	if !installed {
 		return
 	}
+	// An update needs no restarts: setup restarts each running listener on
+	// the new binary itself (see Listeners). Only a home set up new or
+	// reinstalled with new tokens, or one whose hooks or Slack MCP settings
+	// changed (sessions read those when they start), needs its sessions
+	// started fresh.
 	var steps []string
 	if icon {
 		steps = append(steps, "Set the bot icon (see the icon notes above).")
 	}
-	steps = append(steps, "Restart your agent sessions.")
+	if fresh {
+		steps = append(steps, "Start (or restart) agent sessions in the homes set up or reinstalled above.")
+	}
+	if len(stale) > 0 {
+		steps = append(steps, fmt.Sprintf("Restart agent sessions in %s: setup changed hooks or Slack MCP settings, which running sessions read only when they start.", strings.Join(stale, ", ")))
+	}
 	if codex {
 		steps = append(steps, "Trust the hooks when Codex asks.")
 	}
-	steps = append(steps, "Tell the agent: start a project chat called <name>.")
+	if fresh {
+		steps = append(steps, "Tell the agent: start a project chat called <name>.")
+	}
+	if len(steps) == 0 {
+		return
+	}
 	fmt.Fprintln(w, "\nRemaining steps:")
 	for i, s := range steps {
 		fmt.Fprintf(w, "  %d. %s\n", i+1, s)

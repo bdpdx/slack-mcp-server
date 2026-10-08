@@ -73,13 +73,17 @@ type Listener struct {
 	relays        map[string]time.Time      // expected %agents echoes: session|channel|text → expiry
 	sessLock      map[string]*sync.Mutex    // serializes deliveries per session
 	queues        map[string]chan []pending // per-session delivery queues (Async)
+	queued        int                       // deliveries waiting on those queues (under mu)
+	delivering    int                       // deliveries in progress, until marked (under mu)
+	backlogRetry  map[string]backlogRetry   // kept backlogs' retry backoff by session|channel (under mu)
+	catchUpOwed   map[string]backlogRetry   // sessions whose catch-up failed partway, with retry backoff (under mu)
+	owedGen       map[string]int            // bumped each time a session becomes owed, so a catch-up clears only what it covered (under mu)
 	approvals     map[string]*approval      // approval-hook requests by approval ID
 	closing       bool                      // shutting down: records no new answer (set under mu)
-	notes         sync.WaitGroup            // restart notes being posted
+	inflight      int                       // restart notes and redraws still being posted (under mu)
 	views         cohortViews               // project views for cohort tracking
 	approvalWaits map[string]*approvalWait  // Codex registrations seen waiting on an approval, by session|project
 	unobservable  map[string]bool           // Codex sessions whose daemon hides approval waits (warned once)
-	rechecks      map[string]recheck        // possible GM signals to classify again once the view refreshes
 }
 
 // queueDepth bounds each session's pending deliveries. Overflow is dropped;
@@ -316,9 +320,48 @@ func (l *Listener) dispatch(ctx context.Context, sub *Subscription, items []pend
 	}
 	select {
 	case q <- items:
+		l.queued++
 	default:
 		l.Log.Warn("delivery queue full; message left for catch-up", zap.String("session", sub.SessionID))
+		l.oweCatchUpLocked(sub.SessionID)
 	}
+}
+
+// beginDelivery counts a delivery in progress, or refuses once the listener
+// is shutting down: a delivery started after the fence could be cut off
+// between reaching the session and being marked, and then delivered again
+// after the restart. A refused delivery is left for the next listener.
+func (l *Listener) beginDelivery() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closing {
+		return false
+	}
+	l.delivering++
+	return true
+}
+
+func (l *Listener) endDelivery() {
+	l.mu.Lock()
+	l.delivering--
+	l.mu.Unlock()
+}
+
+// waitDeliveries waits up to d for every delivery in progress (queued,
+// backlog, cohort notice) to finish and be marked, so a stopping listener
+// never exits between delivering a message and marking it delivered. Queued
+// deliveries not yet started are refused by beginDelivery and left for the
+// next listener.
+func (l *Listener) waitDeliveries(d time.Duration) {
+	for deadline := time.Now().Add(d); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		l.mu.Lock()
+		n := l.queued + l.delivering
+		l.mu.Unlock()
+		if n == 0 {
+			return
+		}
+	}
+	l.Log.Warn("stopping with deliveries still in progress; they will be retried by the next listener")
 }
 
 // work delivers one session's queued items in order until the queue is
@@ -332,6 +375,9 @@ func (l *Listener) work(ctx context.Context, sessionID string, q chan []pending)
 		if sub != nil {
 			l.deliverTo(ctx, sub, items)
 		}
+		l.mu.Lock()
+		l.queued--
+		l.mu.Unlock()
 	}
 }
 
@@ -383,41 +429,181 @@ func (l *Listener) sessionLock(sessionID string) *sync.Mutex {
 
 // deliverTo pushes the items sub hasn't had yet as one notice, records them
 // and marks each one delivered with a reaction.
-func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pending) {
+// deliverOutcome is what deliverTo did.
+type deliverOutcome int
+
+const (
+	deliverNone     deliverOutcome = iota // nothing new to deliver
+	deliverDone                           // delivered and marked
+	deliverRefused                        // shutting down; delivered nothing
+	deliverFailed                         // the delivery failed; nothing marked
+	deliverGone                           // the session is gone; its subscription was dropped
+	deliverDeferred                       // held for an owed catch-up; nothing marked
+)
+
+// It reports what happened, so a caller can keep what it cannot redo from
+// history.
+func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pending) deliverOutcome {
 	// One delivery per session at a time, so live events and recovery cannot
 	// both push the same message.
 	sl := l.sessionLock(sub.SessionID)
 	sl.Lock()
 	defer sl.Unlock()
+	fresh := l.freshItems(sub, items)
+	note := ""
 	l.mu.Lock()
+	r, owed := l.catchUpOwed[sub.SessionID]
+	switch {
+	case owed && r.readOnly && r.tries >= releaseAfter && len(fresh) > 0:
+		// History keeps failing to read while the session is reachable:
+		// stop holding its live messages. The older ones stay in history,
+		// the note says so, and the floor keeps them from arriving late.
+		delete(l.catchUpOwed, sub.SessionID)
+		l.setFloorLocked(sub.SessionID, fresh[0].msg.TS)
+		note, owed = unreadNote, false
+	case owed:
+		// New activity: try the owed catch-up at the next sweep rather than
+		// after its backoff, so a session that is back soon gets everything.
+		r.next = time.Time{}
+		l.catchUpOwed[sub.SessionID] = r
+	}
+	l.mu.Unlock()
+	if owed {
+		// Older messages are still owed to this session: hold this one
+		// (unmarked) so the owed catch-up sends everything oldest first.
+		// (Cohort notices are not channel messages and are not held.)
+		return deliverDeferred
+	}
+	l.mu.Lock()
+	if floor := l.state.CatchUpFloor[sub.SessionID]; floor != "" {
+		// A capped catch-up already sent newer messages and told the agent
+		// older ones were left to history: a queued older one would now
+		// arrive out of order, so it stays there too.
+		fresh = slices.DeleteFunc(fresh, func(p pending) bool { return TSLess(p.msg.TS, floor) })
+	}
+	l.mu.Unlock()
+	o := l.deliverLocked(ctx, sub, fresh, catchUp{note: note})
+	if o == deliverFailed {
+		l.oweCatchUp(sub.SessionID) // the next sweep sends it with whatever else is pending
+	}
+	return o
+}
+
+// setFloorLocked records session's catch-up floor in the state file: older
+// messages were left to history and are never sent to it. Call with l.mu
+// held.
+func (l *Listener) setFloorLocked(session, ts string) {
+	if l.state.CatchUpFloor == nil {
+		l.state.CatchUpFloor = map[string]string{}
+	}
+	if TSLess(l.state.CatchUpFloor[session], ts) {
+		l.state.CatchUpFloor[session] = ts
+		l.saveStateLocked()
+	}
+}
+
+// oweCatchUp marks session as owed a catch-up, which RetryBacklogs sends
+// (with backoff) until one succeeds.
+func (l *Listener) oweCatchUp(session string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.oweCatchUpLocked(session)
+}
+
+func (l *Listener) oweCatchUpLocked(session string) {
+	if l.owedGen == nil {
+		l.owedGen = map[string]int{}
+	}
+	l.owedGen[session]++
+	if l.catchUpOwed == nil {
+		l.catchUpOwed = map[string]backlogRetry{}
+	}
+	// A new debt, or one a delivery failure or drop added to: not read-only
+	// (recoverKept marks a fresh read-only debt itself).
+	r := l.catchUpOwed[session]
+	r.readOnly = false
+	l.catchUpOwed[session] = r
+}
+
+// catchUp numbers one part of a catch-up for its notice header: part of
+// parts, holding messages start.. of total, with skipped older
+// unacknowledged messages not sent. parts == 0 marks a live delivery.
+type catchUp struct {
+	part, parts, start, total, skipped int
+	note                               string // a live delivery's leading note, if any
+}
+
+// freshItems drops items already delivered to sub.
+func (l *Listener) freshItems(sub *Subscription, items []pending) []pending {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	var fresh []pending
 	for _, it := range items {
 		if !l.state.WasDelivered(sub.SessionID, it.msg.Channel, it.msg.TS) {
 			fresh = append(fresh, it)
 		}
 	}
-	l.mu.Unlock()
+	return fresh
+}
+
+// deliverParts sends a catch-up, oldest first, in consecutive parts of at
+// most maxRecovery messages, each header giving the totals so the agent
+// knows how much to read before acting. It stops at the first part that is
+// not delivered (later parts must not overtake it) and reports that part's
+// outcome. Call with sub's session lock held, so no live delivery lands
+// between parts.
+func (l *Listener) deliverParts(ctx context.Context, sub *Subscription, items []pending, skipped int) deliverOutcome {
+	fresh := l.freshItems(sub, items)
 	if len(fresh) == 0 {
-		return
+		return deliverNone
 	}
-	text := fresh[0].notice.Format()
-	if len(fresh) > 1 {
-		notices := make([]Notice, len(fresh))
-		for i, it := range fresh {
-			notices[i] = it.notice
+	parts := (len(fresh) + maxRecovery - 1) / maxRecovery
+	for i := 0; i < parts; i++ {
+		chunk := fresh[i*maxRecovery : min((i+1)*maxRecovery, len(fresh))]
+		h := catchUp{part: i + 1, parts: parts, start: i*maxRecovery + 1, total: len(fresh), skipped: skipped}
+		if o := l.deliverLocked(ctx, sub, chunk, h); o != deliverDone {
+			return o
 		}
+	}
+	return deliverDone
+}
+
+// deliverLocked delivers fresh (not yet delivered) items as one notice and
+// marks them. Call with sub's session lock held.
+func (l *Listener) deliverLocked(ctx context.Context, sub *Subscription, fresh []pending, h catchUp) deliverOutcome {
+	if len(fresh) == 0 {
+		return deliverNone
+	}
+	notices := make([]Notice, len(fresh))
+	for i, it := range fresh {
+		notices[i] = it.notice
+	}
+	var text string
+	switch {
+	case h.parts > 0:
+		text = FormatCatchUp(notices, h.part, h.parts, h.start, h.total, h.skipped)
+	case len(fresh) == 1:
+		text = fresh[0].notice.Format()
+	default:
 		text = FormatBatch(notices)
 	}
+	if h.note != "" {
+		text = h.note + "\n\n" + text
+	}
 	last := fresh[len(fresh)-1].msg
+	if !l.beginDelivery() {
+		return deliverRefused // shutting down: left unmarked for the next listener
+	}
+	defer l.endDelivery() // after the delivery is marked below
 	method, err := l.Deliverer.Deliver(ctx, sub, clientMessageID(sub.SessionID, last.Channel, last.TS), text)
 	if err != nil {
 		if errors.Is(err, ErrSessionGone) {
 			l.Log.Info("session gone; dropping its subscription", zap.String("session", sub.SessionID), zap.String("kind", sub.Kind), zap.Error(err))
 			l.Unsubscribe(sub.SessionID, "")
-			return
+			return deliverGone
 		}
 		l.Log.Warn("delivery failed", zap.String("session", sub.SessionID), zap.String("kind", sub.Kind), zap.Error(err))
-		return
+		return deliverFailed
 	}
 	l.Log.Info("delivered", zap.String("session", sub.SessionID), zap.String("kind", sub.Kind), zap.String("method", method), zap.Int("messages", len(fresh)))
 	l.mu.Lock()
@@ -433,6 +619,7 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 	for _, it := range fresh {
 		l.react(ctx, it.msg, reactionDelivered)
 	}
+	return deliverDone
 }
 
 func (l *Listener) react(ctx context.Context, m Message, name string) {
@@ -492,17 +679,72 @@ func (l *Listener) register(sub *Subscription) (*Subscription, map[string]bool, 
 // recover pushes what sub should already have: the last backlog messages on
 // a first join, or pending (unacknowledged) messages since the join point.
 func (l *Listener) recover(ctx context.Context, sub *Subscription, channels []string, first map[string]bool, backlog int) {
-	var items []pending
+	var sizes map[string]int
+	if backlog > 0 {
+		sizes = map[string]int{}
+		for _, ch := range channels {
+			if first[ch] {
+				sizes[ch] = backlog
+			}
+		}
+	}
+	l.recoverKept(ctx, sub, channels, first, sizes, false)
+}
+
+// recoverKept is recover. kept says the first-join backlogs were kept by a
+// previous listener that could not deliver them, so messages newer than the
+// join are read as well (and merged without duplicates).
+//
+// A requested backlog is kept in the state file from the start and cleared
+// once its delivery is settled, so a listener that exits mid-recovery (even
+// while still reading history) leaves it for the next one.
+func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels []string, first map[string]bool, sizes map[string]int, kept bool) {
+	// Hold this session's live deliveries until the whole catch-up is sent,
+	// so nothing newer reaches the agent before the older messages.
+	sl := l.sessionLock(sub.SessionID)
+	sl.Lock()
+	defer sl.Unlock()
+	l.mu.Lock()
+	gen := l.owedGen[sub.SessionID] // what this catch-up's history read covers
+	l.mu.Unlock()
+	var backlogs []string // first-join channels whose backlog (sizes) was requested
+	for _, ch := range channels {
+		if first[ch] && sizes[ch] > 0 {
+			backlogs = append(backlogs, ch)
+		}
+	}
+	if len(backlogs) > 0 {
+		l.keepBacklogs(sub.SessionID, sizes)
+	}
+	var asked, newer []pending // the requested backlogs, and messages since the join
+	readFailed := false        // a kept backlog's history read failed: keep it to retry
+	sinceFailed := false       // reading messages since a join failed
+	seen := map[string]bool{}
+	add := func(to *[]pending, p pending) {
+		if k := p.msg.Channel + "|" + p.msg.TS; !seen[k] {
+			seen[k] = true
+			*to = append(*to, p)
+		}
+	}
 	for _, ch := range channels {
 		if first[ch] {
-			if backlog > 0 {
-				found, err := l.routedBacklog(ctx, ch, backlog)
+			if n := sizes[ch]; n > 0 {
+				before := ""
+				if kept {
+					before = l.backlogBefore(sub.SessionID, ch)
+				}
+				found, err := l.routedBacklog(ctx, ch, n, before)
 				if err != nil {
 					l.Log.Warn("reading history failed", zap.String("channel", ch), zap.Error(err))
+					readFailed = true
 				}
-				items = append(items, found...)
+				for _, p := range found {
+					add(&asked, p)
+				}
 			}
-			continue
+			if !kept {
+				continue
+			}
 		}
 		l.mu.Lock()
 		join := l.state.JoinTS[ch]
@@ -510,22 +752,260 @@ func (l *Listener) recover(ctx context.Context, sub *Subscription, channels []st
 		msgs, err := l.pendingSince(ctx, ch, join)
 		if err != nil {
 			l.Log.Warn("reading history failed", zap.String("channel", ch), zap.Error(err))
+			readFailed = readFailed || (kept && first[ch])
+			sinceFailed = true
 			continue
 		}
 		for _, m := range msgs {
 			if !m.Deliverable() || m.From(l.Self) {
 				continue
 			}
-			items = append(items, pending{m, l.notice(ctx, m)})
+			add(&newer, pending{m, l.notice(ctx, m)})
 		}
 	}
+	// A requested backlog goes whole. Of the unacknowledged messages since
+	// the join, the newest maxRecovery go; the notice says how many older
+	// ones were not sent. Everything is sent oldest first.
+	newer = l.freshItems(sub, newer)
+	l.mu.Lock()
+	if floor := l.state.CatchUpFloor[sub.SessionID]; floor != "" {
+		// Left to history by an earlier catch-up (the agent was told so):
+		// never sent later, out of order, even after a restart.
+		newer = slices.DeleteFunc(newer, func(p pending) bool { return TSLess(p.msg.TS, floor) })
+	}
+	l.mu.Unlock()
+	sort.SliceStable(newer, func(i, j int) bool { return TSLess(newer[i].msg.TS, newer[j].msg.TS) })
+	skipped := 0
+	if len(newer) > maxRecovery {
+		skipped = len(newer) - maxRecovery
+		newer = newer[skipped:]
+		l.mu.Lock()
+		l.setFloorLocked(sub.SessionID, newer[0].msg.TS)
+		l.mu.Unlock()
+	}
+	items := append(asked, newer...)
 	sort.SliceStable(items, func(i, j int) bool { return TSLess(items[i].msg.TS, items[j].msg.TS) })
-	if len(items) > maxRecovery {
-		items = items[len(items)-maxRecovery:]
+	// Drop channels the session stopped watching while history was read.
+	l.mu.Lock()
+	if cur := l.state.Subscriptions[sub.SessionID]; cur != nil {
+		items = slices.DeleteFunc(items, func(p pending) bool { return !slices.Contains(cur.Channels, p.msg.Channel) })
+	} else {
+		items = nil
 	}
+	l.mu.Unlock()
+	outcome := deliverNone
 	if len(items) > 0 {
-		l.deliverTo(ctx, sub, items)
+		outcome = l.deliverParts(ctx, sub, items, skipped)
 	}
+	switch {
+	case outcome == deliverRefused, outcome == deliverFailed, readFailed:
+		// Kept: the next listener, or the next sweep (RetryBacklogs), tries
+		// again until it is delivered or the watch ends.
+	case len(backlogs) > 0:
+		l.clearBacklogs(sub.SessionID, backlogs) // settled
+	}
+	// A catch-up that failed partway (the agent may be waiting for the rest
+	// before acting) is retried soon by RetryBacklogs; a shutdown refusal is
+	// left to the next listener, which catches up anyway.
+	l.mu.Lock()
+	switch {
+	case outcome == deliverFailed || sinceFailed:
+		prev, existed := l.catchUpOwed[sub.SessionID]
+		l.oweCatchUpLocked(sub.SessionID)
+		r := l.catchUpOwed[sub.SessionID]
+		// Read-only only while nothing but reading has failed: once a
+		// delivery failed or a message was dropped, the note's "could not be
+		// fetched" would be wrong, so it stays false.
+		r.readOnly = outcome != deliverFailed && (!existed || prev.readOnly)
+		l.catchUpOwed[sub.SessionID] = r
+	case outcome != deliverRefused && l.owedGen[sub.SessionID] == gen:
+		// Settled, unless something became owed after the history read
+		// began (a drop while this catch-up held the session): that stays.
+		delete(l.catchUpOwed, sub.SessionID)
+	}
+	l.mu.Unlock()
+}
+
+// backlogRetry backs off retries of one kept backlog.
+type backlogRetry struct {
+	tries int
+	next  time.Time
+	// readOnly (owed catch-ups): only reading history failed, so the
+	// session itself is reachable and live messages need not wait forever.
+	readOnly bool
+}
+
+// releaseAfter is how many failed owed catch-ups (failing only on reading
+// history) hold a reachable session's live messages before they are
+// released with a note pointing at the channel history.
+const releaseAfter = 2
+
+// unreadNote heads live messages released while older ones could not be read.
+const unreadNote = "[slack-agent-chat] Older messages for you could not be fetched from Slack, so they were not sent and newer ones follow. Read the channel history before acting on these."
+
+// Kept backlogs are retried with backoff from backlogRetryMin to
+// backlogRetryMax.
+const (
+	backlogRetryMin = time.Minute
+	backlogRetryMax = time.Hour
+	catchUpRetryMax = 5 * time.Minute // owed catch-ups: live messages are held meanwhile
+)
+
+// RetryBacklogs sends the kept first-join backlogs of watching sessions
+// whose earlier delivery or history read failed, backing off per channel
+// while they keep failing.
+func (l *Listener) RetryBacklogs(ctx context.Context) {
+	now := time.Now()
+	type job struct {
+		sub      *Subscription
+		channels []string // the due channels only: live delivery covers the rest
+		first    map[string]bool
+		sizes    map[string]int
+	}
+	var jobs []job
+	l.mu.Lock()
+	for _, sub := range l.state.Subscriptions {
+		j := job{sub: snapshot(sub), first: map[string]bool{}, sizes: map[string]int{}}
+		for _, ch := range sub.Channels {
+			k := sub.SessionID + "|" + ch
+			n := l.state.Backlogs[k]
+			if r, ok := l.backlogRetry[k]; n == 0 || (ok && now.Before(r.next)) {
+				continue
+			}
+			j.channels = append(j.channels, ch)
+			j.first[ch], j.sizes[ch] = true, n
+		}
+		if len(j.first) > 0 {
+			jobs = append(jobs, j)
+		}
+	}
+	var owed []*Subscription
+	for session, r := range l.catchUpOwed {
+		sub := l.state.Subscriptions[session]
+		switch {
+		case sub == nil:
+			delete(l.catchUpOwed, session)
+		case now.Before(r.next):
+		default:
+			merged := false
+			for i := range jobs {
+				if jobs[i].sub.SessionID == session {
+					// One pass covers both: read every channel, not just
+					// the ones with a due backlog.
+					jobs[i].channels, merged = slices.Clone(sub.Channels), true
+				}
+			}
+			if !merged {
+				owed = append(owed, snapshot(sub))
+			}
+		}
+	}
+	l.mu.Unlock()
+	backOff := func(session string) {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		if r, ok := l.catchUpOwed[session]; ok {
+			r.tries++
+			// Capped lower than a kept backlog's: held live messages wait on it.
+			r.next = time.Now().Add(min(backlogRetryMin<<min(r.tries-1, 6), catchUpRetryMax))
+			l.catchUpOwed[session] = r
+		}
+	}
+	for _, sub := range owed {
+		l.recover(ctx, sub, sub.Channels, nil, 0)
+		backOff(sub.SessionID)
+	}
+	for _, j := range jobs {
+		l.recoverKept(ctx, j.sub, j.channels, j.first, j.sizes, true)
+		backOff(j.sub.SessionID)
+		l.mu.Lock()
+		for ch := range j.first {
+			k := j.sub.SessionID + "|" + ch
+			if l.state.Backlogs[k] == 0 {
+				delete(l.backlogRetry, k)
+				continue
+			}
+			if l.backlogRetry == nil {
+				l.backlogRetry = map[string]backlogRetry{}
+			}
+			r := l.backlogRetry[k]
+			r.tries++
+			r.next = time.Now().Add(min(backlogRetryMin<<min(r.tries-1, 6), backlogRetryMax)) // 1, 2, 4 … 60 min
+			l.backlogRetry[k] = r
+		}
+		l.mu.Unlock()
+	}
+}
+
+// snapshot copies sub with its own channel list, so it can be used outside
+// l.mu while Unsubscribe edits the original. Call with l.mu held.
+func snapshot(sub *Subscription) *Subscription {
+	c := *sub
+	c.Channels = slices.Clone(sub.Channels)
+	return &c
+}
+
+// keepBacklogs keeps session's requested first-join backlogs (sizes, by
+// channel) in the state file, each counted back from its channel's join.
+// Channels the session no longer watches are skipped.
+func (l *Listener) keepBacklogs(session string, sizes map[string]int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	sub := l.state.Subscriptions[session]
+	if sub == nil {
+		return
+	}
+	if l.state.Backlogs == nil {
+		l.state.Backlogs = map[string]int{}
+	}
+	if l.state.BacklogBefore == nil {
+		l.state.BacklogBefore = map[string]string{}
+	}
+	changed := false
+	for ch, n := range sizes {
+		k := session + "|" + ch
+		if n <= 0 || !slices.Contains(sub.Channels, ch) {
+			continue
+		}
+		if l.state.Backlogs[k] != n {
+			l.state.Backlogs[k], changed = n, true
+		}
+		if _, ok := l.state.BacklogBefore[k]; !ok {
+			// Counted back from the watch's start, not from when it is sent.
+			l.state.BacklogBefore[k], changed = l.state.JoinTS[ch], true
+		}
+	}
+	if changed {
+		l.saveStateLocked()
+	}
+}
+
+// clearBacklogs forgets session's kept backlogs (and their retry backoff)
+// for channels.
+func (l *Listener) clearBacklogs(session string, channels []string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	changed := false
+	for _, ch := range channels {
+		k := session + "|" + ch
+		delete(l.backlogRetry, k)
+		if l.state.Backlogs[k] > 0 || l.state.BacklogBefore[k] != "" {
+			delete(l.state.Backlogs, k)
+			delete(l.state.BacklogBefore, k)
+			changed = true
+		}
+	}
+	if changed {
+		l.saveStateLocked()
+	}
+}
+
+// backlogBefore is the join timestamp session's kept backlog for channel
+// counts back from ("" when unknown: the newest messages).
+func (l *Listener) backlogBefore(session, channel string) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.state.BacklogBefore[session+"|"+channel]
 }
 
 // Subscribe registers sub and delivers its backlog or pending messages.
@@ -541,11 +1021,12 @@ func (l *Listener) Subscribe(ctx context.Context, sub *Subscription, backlog int
 // routedBacklog returns up to n of the channel's most recent messages that
 // this agent would have received, oldest first, paging back through at most
 // 1000 messages of history.
-func (l *Listener) routedBacklog(ctx context.Context, channel string, n int) ([]pending, error) {
+func (l *Listener) routedBacklog(ctx context.Context, channel string, n int, before string) ([]pending, error) {
 	var found []pending
 	cursor := ""
 	for page := 0; page < 5 && len(found) < n; page++ {
-		resp, err := l.API.GetConversationHistoryContext(ctx, &slack.GetConversationHistoryParameters{ChannelID: channel, Cursor: cursor, Limit: 200})
+		// before (when set) bounds the window: the n newest at or before it.
+		resp, err := l.API.GetConversationHistoryContext(ctx, &slack.GetConversationHistoryParameters{ChannelID: channel, Cursor: cursor, Limit: 200, Latest: before, Inclusive: before != ""})
 		if err != nil {
 			return nil, err
 		}
@@ -642,7 +1123,18 @@ func (l *Listener) Unsubscribe(sessionID, channel string) {
 			delete(l.state.Cohort, k)
 		}
 	}
+	for k := range l.state.Backlogs {
+		s, ch, _ := strings.Cut(k, "|")
+		if s == sessionID && (channel == "" || ch == channel || len(sub.Channels) == 0) {
+			delete(l.state.Backlogs, k)
+			delete(l.state.BacklogBefore, k)
+			delete(l.backlogRetry, k)
+		}
+	}
 	if channel == "" || len(sub.Channels) == 0 {
+		delete(l.catchUpOwed, sessionID)
+		delete(l.owedGen, sessionID)
+		delete(l.state.CatchUpFloor, sessionID)
 		delete(l.state.Subscriptions, sessionID)
 		if q := l.queues[sessionID]; q != nil {
 			close(q)
@@ -743,7 +1235,11 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 			return ControlResponse{Error: "answers are waiting for their hooks; try the restart again shortly"}
 		}
 		l.Log.Info("shutting down on request")
-		time.AfterFunc(shutdownDelay, l.Stop) // after the reply is written
+		go func() {
+			time.Sleep(shutdownDelay) // after the reply is written
+			l.waitDeliveries(deliveryDrain)
+			l.Stop()
+		}()
 		return ControlResponse{OK: true, Version: version.Version}
 	case "approval-end":
 		l.EndApproval(req.Approval, req.Text)
@@ -778,6 +1274,8 @@ type approval struct {
 	hint             *approvalMsg  // the copy where the owner typed an allow word, which cannot approve; read only under l.mu
 	clicks           []click       // owner Allow clicks waiting for their copy to register
 	at               time.Time
+	clicked          time.Time // the owner's latest recorded click
+	decidedOn        click     // where a clicked decision was made
 	text             string    // the request as posted, to redraw it once it ends
 	polled           time.Time // the hook's last poll; a hook that stops polling is gone
 	ended            bool      // takes no more answers: the hook finished, or was given up on
@@ -791,6 +1289,14 @@ type approvalMsg struct {
 	channel, ts string
 	drawn       bool // shows the owed outcome
 }
+
+// clickAgainNote answers a click the listener could not record.
+const clickAgainNote = "That click arrived while the listener was restarting and was not recorded. Click again in a few seconds."
+
+// copyRegisterWait is how long a click on a copy no hook has registered yet
+// holds up a shutdown: a hook registers each copy right after posting it, so
+// one still unregistered after this is a stale button nothing can collect.
+const copyRegisterWait = 2 * time.Second
 
 // maxPendingClicks bounds the Allow clicks kept waiting for their copies,
 // and clickCopyWait is how long one waits for its copy to register before it
@@ -886,6 +1392,25 @@ func (l *Listener) WatchApproval(id, channel, ts, text string) int {
 		a.msgs = append(a.msgs, approvalMsg{channel: channel, ts: ts})
 	}
 	a.text, a.polled = text, l.Now()
+	if l.closing {
+		// Shutting down: a waiting click applied now would be lost with this
+		// listener's memory. Drop it and ask the owner to click again.
+		for _, c := range a.clicks {
+			l.note(c.channel, c.ts, clickAgainNote)
+		}
+		a.clicks = nil
+		if a.decision != "" && a.decision != decisionTaken {
+			// An answer clicked on this copy before it registered; nothing
+			// can collect it before the listener exits.
+			on := a.decidedOn
+			if on.channel == "" {
+				on.channel, on.ts = channel, ts
+			}
+			a.decision, a.reason = "", ""
+			l.note(on.channel, on.ts, clickAgainNote)
+		}
+		return len(a.msgs)
+	}
 	a.applyClicks(l.Now())
 	return len(a.msgs)
 }
@@ -938,7 +1463,7 @@ func (l *Listener) HandleInteraction(payload []byte) {
 			l.mu.Unlock()
 			l.Log.Info("approval click during shutdown; asking the owner to click again", zap.String("approval", act.Value))
 			l.mu.Lock()
-			l.note(c.channel, c.ts, "That click arrived while the listener was restarting and was not recorded. Click again in a few seconds.")
+			l.note(c.channel, c.ts, clickAgainNote)
 			l.mu.Unlock()
 			continue
 		}
@@ -952,9 +1477,9 @@ func (l *Listener) HandleInteraction(payload []byte) {
 			// the owner clicked it on this bot's message carrying the request's
 			// id: it decides at once, before any Allow still waiting for its
 			// copy, and whether or not this copy is registered yet.
-			a.decision, a.clicks = decision, nil
+			a.decision, a.clicks, a.clicked, a.decidedOn = decision, nil, c.at, c
 		case len(a.clicks) < maxPendingClicks:
-			a.clicks = append(a.clicks, c)
+			a.clicks, a.clicked = append(a.clicks, c), c.at
 			a.applyClicks(c.at)
 		default:
 			l.Log.Warn("ignoring approval click: too many waiting for their copies", zap.String("approval", act.Value), zap.String("channel", c.channel), zap.String("ts", c.ts))
@@ -1116,7 +1641,31 @@ func (l *Listener) EndApproval(id, owed string) {
 	if a := l.approvals[id]; a != nil {
 		a.ended, a.retryAt, a.tries = true, l.Now(), 0
 		a.setOwed(owed)
+		if l.closing && owed != "" {
+			// The sweep that would retry it dies with this listener: redraw
+			// now, before the daemon exits.
+			text, copies := a.text, append([]approvalMsg(nil), a.msgs...)
+			l.track(func() {
+				for _, c := range copies {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					if _, _, _, err := l.API.UpdateMessageContext(ctx, c.channel, c.ts, slack.MsgOptionText(owed, false), slack.MsgOptionBlocks(outcomeBlocks(text, owed)...)); err != nil {
+						l.Log.Warn("redrawing an ended request during shutdown failed", zap.Error(err))
+					}
+					cancel()
+				}
+			})
+		}
 	}
+}
+
+// outcomeBlocks lays out a settled request: its text (if known), then the
+// outcome line.
+func outcomeBlocks(text, line string) []slack.Block {
+	blocks := []slack.Block{slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, line, false, false))}
+	if text != "" {
+		blocks = append([]slack.Block{slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, text, false, false), nil, nil)}, blocks...)
+	}
+	return blocks
 }
 
 // closeForShutdown waits, until deadline, for hooks to collect every answer
@@ -1144,24 +1693,39 @@ func (l *Listener) closeForShutdown(deadline time.Time) bool {
 // blocking; WaitNotes lets a stopping daemon finish posting. Call with l.mu
 // held.
 func (l *Listener) note(channel, ts, text string) {
-	l.notes.Add(1)
-	go func() {
-		defer l.notes.Done()
+	l.track(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if _, _, err := l.API.PostMessageContext(ctx, channel, slack.MsgOptionTS(ts), slack.MsgOptionText(text, false)); err != nil {
 			l.Log.Warn("posting a restart note failed", zap.Error(err))
 		}
+	})
+}
+
+// track runs fn in its own goroutine, counted so WaitNotes can wait for it.
+// Call with l.mu held.
+func (l *Listener) track(fn func()) {
+	l.inflight++
+	go func() {
+		defer func() {
+			l.mu.Lock()
+			l.inflight--
+			l.mu.Unlock()
+		}()
+		fn()
 	}()
 }
 
-// WaitNotes waits up to d for restart notes still being posted.
+// WaitNotes waits up to d for restart notes and redraws still being posted,
+// including any started while it waits.
 func (l *Listener) WaitNotes(d time.Duration) {
-	done := make(chan struct{})
-	go func() { l.notes.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(d):
+	for deadline := time.Now().Add(d); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		l.mu.Lock()
+		n := l.inflight
+		l.mu.Unlock()
+		if n == 0 {
+			return
+		}
 	}
 }
 
@@ -1169,7 +1733,10 @@ func (l *Listener) WaitNotes(d time.Duration) {
 // an Allow click, its hook has not collected yet. Call with l.mu held.
 func (l *Listener) answersWaitingLocked() bool {
 	for _, a := range l.approvals {
-		if a.ended || len(a.msgs) == 0 {
+		if a.ended {
+			continue
+		}
+		if len(a.msgs) == 0 && l.Now().Sub(a.clicked) >= copyRegisterWait {
 			continue // a click on a request no hook registered: nothing can collect it
 		}
 		if (a.decision != "" && a.decision != decisionTaken) || len(a.clicks) > 0 || a.hint != nil {
@@ -1229,10 +1796,7 @@ func (l *Listener) SweepApprovals(ctx context.Context) {
 	}
 	l.mu.Unlock()
 	for _, r := range todo {
-		blocks := []slack.Block{slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, r.line, false, false))}
-		if r.text != "" {
-			blocks = append([]slack.Block{slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, r.text, false, false), nil, nil)}, blocks...)
-		}
+		blocks := outcomeBlocks(r.text, r.line)
 		var drawn []approvalMsg
 		var failed error
 		for _, c := range r.copies {
@@ -1271,10 +1835,38 @@ func (l *Listener) RecoverAll(ctx context.Context) {
 	l.mu.Lock()
 	subs := make([]*Subscription, 0, len(l.state.Subscriptions))
 	for _, sub := range l.state.Subscriptions {
-		subs = append(subs, sub)
+		subs = append(subs, snapshot(sub))
+	}
+	stale := false
+	for k := range l.state.Backlogs {
+		s, ch, _ := strings.Cut(k, "|")
+		if sub := l.state.Subscriptions[s]; sub == nil || !slices.Contains(sub.Channels, ch) {
+			delete(l.state.Backlogs, k) // its watch ended before this listener started
+			delete(l.state.BacklogBefore, k)
+			stale = true
+		}
+	}
+	if stale {
+		l.saveStateLocked()
 	}
 	l.mu.Unlock()
 	for _, sub := range subs {
-		l.recover(ctx, sub, sub.Channels, nil, 0)
+		first, sizes := l.keptBacklogs(sub)
+		l.recoverKept(ctx, sub, sub.Channels, first, sizes, len(first) > 0)
 	}
+}
+
+// keptBacklogs returns the first-join backlogs kept for sub by a previous
+// listener (see recoverKept): the channels to treat as first joined, and
+// each one's requested size. recoverKept clears them once delivered.
+func (l *Listener) keptBacklogs(sub *Subscription) (map[string]bool, map[string]int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	first, sizes := map[string]bool{}, map[string]int{}
+	for _, ch := range sub.Channels {
+		if n := l.state.Backlogs[sub.SessionID+"|"+ch]; n > 0 {
+			first[ch], sizes[ch] = true, n
+		}
+	}
+	return first, sizes
 }

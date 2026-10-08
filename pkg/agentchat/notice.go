@@ -61,12 +61,39 @@ func (n Notice) Format() string {
 
 // FormatBatch renders several notices, oldest first, as one push.
 func FormatBatch(notices []Notice) string {
-	parts := make([]string, len(notices))
-	for i, n := range notices {
-		parts[i] = n.Format()
+	return fmt.Sprintf("[slack-agent-chat] %d pending messages, oldest first. Read them all before acting on any: a later message may change or cancel an earlier one.\n\n", len(notices)) +
+		joinNotices(notices)
+}
+
+// FormatCatchUp renders part of parts of a catch-up: messages start..
+// of total, oldest first. The header gives the totals so the agent reads
+// everything before acting, and the first part says how many older
+// unacknowledged messages (skipped) were not sent.
+func FormatCatchUp(notices []Notice, part, parts, start, total, skipped int) string {
+	end := start + len(notices) - 1
+	head := fmt.Sprintf("[slack-agent-chat] Catch-up: %d messages, oldest first.", total)
+	if parts > 1 {
+		head = fmt.Sprintf("[slack-agent-chat] Catch-up: %d messages, oldest first, in %d parts (part %d of %d: messages %d–%d of %d).", total, parts, part, parts, start, end, total)
 	}
-	return fmt.Sprintf("[slack-agent-chat] %d pending messages, oldest first:\n\n", len(notices)) +
-		strings.Join(parts, "\n\n---\n\n")
+	if part < parts {
+		head += fmt.Sprintf(" More follow in the next notices. Do not act on any message until you have read all %d: a later one may change or cancel an earlier one. If the remaining parts have not arrived within a few minutes, read the rest from the channel history instead.", total)
+	} else if parts > 1 {
+		head += fmt.Sprintf(" This is the last part: now act on all %d, with later messages taking precedence over earlier ones.", total)
+	} else {
+		head += fmt.Sprintf(" Read all %d before acting on any: a later one may change or cancel an earlier one.", total)
+	}
+	if skipped > 0 && part == 1 {
+		head += fmt.Sprintf(" %d older unacknowledged messages were not sent; read the channel history if you need them.", skipped)
+	}
+	return head + "\n\n" + joinNotices(notices)
+}
+
+func joinNotices(notices []Notice) string {
+	texts := make([]string, len(notices))
+	for i, n := range notices {
+		texts[i] = n.Format()
+	}
+	return strings.Join(texts, "\n\n---\n\n")
 }
 
 // RenderMentions replaces <@U…> tokens with @name where nameOf knows the user.

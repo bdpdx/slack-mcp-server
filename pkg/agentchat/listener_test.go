@@ -67,6 +67,9 @@ func (f *fakeSlack) GetConversationHistoryContext(_ context.Context, p *slack.Ge
 	}
 	var out []slack.Message
 	for _, m := range f.history[p.ChannelID] { // stored newest first, like Slack
+		if p.Latest != "" && (TSLess(p.Latest, m.Timestamp) || (!p.Inclusive && m.Timestamp == p.Latest)) {
+			continue
+		}
 		if p.Oldest == "" || TSLess(p.Oldest, m.Timestamp) {
 			out = append(out, m)
 		}
@@ -402,7 +405,7 @@ func TestListenerBacklogOnFirstJoin(t *testing.T) {
 	l := newTestListener(t, api, d)
 	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 3))
 	require.Len(t, d.got, 1)
-	assert.Contains(t, d.got[0].text, "2 pending messages, oldest first")
+	assert.Contains(t, d.got[0].text, "Catch-up: 2 messages, oldest first")
 	assert.Less(t, strings.Index(d.got[0].text, "alpha"), strings.Index(d.got[0].text, "gamma"))
 	assert.NotContains(t, d.got[0].text, "mine-own")
 }
@@ -420,7 +423,7 @@ func TestListenerBacklogCountsDeliveredMessages(t *testing.T) {
 	l := newTestListener(t, api, d)
 	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 2))
 	require.Len(t, d.got, 1)
-	assert.Contains(t, d.got[0].text, "2 pending messages")
+	assert.Contains(t, d.got[0].text, "Catch-up: 2 messages")
 	assert.Contains(t, d.got[0].text, "one")
 	assert.Contains(t, d.got[0].text, "two")
 	assert.NotContains(t, d.got[0].text, "mine-own")

@@ -366,31 +366,33 @@ func (l *Listener) mayNameUncachedGM(ctx context.Context, m Message, p *CohortPr
 	return false
 }
 
-// recheck is a possible GM signal kept until it can be classified against a
-// view that names its agent as GM, or until it expires.
-type recheck struct {
-	m     Message
-	until time.Time
-}
-
 // rememberRecheck keeps m to be classified again (bounded; the oldest is
 // dropped first).
 func (l *Listener) rememberRecheck(m Message) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.rechecks == nil {
-		l.rechecks = map[string]recheck{}
+	if l.state.Rechecks == nil {
+		l.state.Rechecks = map[string]*Recheck{}
 	}
-	if len(l.rechecks) >= maxRechecks {
+	if len(l.state.Rechecks) >= maxRechecks {
 		var oldest string
-		for k, r := range l.rechecks {
-			if oldest == "" || TSLess(r.m.TS, l.rechecks[oldest].m.TS) {
+		for k, r := range l.state.Rechecks {
+			if oldest == "" || TSLess(r.M.TS, l.state.Rechecks[oldest].M.TS) {
 				oldest = k
 			}
 		}
-		delete(l.rechecks, oldest)
+		delete(l.state.Rechecks, oldest)
 	}
-	l.rechecks[watchKey(m.Channel, m.TS)] = recheck{m: m, until: tsTime(m.TS).Add(recheckWindow)}
+	l.state.Rechecks[watchKey(m.Channel, m.TS)] = &Recheck{M: m, Until: tsTime(m.TS).Add(recheckWindow)}
+	l.saveStateLocked()
+}
+
+// saveStateLocked saves the state file, logging a failure. Call with l.mu
+// held.
+func (l *Listener) saveStateLocked() {
+	if err := l.state.Save(l.StateFile); err != nil {
+		l.Log.Error("saving state failed", zap.Error(err))
+	}
 }
 
 // replayRechecks classifies each kept message again, in timestamp order,
@@ -404,12 +406,17 @@ func (l *Listener) replayRechecks(ctx context.Context) {
 	now := l.Now()
 	l.mu.Lock()
 	var due []Message
-	for k, r := range l.rechecks {
-		if now.After(r.until) {
-			delete(l.rechecks, k)
+	expired := false
+	for k, r := range l.state.Rechecks {
+		if now.After(r.Until) {
+			delete(l.state.Rechecks, k)
+			expired = true
 			continue
 		}
-		due = append(due, r.m)
+		due = append(due, r.M)
+	}
+	if expired {
+		l.saveStateLocked()
 	}
 	var regs []CohortReg
 	for _, r := range l.state.Cohort {
@@ -422,7 +429,8 @@ func (l *Listener) replayRechecks(ctx context.Context) {
 		key := watchKey(m.Channel, m.TS)
 		forget := func() {
 			l.mu.Lock()
-			delete(l.rechecks, key)
+			delete(l.state.Rechecks, key)
+			l.saveStateLocked()
 			l.mu.Unlock()
 		}
 		var reg *CohortReg
@@ -711,6 +719,17 @@ func (l *Listener) cohortTick(ctx context.Context) {
 
 	l.checkApprovalWaits(ctx, regs, subs, now)
 
+	// The whole send-and-mark phase counts as one delivery in progress, so a
+	// shutdown waits until the notices sent here are also marked (or sends
+	// none once it has begun): the next listener neither repeats nor drops
+	// them.
+	if len(sends) > 0 {
+		if l.beginDelivery() {
+			defer l.endDelivery() // runs after the mark-and-save below releases l.mu
+		} else {
+			sends = nil
+		}
+	}
 	delivered := map[int]bool{}
 	for i, s := range sends {
 		// A watch retired since the snapshot (an UNBLOCKED notice this
@@ -1032,6 +1051,10 @@ func (l *Listener) deliverCohort(ctx context.Context, sub *Subscription, key, te
 	sl := l.sessionLock(sub.SessionID)
 	sl.Lock()
 	defer sl.Unlock()
+	if !l.beginDelivery() {
+		return errors.New("listener shutting down; the next listener sends this notice")
+	}
+	defer l.endDelivery()
 	if _, err := l.Deliverer.Deliver(ctx, sub, clientMessageID(sub.SessionID, "cohort", key), text); err != nil {
 		l.Log.Warn("cohort notice delivery failed", zap.String("session", sub.SessionID), zap.Error(err))
 		return err

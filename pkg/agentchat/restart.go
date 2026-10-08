@@ -23,11 +23,21 @@ import (
 // the shutdown request itself; stopWait bounds the wait for the old
 // listener to exit; probeTimeout bounds one status probe.
 var (
-	shutdownDelay   = 200 * time.Millisecond
-	answerDrain     = 5 * time.Second
+	shutdownDelay = 200 * time.Millisecond
+	answerDrain   = 5 * time.Second
+	// deliveryDrain bounds the wait for deliveries in progress (see
+	// waitDeliveries); past it the listener stops anyway, and a delivery
+	// cut off after reaching its session is sent once more by the next.
+	deliveryDrain   = 5 * time.Second
 	shutdownTimeout = 10 * time.Second
-	stopWait        = 15 * time.Second
-	probeTimeout    = 5 * time.Second
+	// stopWait must exceed the daemon's own exit time after a shutdown:
+	// shutdownDelay and deliveryDrain, then up to 5 s for the event loop
+	// and 5 s for notes (RunListener).
+	stopWait     = 20 * time.Second
+	probeTimeout = 5 * time.Second
+	// startWait bounds how long ensureListener waits for a new listener
+	// to answer.
+	startWait = 15 * time.Second
 )
 
 // restartAttempts bounds how often restart tries again when the new
@@ -91,7 +101,8 @@ func (c *cli) replaceListener(ctx context.Context) (string, error) {
 		func() (string, bool) { return c.listenerState(ctx) },
 		func() error { return c.stopListener(ctx) },
 		func() error { return c.ensureListener(ctx) },
-		version.Version, c.recovery())
+		version.Version, c.recovery(),
+		func(msg string) { fmt.Fprintf(c.stderr, "listener restart (%s): %s\n", c.home.Dir, msg) })
 }
 
 // recovery is the command that starts this home's listener by hand.
@@ -102,9 +113,12 @@ func (c *cli) recovery() string {
 // replaceWith is replaceListener's protocol: probe reports the running
 // listener's build, stop and start replace it, want is the build that must
 // answer at the end. A start that fails is tried again.
-func replaceWith(probe func() (string, bool), stop, start func() error, want, recovery string) (string, error) {
+func replaceWith(probe func() (string, bool), stop, start func() error, want, recovery string, progress func(string)) (string, error) {
 	problem := ""
 	for i := 0; i < restartAttempts; i++ {
+		if progress != nil {
+			progress(fmt.Sprintf("attempt %d of %d: stopping the running listener, then starting %s", i+1, restartAttempts, want))
+		}
 		if _, up := probe(); up {
 			if err := stop(); err != nil {
 				return "", err

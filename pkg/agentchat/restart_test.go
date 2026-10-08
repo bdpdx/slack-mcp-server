@@ -3,6 +3,7 @@ package agentchat
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/slack-go/slack"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 // shutdown replies first, then stops the daemon; a listener not run as a
@@ -70,24 +73,24 @@ func (h *fakeHome) start() error {
 // winning, or a listener that dies, is an error.
 func TestReplaceWithVerifiesTheBuild(t *testing.T) {
 	h := &fakeHome{running: "old"}
-	v, err := replaceWith(h.probe, h.stop, h.start, "new", "log")
+	v, err := replaceWith(h.probe, h.stop, h.start, "new", "log", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "new", v)
 	assert.Equal(t, 1, h.stops)
 
 	h = &fakeHome{running: "old", racers: []string{"old"}}
-	v, err = replaceWith(h.probe, h.stop, h.start, "new", "log")
+	v, err = replaceWith(h.probe, h.stop, h.start, "new", "log", nil)
 	require.NoError(t, err, "an older listener that won the gap is replaced again")
 	assert.Equal(t, "new", v)
 	assert.Equal(t, 2, h.stops)
 
 	h = &fakeHome{running: "old", racers: []string{"old", "old", "old"}}
-	_, err = replaceWith(h.probe, h.stop, h.start, "new", "log")
+	_, err = replaceWith(h.probe, h.stop, h.start, "new", "log", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "old, not this binary's new")
 
 	dies := &fakeHome{running: "old"}
-	_, err = replaceWith(dies.probe, dies.stop, func() error { dies.starts++; return nil }, "new", "log")
+	_, err = replaceWith(dies.probe, dies.stop, func() error { dies.starts++; return nil }, "new", "log", nil)
 	require.Error(t, err, "a listener that exits right after starting is not success")
 	assert.Contains(t, err.Error(), "exited right after starting")
 }
@@ -202,12 +205,12 @@ func TestReplaceWithRetriesStart(t *testing.T) {
 		}
 		return h.start()
 	}
-	v, err := replaceWith(h.probe, h.stop, start, "new", "RECOVER")
+	v, err := replaceWith(h.probe, h.stop, start, "new", "RECOVER", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "new", v)
 
 	h = &fakeHome{running: "old"}
-	_, err = replaceWith(h.probe, h.stop, func() error { return errors.New("auth.test failed") }, "new", "RECOVER")
+	_, err = replaceWith(h.probe, h.stop, func() error { return errors.New("auth.test failed") }, "new", "RECOVER", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "did not start")
 	assert.Contains(t, err.Error(), "RECOVER")
@@ -347,10 +350,91 @@ func TestShutdownFenceRecordsNothing(t *testing.T) {
 func TestOrphanAnswerDoesNotBlockShutdown(t *testing.T) {
 	ctx := context.Background()
 	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	now := time.Unix(2000, 0)
+	l.Now = func() time.Time { return now }
 	l.HandleInteraction(clickOn("UBR", decisionDeny, "ghost", "C1", "2000.1", "BCL"))
 	l.HandleInteraction(clickOn("UBR", decisionAllow, "ghost2", "C1", "2000.2", "BCL"))
+	now = now.Add(copyRegisterWait)
 	l.Stop = func() {}
 	assert.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+}
+
+// A denial clicked between a hook posting its copy and registering it holds
+// the shutdown until the copy registers and the hook collects it.
+func TestFreshUnregisteredAnswerHoldsShutdown(t *testing.T) {
+	ctx := context.Background()
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	l.HandleInteraction(clickOn("UBR", decisionDeny, "f", "C1", "2000.1", "BCL"))
+	l.Stop = func() {}
+	done := make(chan ControlResponse, 1)
+	go func() { done <- l.Control(ctx, ControlRequest{Op: "shutdown"}) }()
+	select {
+	case <-done:
+		t.Fatal("fenced while a fresh denial waited for its copy to register")
+	case <-time.After(300 * time.Millisecond):
+	}
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "f", Channel: "C1", TS: "2000.1"}).OK)
+	d, _ := takeApproval(t, l, "f")
+	assert.Equal(t, decisionDeny, d)
+	assert.True(t, (<-done).OK)
+}
+
+// A copy registered after the fence does not apply a waiting click (it
+// would be lost); the click is dropped and the owner asked to click again.
+func TestRegistrationAfterFenceAppliesNoClick(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	l := newTestListener(t, api, &fakeDeliverer{})
+	now := time.Unix(2000, 0)
+	l.Now = func() time.Time { return now }
+	l.HandleInteraction(clickOn("UBR", decisionAllow, "g", "C1", "2000.1", "BCL"))
+	now = now.Add(copyRegisterWait)
+	l.Stop = func() {}
+	require.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "g", Channel: "C1", TS: "2000.1"}).OK)
+	d, _ := takeApproval(t, l, "g")
+	assert.Equal(t, "", d)
+	l.WaitNotes(2 * time.Second)
+	found := false
+	for _, p := range api.posts() {
+		found = found || strings.Contains(p, "Click again")
+	}
+	assert.True(t, found)
+}
+
+// A hook that ends during shutdown with its redraw failed gets the redraw
+// done before the listener exits, not left to a sweep that never runs.
+func TestOwedRedrawDuringShutdown(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	l := newTestListener(t, api, &fakeDeliverer{})
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "h", Channel: "C1", TS: "2000.1", Text: "req"}).OK)
+	takeApproval(t, l, "h")
+	l.Stop = func() {}
+	require.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-end", Approval: "h", Text: "✅ Allowed."}).OK)
+	l.WaitNotes(2 * time.Second)
+	assert.Equal(t, []string{"C1|2000.1|✅ Allowed."}, api.updates())
+}
+
+// WaitNotes waits for work started while it waits, too.
+func TestWaitNotesCoversLateWork(t *testing.T) {
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	finished := make(chan struct{})
+	l.mu.Lock()
+	l.track(func() {
+		time.Sleep(50 * time.Millisecond)
+		l.mu.Lock()
+		l.track(func() { time.Sleep(100 * time.Millisecond); close(finished) })
+		l.mu.Unlock()
+	})
+	l.mu.Unlock()
+	l.WaitNotes(2 * time.Second)
+	select {
+	case <-finished:
+	default:
+		t.Fatal("returned before late work finished")
+	}
 }
 
 // A shutdown refused because answers are waiting fails the restart: the old
@@ -371,7 +455,556 @@ func TestRefusedShutdownFailsRestart(t *testing.T) {
 	assert.Equal(t, 0, killed)
 	started := 0
 	_, err = replaceWith(func() (string, bool) { return "v1", true }, func() error { return c.stopListener(context.Background()) },
-		func() error { started++; return nil }, "v2", "RECOVER")
+		func() error { started++; return nil }, "v2", "RECOVER", nil)
 	require.Error(t, err)
 	assert.Equal(t, 0, started, "no start after a refused stop")
+}
+
+// The hold for an unregistered copy runs from the latest click, so a denial
+// clicked after an older click on the same request still holds the drain.
+func TestLatestClickRestartsCopyWait(t *testing.T) {
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	now := time.Unix(2000, 0)
+	l.Now = func() time.Time { return now }
+	l.HandleInteraction(clickOn("UBR", decisionAllow, "k", "C1", "2000.1", "BCL"))
+	now = now.Add(copyRegisterWait + time.Second)
+	l.HandleInteraction(clickOn("UBR", decisionDeny, "k", "C1", "2000.1", "BCL"))
+	l.mu.Lock()
+	waiting := l.answersWaitingLocked()
+	l.mu.Unlock()
+	assert.True(t, waiting, "the fresh denial holds the drain")
+}
+
+// A denial clicked on a copy before it registered, whose registration lands
+// after the fence, is cleared with a click-again note rather than kept for
+// a listener about to exit.
+func TestLateRegistrationClearsUncollectedDecision(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	l := newTestListener(t, api, &fakeDeliverer{})
+	now := time.Unix(2000, 0)
+	l.Now = func() time.Time { return now }
+	l.HandleInteraction(clickOn("UBR", decisionDeny, "m", "C2", "3000.1", "BCL"))
+	now = now.Add(copyRegisterWait)
+	l.Stop = func() {}
+	require.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "m", Channel: "C1", TS: "2000.1"}).OK)
+	d, _ := takeApproval(t, l, "m")
+	assert.Equal(t, "", d)
+	l.WaitNotes(2 * time.Second)
+	found := false
+	for _, p := range api.posts() {
+		found = found || (strings.HasPrefix(p, "C2|") && strings.Contains(p, "Click again"))
+	}
+	assert.True(t, found, "the note goes to the copy where the denial was clicked")
+}
+
+// heldDeliverer holds each delivery until release is closed.
+type heldDeliverer struct {
+	fakeDeliverer
+	entered chan struct{} // receives once per delivery that has started
+	release chan struct{}
+}
+
+func (d *heldDeliverer) Deliver(ctx context.Context, sub *Subscription, clientID, text string) (string, error) {
+	d.entered <- struct{}{}
+	<-d.release
+	return d.fakeDeliverer.Deliver(ctx, sub, clientID, text)
+}
+
+// A shutdown lets a delivery in progress finish and be marked before the
+// listener stops, so the next listener never delivers it a second time.
+func TestShutdownWaitsForDeliveries(t *testing.T) {
+	ctx := context.Background()
+	d := &heldDeliverer{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	l, err := NewListener(newFakeSlack(), d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
+	require.NoError(t, err)
+	l.Async = true
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0))
+	l.HandleMessage(ctx, Message{Channel: "C1", TS: "2000.5", User: "UBR", Text: "hello"})
+	<-d.entered // the delivery is under way
+	stopped := make(chan struct{})
+	l.Stop = func() { close(stopped) }
+	require.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+	select {
+	case <-stopped:
+		t.Fatal("stopped with a delivery in progress")
+	case <-time.After(shutdownDelay + 300*time.Millisecond):
+	}
+	close(d.release)
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("never stopped")
+	}
+	l.mu.Lock()
+	marked := l.state.WasDelivered("s1", "C1", "2000.5")
+	l.mu.Unlock()
+	assert.True(t, marked, "delivered and marked before the stop")
+}
+
+// Messages kept for GM re-classification survive a listener restart.
+func TestRechecksSurviveRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	l, err := NewListener(newFakeSlack(), &fakeDeliverer{}, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	l.rememberRecheck(Message{Channel: "C1", TS: "2000.1", User: "UBR", Text: "<@UGM> are you there?"})
+	l2, err := NewListener(newFakeSlack(), &fakeDeliverer{}, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	require.Len(t, l2.state.Rechecks, 1)
+	assert.Equal(t, "<@UGM> are you there?", l2.state.Rechecks[watchKey("C1", "2000.1")].M.Text)
+}
+
+// A delivery not yet started when the restart begins is not started at all:
+// it stays unmarked for the next listener, which delivers it once.
+func TestShutdownStartsNoNewDelivery(t *testing.T) {
+	ctx := context.Background()
+	d := &heldDeliverer{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	close(d.release)
+	l, err := NewListener(newFakeSlack(), d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
+	require.NoError(t, err)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0))
+	l.Stop = func() {}
+	require.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+	l.deliverTo(ctx, l.state.Subscriptions["s1"], []pending{{msg: Message{Channel: "C1", TS: "2000.6", User: "UBR", Text: "late"}}})
+	assert.Empty(t, d.got, "nothing delivered after the fence")
+	assert.False(t, l.state.WasDelivered("s1", "C1", "2000.6"), "left for the next listener")
+	assert.Error(t, l.deliverCohort(ctx, l.state.Subscriptions["s1"], "k", "notice"), "cohort notices wait for the next listener too")
+}
+
+// A watch started after the fence gets its backlog from the next listener,
+// exactly once.
+func TestBacklogAfterFenceGoesToNextListener(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	api.history["C1"] = []slack.Message{msg("1999.5", "UBR", "context before the watch")}
+	path := filepath.Join(t.TempDir(), "state.json")
+	d1 := &fakeDeliverer{}
+	l1, err := NewListener(api, d1, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	l1.Stop = func() {}
+	require.True(t, l1.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+	require.NoError(t, l1.Subscribe(ctx, claudeSub("s2"), 5))
+	assert.Empty(t, d1.got, "refused after the fence")
+
+	d2 := &fakeDeliverer{}
+	l2, err := NewListener(api, d2, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	l2.RecoverAll(ctx)
+	require.Len(t, d2.got, 1)
+	assert.Contains(t, d2.got[0].text, "context before the watch")
+	l2.RecoverAll(ctx)
+	assert.Len(t, d2.got, 1, "sent once")
+	assert.Empty(t, l2.state.Backlogs)
+}
+
+// A cohort tick during shutdown sends no notice, leaves it owed for the next
+// listener, and releases its delivery count.
+func TestCohortTickDuringShutdown(t *testing.T) {
+	f := newCohortFixture(t)
+	f.at(2 * time.Hour)
+	f.l.Stop = func() {}
+	require.True(t, f.l.Control(context.Background(), ControlRequest{Op: "shutdown"}).OK)
+	f.tick()
+	assert.Empty(t, f.notices("s2"), "no notice after the fence")
+	f.l.mu.Lock()
+	n := f.l.delivering
+	reg := f.l.state.Cohort[cohortKey("s2", "proj")]
+	f.l.mu.Unlock()
+	assert.Equal(t, 0, n, "the send phase released its count")
+	require.NotNil(t, reg)
+	assert.True(t, reg.CheckpointNotified.IsZero(), "still owed: the next listener sends it")
+}
+
+// A kept backlog goes with its watch: unsubscribing drops it, and a backlog
+// whose watch is gone when the next listener starts is discarded.
+func TestKeptBacklogEndsWithItsWatch(t *testing.T) {
+	ctx := context.Background()
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s2"), 0))
+	l.mu.Lock()
+	l.state.Backlogs = map[string]int{"s2|C1": 5, "gone|C9": 3}
+	l.mu.Unlock()
+	l.RecoverAll(ctx)
+	l.mu.Lock()
+	_, stale := l.state.Backlogs["gone|C9"]
+	l.mu.Unlock()
+	assert.False(t, stale, "a backlog whose watch is gone is discarded")
+
+	l.mu.Lock()
+	l.state.Backlogs = map[string]int{"s2|C1": 5}
+	l.mu.Unlock()
+	l.Unsubscribe("s2", "")
+	l.mu.Lock()
+	n := len(l.state.Backlogs)
+	l.mu.Unlock()
+	assert.Equal(t, 0, n, "unsubscribing drops the session's kept backlog")
+}
+
+// The next listener sends a kept backlog together with everything newer
+// than the join, each message once, and a delivered backlog is cleared.
+func TestKeptBacklogIncludesTheGap(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	path := filepath.Join(t.TempDir(), "state.json")
+	l1, err := NewListener(api, &fakeDeliverer{}, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	l1.Now = func() time.Time { return time.Unix(2000, 0) }
+	l1.Stop = func() {}
+	api.history["C1"] = []slack.Message{msg("1999.5", "UBR", "pre-watch")}
+	require.True(t, l1.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+	require.NoError(t, l1.Subscribe(ctx, claudeSub("s2"), 2))
+	require.Equal(t, 2, l1.state.Backlogs["s2|C1"], "refused, so kept")
+
+	api.history["C1"] = []slack.Message{msg("2000.6", "UBR", "gap two"), msg("2000.5", "UBR", "gap one"), msg("1999.5", "UBR", "pre-watch")}
+	d2 := &fakeDeliverer{}
+	l2, err := NewListener(api, d2, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	l2.RecoverAll(ctx)
+	require.Len(t, d2.got, 1)
+	text := d2.got[0].text
+	assert.Equal(t, 1, strings.Count(text, "pre-watch"), "the backlog counts back from the watch's start, however many messages followed")
+	assert.Equal(t, 1, strings.Count(text, "gap one"), "messages since the join follow it")
+	assert.Equal(t, 1, strings.Count(text, "gap two"))
+	assert.Less(t, strings.Index(text, "pre-watch"), strings.Index(text, "gap one"), "oldest first")
+	assert.Empty(t, l2.state.Backlogs, "cleared once delivered")
+
+	d3 := &fakeDeliverer{}
+	l3 := newTestListener(t, newFakeSlack(), d3)
+	l3.state.Backlogs = nil
+	require.NoError(t, l3.Subscribe(ctx, claudeSub("s3"), 2))
+	assert.Empty(t, l3.state.Backlogs, "a normal watch keeps nothing once its backlog is settled")
+}
+
+// A backlog whose delivery fails is kept and sent by a later retry, once.
+func TestFailedBacklogIsRetried(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	api.history["C1"] = []slack.Message{msg("1999.5", "UBR", "context")}
+	d := &fakeDeliverer{errs: map[string]error{"s4": errors.New("socket busy")}}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s4"), 3))
+	assert.Empty(t, d.got)
+	assert.Equal(t, 3, l.state.Backlogs["s4|C1"], "kept after the failure")
+
+	l.RetryBacklogs(ctx) // still failing: backs off
+	l.mu.Lock()
+	r := l.backlogRetry["s4|C1"]
+	l.mu.Unlock()
+	assert.Equal(t, 1, r.tries)
+	assert.WithinDuration(t, time.Now().Add(backlogRetryMin), r.next, 5*time.Second, "the first backoff is the minimum")
+	d.mu.Lock()
+	d.errs = nil
+	d.mu.Unlock()
+	l.mu.Lock()
+	l.backlogRetry = nil // as if the backoff had elapsed
+	l.mu.Unlock()
+	l.RetryBacklogs(ctx)
+	require.Len(t, d.got, 1)
+	assert.Contains(t, d.got[0].text, "context")
+	assert.Empty(t, l.state.Backlogs, "cleared once delivered")
+	l.RetryBacklogs(ctx)
+	assert.Len(t, d.got, 1, "not sent again")
+}
+
+// A requested backlog is delivered whole, oldest first, in parts whose
+// headers give the totals.
+func TestLongBacklogIsDeliveredInParts(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	var hist []slack.Message
+	for i := maxRecovery + 9; i >= 0; i-- { // newest first
+		hist = append(hist, msg(fmt.Sprintf("%d.000100", 1000+i), "UBR", fmt.Sprintf("old %03d", i)))
+	}
+	api.history["C1"] = hist
+	d := &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s2"), maxRecovery+10))
+	require.Len(t, d.got, 2, "two parts")
+	first, last := d.got[0].text, d.got[1].text
+	total := maxRecovery + 10
+	assert.Contains(t, first, fmt.Sprintf("Catch-up: %d messages, oldest first, in 2 parts (part 1 of 2: messages 1–%d of %d)", total, maxRecovery, total))
+	assert.Contains(t, first, fmt.Sprintf("Do not act on any message until you have read all %d", total))
+	assert.Contains(t, last, fmt.Sprintf("part 2 of 2: messages %d–%d of %d", maxRecovery+1, total, total))
+	assert.Contains(t, last, "This is the last part")
+	all := first + last
+	for i := 0; i < total; i++ {
+		assert.Equal(t, 1, strings.Count(all, fmt.Sprintf("old %03d", i)), "every message once")
+	}
+	assert.Less(t, strings.Index(all, "old 010"), strings.Index(all, "old 011"), "in order")
+	assert.NotContains(t, all, "older unacknowledged", "a requested backlog is never cut")
+}
+
+// Of the unacknowledged messages since the join, only the newest
+// maxRecovery go, oldest first, and the notice says how many were not sent.
+func TestCatchUpSendsNewestWithSkippedCount(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	d := &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0)) // the channel's join point = 2000
+	var hist []slack.Message
+	for i := maxRecovery + 6; i >= 0; i-- { // newest first, all after the join
+		hist = append(hist, msg(fmt.Sprintf("%d.000100", 2001+i), "UBR", fmt.Sprintf("m %03d", i)))
+	}
+	api.history["C1"] = hist
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s9"), 0)) // a new session catches up
+	require.Len(t, d.got, 1)
+	text := d.got[0].text
+	assert.Contains(t, text, fmt.Sprintf("Catch-up: %d messages, oldest first.", maxRecovery))
+	assert.Contains(t, text, "7 older unacknowledged messages were not sent")
+	assert.NotContains(t, text, "m 006\n")
+	assert.Equal(t, 0, strings.Count(text, "m 000"), "the oldest are the ones not sent")
+	assert.Contains(t, text, fmt.Sprintf("m %03d", maxRecovery+6))
+	assert.Less(t, strings.Index(text, "m 007"), strings.Index(text, "m 008"), "oldest first")
+}
+
+// A live message that arrives while a catch-up is being sent waits until
+// the whole catch-up is out, so it never lands between parts.
+func TestLiveMessageWaitsForCatchUp(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	var hist []slack.Message
+	for i := 3*maxRecovery + 19; i >= 0; i-- {
+		hist = append(hist, msg(fmt.Sprintf("%d.000100", 1000+i), "UBR", fmt.Sprintf("old %03d", i)))
+	}
+	api.history["C1"] = hist
+	d := &heldDeliverer{entered: make(chan struct{}, 16), release: make(chan struct{})}
+	l, err := NewListener(api, d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
+	require.NoError(t, err)
+	l.Async = true
+	done := make(chan struct{})
+	go func() { _ = l.Subscribe(ctx, claudeSub("s3"), 4*maxRecovery); close(done) }()
+	<-d.entered // part 1 under way
+	l.HandleMessage(ctx, Message{Channel: "C1", TS: "9000.000100", User: "UBR", Text: "live news"})
+	close(d.release)
+	<-done
+	require.Eventually(t, func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return len(d.got) == 5
+	}, 5*time.Second, 10*time.Millisecond)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i := 0; i < 4; i++ {
+		assert.Contains(t, d.got[i].text, fmt.Sprintf("part %d of 4", i+1))
+	}
+	assert.Contains(t, d.got[4].text, "live news", "the live message comes after the last part")
+}
+
+// Recovery sends nothing from a channel the session stopped watching while
+// history was being read.
+func TestRecoveryDropsUnwatchedChannels(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	api.history["C1"] = []slack.Message{msg("1999.5", "UBR", "old")}
+	d := &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	sub := claudeSub("s5")
+	require.NoError(t, l.Subscribe(ctx, sub, 0))
+	stale := snapshot(l.state.Subscriptions["s5"])
+	l.Unsubscribe("s5", "C1")
+	l.recover(ctx, stale, stale.Channels, map[string]bool{"C1": true}, 3)
+	assert.Empty(t, d.got)
+}
+
+// Backoff is per channel: a channel that newly fails is retried on its own
+// schedule, not behind another channel's backoff, and unsubscribing clears it.
+func TestBacklogBackoffIsPerChannel(t *testing.T) {
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	l.state.Subscriptions["s6"] = &Subscription{SessionID: "s6", Kind: KindClaude, Socket: "/s", Token: "t", Channels: []string{"C1", "C2"}}
+	l.state.Backlogs = map[string]int{"s6|C1": 2, "s6|C2": 2}
+	l.backlogRetry = map[string]backlogRetry{"s6|C1": {tries: 3, next: time.Now().Add(time.Hour)}}
+	api := l.API.(*fakeSlack)
+	api.failReads = true
+	l.RetryBacklogs(context.Background())
+	assert.Equal(t, 3, l.backlogRetry["s6|C1"].tries, "C1 is still backing off: not retried")
+	assert.Equal(t, 1, l.backlogRetry["s6|C2"].tries, "C2 was retried on its own schedule")
+	l.Unsubscribe("s6", "C2")
+	_, kept := l.backlogRetry["s6|C2"]
+	assert.False(t, kept, "unsubscribing clears its backoff")
+}
+
+// A catch-up (or live delivery) that fails is owed and sent by the sweep,
+// once, instead of waiting for the next restart.
+func TestFailedCatchUpIsRetried(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	d := &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0)) // the channel's join point = 2000
+	api.history["C1"] = []slack.Message{msg("2001.5", "UBR", "missed while away")}
+	d.mu.Lock()
+	d.errs = map[string]error{"s7": errors.New("socket busy")}
+	d.mu.Unlock()
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s7"), 0))
+	l.mu.Lock()
+	_, owed := l.catchUpOwed["s7"]
+	l.mu.Unlock()
+	require.True(t, owed, "the failed catch-up is owed")
+
+	d.mu.Lock()
+	d.errs = nil
+	d.mu.Unlock()
+	l.RetryBacklogs(ctx)
+	var got []string
+	for _, g := range d.got {
+		if g.session == "s7" {
+			got = append(got, g.text)
+		}
+	}
+	require.Len(t, got, 1)
+	assert.Contains(t, got[0], "missed while away")
+	l.mu.Lock()
+	_, owed = l.catchUpOwed["s7"]
+	l.mu.Unlock()
+	assert.False(t, owed, "settled")
+	l.RetryBacklogs(ctx)
+	n := 0
+	for _, g := range d.got {
+		if g.session == "s7" {
+			n++
+		}
+	}
+	assert.Equal(t, 1, n, "not sent again")
+}
+
+// While a session is owed a catch-up, a newer live message waits for it,
+// so the older owed messages still arrive first.
+func TestOwedCatchUpKeepsOrder(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	d := &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s8"), 0)) // join point = 2000
+	a := Message{Channel: "C1", TS: "2001.000100", User: "UBR", Text: "older A"}
+	b := Message{Channel: "C1", TS: "2001.000200", User: "UBR", Text: "newer B"}
+	api.history["C1"] = []slack.Message{msg(b.TS, "UBR", b.Text), msg(a.TS, "UBR", a.Text)}
+	d.mu.Lock()
+	d.errs = map[string]error{"s8": errors.New("socket busy")}
+	d.mu.Unlock()
+	l.HandleMessage(ctx, a) // fails: the session is owed a catch-up
+	d.mu.Lock()
+	d.errs = nil
+	d.mu.Unlock()
+	l.HandleMessage(ctx, b) // would succeed, but waits for the owed catch-up
+	assert.Empty(t, d.got, "B does not overtake A")
+	l.RetryBacklogs(ctx)
+	require.Len(t, d.got, 1)
+	assert.Less(t, strings.Index(d.got[0].text, "older A"), strings.Index(d.got[0].text, "newer B"), "oldest first")
+	l.HandleMessage(ctx, Message{Channel: "C1", TS: "2001.000300", User: "UBR", Text: "after"})
+	require.Len(t, d.got, 2, "live delivery resumes once the catch-up is sent")
+}
+
+// Something owed while a catch-up is under way (a queue drop) stays owed
+// after that catch-up settles, instead of being cleared with it.
+func TestOwedDuringCatchUpSurvivesIt(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	api.history["C1"] = []slack.Message{msg("1999.5", "UBR", "context")}
+	d := &heldDeliverer{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	l, err := NewListener(api, d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
+	require.NoError(t, err)
+	done := make(chan struct{})
+	go func() { _ = l.Subscribe(ctx, claudeSub("s9"), 1); close(done) }()
+	<-d.entered        // the catch-up is delivering
+	l.oweCatchUp("s9") // e.g. a live batch dropped from the full queue meanwhile
+	close(d.release)
+	<-done
+	l.mu.Lock()
+	_, owed := l.catchUpOwed["s9"]
+	l.mu.Unlock()
+	assert.True(t, owed, "the later debt is not cleared by the earlier catch-up")
+}
+
+// After a capped catch-up, a queued live message older than what it sent is
+// left to history, not delivered out of order.
+func TestQueuedOlderThanCappedCatchUpIsNotSentLate(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	d := &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0)) // join point = 2000
+	var hist []slack.Message
+	for i := maxRecovery + 4; i >= 0; i-- {
+		hist = append(hist, msg(fmt.Sprintf("%d.000100", 2001+i), "UBR", fmt.Sprintf("m %03d", i)))
+	}
+	api.history["C1"] = hist
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s5"), 0))
+	n := len(d.got)
+	old := Message{Channel: "C1", TS: "2001.000100", User: "UBR", Text: "m 000"} // skipped by the cap
+	l.deliverTo(ctx, l.state.Subscriptions["s5"], []pending{{msg: old}})
+	assert.Len(t, d.got, n, "not delivered after newer ones")
+}
+
+// A held live message brings an owed catch-up forward, and owed catch-ups
+// back off at most a few minutes.
+func TestHeldMessageBringsCatchUpForward(t *testing.T) {
+	ctx := context.Background()
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s4"), 0))
+	l.mu.Lock()
+	l.catchUpOwed = map[string]backlogRetry{"s4": {tries: 9, next: time.Now().Add(time.Hour)}}
+	l.mu.Unlock()
+	o := l.deliverTo(ctx, l.state.Subscriptions["s4"], []pending{{msg: Message{Channel: "C1", TS: "2001.000100", User: "UBR", Text: "new"}}})
+	assert.Equal(t, deliverDeferred, o)
+	l.mu.Lock()
+	next := l.catchUpOwed["s4"].next
+	l.mu.Unlock()
+	assert.True(t, next.IsZero(), "due at the next sweep")
+	assert.LessOrEqual(t, catchUpRetryMax, 5*time.Minute)
+}
+
+// If only reading history keeps failing while the session is reachable, its
+// live messages are released after a couple of tries, with a note, instead
+// of being held indefinitely.
+func TestUnreadableHistoryReleasesLive(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	d := &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s6"), 0))
+	l.mu.Lock()
+	l.catchUpOwed = map[string]backlogRetry{"s6": {tries: releaseAfter, readOnly: true}}
+	l.mu.Unlock()
+	o := l.deliverTo(ctx, l.state.Subscriptions["s6"], []pending{{msg: Message{Channel: "C1", TS: "2001.000100", User: "UBR", Text: "now"}, notice: Notice{ChannelID: "C1", ChannelName: "proj", Sender: "brian", TS: "2001.000100", Text: "now"}}})
+	assert.Equal(t, deliverDone, o)
+	require.Len(t, d.got, 1)
+	assert.True(t, strings.HasPrefix(d.got[0].text, unreadNote))
+	l.mu.Lock()
+	_, owed := l.catchUpOwed["s6"]
+	floor := l.state.CatchUpFloor["s6"]
+	l.mu.Unlock()
+	assert.False(t, owed)
+	assert.Equal(t, "2001.000100", floor, "older ones stay in history")
+
+	l.Unsubscribe("s6", "")
+	l.mu.Lock()
+	_, kept := l.state.CatchUpFloor["s6"]
+	l.mu.Unlock()
+	assert.False(t, kept, "a full unsubscribe clears the session's catch-up state")
+}
+
+// Messages left to history stay there after a listener restart: the floor
+// is kept in the state file.
+func TestFloorSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	path := filepath.Join(t.TempDir(), "state.json")
+	l1, err := NewListener(api, &fakeDeliverer{}, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	l1.Now = func() time.Time { return time.Unix(2000, 0) }
+	require.NoError(t, l1.Subscribe(ctx, claudeSub("s6"), 0))
+	l1.mu.Lock()
+	l1.setFloorLocked("s6", "2001.000300")
+	l1.mu.Unlock()
+	api.history["C1"] = []slack.Message{msg("2001.000400", "UBR", "kept"), msg("2001.000100", "UBR", "left to history")}
+
+	d2 := &fakeDeliverer{}
+	l2, err := NewListener(api, d2, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	l2.RecoverAll(ctx)
+	require.Len(t, d2.got, 1)
+	assert.Contains(t, d2.got[0].text, "kept")
+	assert.NotContains(t, d2.got[0].text, "left to history", "below the persisted floor")
 }

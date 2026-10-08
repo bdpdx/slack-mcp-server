@@ -191,6 +191,7 @@ func InstallCodex(home, userHome, bin string, r Runner, p Prompter, now time.Tim
 		return res, err
 	} else if wrote {
 		res.Changed = append(res.Changed, hooksPath)
+		res.Stale, res.Hooks = true, true // Codex reads (and asks to trust) hooks when a session starts
 	}
 	if autoReview {
 		res.Notes = append(res.Notes, "approval requests stay with Codex's auto_review (no Slack approval hook)")
@@ -219,6 +220,7 @@ func InstallCodex(home, userHome, bin string, r Runner, p Prompter, now time.Tim
 				return res, err
 			}
 			res.Changed = append(res.Changed, cfgPath)
+			res.Stale = true
 		}
 	}
 
@@ -246,6 +248,7 @@ func InstallCodex(home, userHome, bin string, r Runner, p Prompter, now time.Tim
 				return res, err
 			}
 			res.Changed = append(res.Changed, cfgPath+": Slack MCP tools run without asking (default_tools_approval_mode = \"approve\")")
+			res.Stale = true
 		}
 	}
 

@@ -59,8 +59,26 @@ func TestFormatBatch(t *testing.T) {
 	a := Notice{ChannelID: "C1", ChannelName: "p", Sender: "x", TS: "1.0", Text: "a"}
 	b := Notice{ChannelID: "C1", ChannelName: "p", Sender: "y", TS: "2.0", Text: "b"}
 	got := FormatBatch([]Notice{a, b})
-	assert.True(t, strings.HasPrefix(got, "[slack-agent-chat] 2 pending messages, oldest first:\n\n"))
+	assert.True(t, strings.HasPrefix(got, "[slack-agent-chat] 2 pending messages, oldest first. Read them all before acting on any: a later message may change or cancel an earlier one.\n\n"), got)
 	assert.Contains(t, got, a.Format()+"\n\n---\n\n"+b.Format())
+
+}
+
+// A catch-up header gives the totals, so the agent knows how much to read
+// before acting, and says how many older messages were not sent.
+func TestFormatCatchUp(t *testing.T) {
+	a := Notice{ChannelID: "C1", ChannelName: "p", Sender: "x", TS: "1.0", Text: "a"}
+	b := Notice{ChannelID: "C1", ChannelName: "p", Sender: "y", TS: "2.0", Text: "b"}
+	first := FormatCatchUp([]Notice{a}, 1, 2, 1, 2, 412)
+	assert.True(t, strings.HasPrefix(first, "[slack-agent-chat] Catch-up: 2 messages, oldest first, in 2 parts (part 1 of 2: messages 1–1 of 2). More follow in the next notices. Do not act on any message until you have read all 2"), first)
+	assert.Contains(t, first, "412 older unacknowledged messages were not sent; read the channel history if you need them.")
+	last := FormatCatchUp([]Notice{b}, 2, 2, 2, 2, 412)
+	assert.Contains(t, last, "part 2 of 2: messages 2–2 of 2")
+	assert.Contains(t, last, "This is the last part: now act on all 2")
+	assert.NotContains(t, last, "older unacknowledged", "said once, in the first part")
+	one := FormatCatchUp([]Notice{a, b}, 1, 1, 1, 2, 0)
+	assert.True(t, strings.HasPrefix(one, "[slack-agent-chat] Catch-up: 2 messages, oldest first. Read all 2 before acting on any"), one)
+	assert.NotContains(t, one, "older unacknowledged")
 }
 
 func TestRenderMentions(t *testing.T) {

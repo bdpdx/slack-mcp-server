@@ -3,6 +3,8 @@ package setup
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -50,4 +52,25 @@ func TestRestartListeners(t *testing.T) {
 	ok := &restartRunner{out: map[string]string{"/h/a/slack-mcp-server.env": `{"ok":true,"was_running":false}`}}
 	assert.False(t, RestartListeners(&bytes.Buffer{}, ok, "/bin/smcp", []Home{{Path: "/h/a", HasEnv: true}}))
 	assert.False(t, strings.Contains(got, "/h/none"))
+}
+
+type streamRunner struct{ restartRunner }
+
+func (r *streamRunner) RunStream(w io.Writer, env []string, name string, args ...string) (string, error) {
+	fmt.Fprintln(w, "progress for", args[2])
+	return r.Run(env, name, args...)
+}
+
+// A runner that can stream shows each home's progress as it runs, then the
+// result on its own line.
+func TestRestartListenersStreamsProgress(t *testing.T) {
+	r := &streamRunner{restartRunner{out: map[string]string{
+		"/h/a/slack-mcp-server.env": `{"ok":true,"was_running":true,"previous_version":"v1","version":"v2"}`,
+	}, err: map[string]error{"/h/b/slack-mcp-server.env": errors.New("exit status 1")}}}
+	var w bytes.Buffer
+	failed := RestartListeners(&w, r, "/bin/smcp", []Home{{Path: "/h/a", HasEnv: true}, {Path: "/h/b", HasEnv: true}})
+	assert.True(t, failed)
+	assert.Equal(t, "\nListeners\n"+
+		"  /h/a:\n    progress for /h/a/slack-mcp-server.env\n    restarted on the new binary (v1 → v2); watches carried over\n"+
+		"  /h/b:\n    progress for /h/b/slack-mcp-server.env\n    restart FAILED: exit status 1 (the reason is printed above)\n", w.String())
 }

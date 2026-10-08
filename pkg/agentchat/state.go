@@ -46,6 +46,27 @@ type State struct {
 	// BLOCKED notice may be in Slack: recorded before the post, so a known
 	// clear after any restart still announces recovery.
 	Announced map[string]bool `json:"announced,omitempty"`
+	// Rechecks holds possible GM signals by channel|ts, kept to be
+	// classified again once a refreshed project view names their agent as
+	// GM (see replayRechecks); kept here so a listener restart keeps them.
+	Rechecks map[string]*Recheck `json:"rechecks,omitempty"`
+	// Backlogs holds, by session|channel, a first-join backlog a stopping
+	// listener could not deliver, for the next listener's recovery to send.
+	Backlogs map[string]int `json:"backlogs,omitempty"`
+	// BacklogBefore holds, by the same key, the join timestamp a kept
+	// backlog counts back from: the backlog is the messages before the
+	// watch started, however late it is finally sent.
+	BacklogBefore map[string]string `json:"backlog_before,omitempty"`
+	// CatchUpFloor holds, by session, the oldest message a capped or
+	// released catch-up sent: older ones were left to channel history (the
+	// agent was told) and are never sent to that session later.
+	CatchUpFloor map[string]string `json:"catch_up_floor,omitempty"`
+}
+
+// Recheck is a message kept for GM classification until Until.
+type Recheck struct {
+	M     Message   `json:"m"`
+	Until time.Time `json:"until"`
 }
 
 // LoadState reads path; a missing file yields empty state.
