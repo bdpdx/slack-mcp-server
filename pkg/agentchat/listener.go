@@ -1272,6 +1272,10 @@ type approval struct {
 	msgs             []approvalMsg // the request's copies, as the hook registers them
 	decision, reason string        // "" until answered
 	hint             *approvalMsg  // the copy where the owner typed an allow word, which cannot approve; read only under l.mu
+	proposed         string        // the rule the owner last typed ("allow <rule>"), for the confirm buttons
+	propose          *approvalMsg  // the copy where a rule was typed, not yet handed to the hook
+	ruleHelp         *approvalMsg  // the copy where "allow <text>" was typed that is not a rule
+	helpText         string        // that text
 	clicks           []click       // owner Allow clicks waiting for their copy to register
 	at               time.Time
 	clicked          time.Time // the owner's latest recorded click
@@ -1328,8 +1332,16 @@ func (a *approval) applyClicks(now time.Time) {
 		case a.decision != "":
 		case now.Sub(c.at) >= clickCopyWait:
 			// waited too long for its copy: dropped, never applied late
+		case ruleClick(c.decision) && !a.ruleMatches(c.rule, c.label, c.decision):
+			// drawn for an earlier rule than the one now proposed, or its
+			// label does not say the rule it grants: dropped
+		case c.decision == decisionAllowSimilar && c.label != similarLabel:
+			// a button relabelled after it was drawn: grants only what it said
 		case a.copyAt(c.channel, c.ts) != nil:
 			a.decision = c.decision
+			if ruleClick(c.decision) {
+				a.reason = a.proposed
+			}
 		default:
 			kept = append(kept, c)
 		}
@@ -1338,6 +1350,17 @@ func (a *approval) applyClicks(now time.Time) {
 	if a.decision != "" {
 		a.clicks = nil
 	}
+}
+
+// ruleMatches reports whether a rule click is for the rule now proposed:
+// its hash matches, and its button text is the label drawn for that rule
+// and decision, so a click grants only what its label said.
+func (a *approval) ruleMatches(hash, label, decision string) bool {
+	if a.proposed == "" || hash == "" {
+		return false
+	}
+	r, ok := parseAllowRule(a.proposed)
+	return ok && r.hash() == hash && label == ruleButtonLabel(r, decision)
 }
 
 // Owed redraws are retried with backoff from approvalRetry to approvalRetryMax,
@@ -1358,6 +1381,14 @@ const approvalAbandoned = 30 * time.Second
 type click struct {
 	channel, ts, decision string
 	at                    time.Time
+	rule                  string // a rule confirm button's rule hash (from its value)
+	label                 string // the clicked button's text
+}
+
+// ruleClick reports whether decision confirms a typed rule.
+func ruleClick(decision string) bool {
+	_, ok := ruleDestinations[decision]
+	return ok
 }
 
 // approvalEntry returns the request with id, creating it, and forgets
@@ -1436,6 +1467,9 @@ func (l *Listener) HandleInteraction(payload []byte) {
 		Actions []struct {
 			ActionID string `json:"action_id"`
 			Value    string `json:"value"`
+			Text     struct {
+				Text string `json:"text"`
+			} `json:"text"`
 		} `json:"actions"`
 	}
 	if json.Unmarshal(payload, &in) != nil || in.Type != "block_actions" {
@@ -1453,11 +1487,17 @@ func (l *Listener) HandleInteraction(payload []byte) {
 		case in.Message.BotID != l.Self.BotID:
 			l.Log.Warn("ignoring approval click on a message this bot did not post", zap.String("bot", in.Message.BotID), zap.String("approval", act.Value))
 			continue
-		case decision != decisionAllow && decision != decisionDeny && decision != decisionTerminal:
+		case decision != decisionAllow && decision != decisionDeny && decision != decisionTerminal &&
+			decision != decisionAllowSimilar && !ruleClick(decision):
 			l.Log.Warn("ignoring approval click with an unknown decision", zap.String("decision", decision))
 			continue
 		}
-		c := click{in.Container.ChannelID, in.Container.MessageTS, decision, l.Now()}
+		if labels, fixed := buttonLabels[decision]; fixed && !labels[act.Text.Text] {
+			l.Log.Warn("ignoring approval click on a relabelled button", zap.String("approval", act.Value), zap.String("decision", decision))
+			continue
+		}
+		id, ruleHash, _ := strings.Cut(act.Value, "|")
+		c := click{in.Container.ChannelID, in.Container.MessageTS, decision, l.Now(), ruleHash, act.Text.Text}
 		l.mu.Lock()
 		if l.closing {
 			l.mu.Unlock()
@@ -1467,12 +1507,12 @@ func (l *Listener) HandleInteraction(payload []byte) {
 			l.mu.Unlock()
 			continue
 		}
-		a := l.approvalEntry(act.Value)
+		a := l.approvalEntry(id)
 		switch {
 		case a.ended:
 			l.Log.Info("ignoring a click on an ended approval request", zap.String("approval", act.Value))
 		case a.decision != "":
-		case decision != decisionAllow:
+		case decision == decisionDeny || decision == decisionTerminal:
 			// Deny or terminal can only make the request less permissive, and
 			// the owner clicked it on this bot's message carrying the request's
 			// id: it decides at once, before any Allow still waiting for its
@@ -1550,9 +1590,18 @@ func (l *Listener) approvalReply(m Message) bool {
 		return true
 	}
 	if m.User == l.OwnerID && target.decision == "" && !target.ended && explicit {
-		if decision == decisionAllow {
+		rest, isRule := ruleProposal(m.Text)
+		switch {
+		case decision == decisionAllow && isRule:
+			// "allow <rule>": a rule to confirm with a click, never a grant.
+			if rule, ok := parseAllowRule(rest); ok {
+				target.proposed, target.propose = rule.String(), at
+			} else {
+				target.ruleHelp, target.helpText = at, rest
+			}
+		case decision == decisionAllow:
 			target.hint = at
-		} else {
+		default:
 			target.decision, target.reason = decision, reason
 		}
 	}
@@ -1625,6 +1674,12 @@ func (l *Listener) takeApproval(id string) approvalAnswer {
 	case a.decision != "":
 		p.decision, p.reason = a.decision, a.reason
 		a.decision = decisionTaken // keep the entry so later replies stay out of the session
+	case a.propose != nil:
+		p.decision, p.reason, p.hintChannel, p.hintTS = decisionPropose, a.proposed, a.propose.channel, a.propose.ts
+		a.propose = nil
+	case a.ruleHelp != nil:
+		p.decision, p.reason, p.hintChannel, p.hintTS = decisionRuleHelp, a.helpText, a.ruleHelp.channel, a.ruleHelp.ts
+		a.ruleHelp = nil
 	case a.hint != nil:
 		p.decision, p.hintChannel, p.hintTS = decisionHint, a.hint.channel, a.hint.ts
 		a.hint = nil
@@ -1739,7 +1794,7 @@ func (l *Listener) answersWaitingLocked() bool {
 		if len(a.msgs) == 0 && l.Now().Sub(a.clicked) >= copyRegisterWait {
 			continue // a click on a request no hook registered: nothing can collect it
 		}
-		if (a.decision != "" && a.decision != decisionTaken) || len(a.clicks) > 0 || a.hint != nil {
+		if (a.decision != "" && a.decision != decisionTaken) || len(a.clicks) > 0 || a.propose != nil || a.ruleHelp != nil {
 			return true
 		}
 	}

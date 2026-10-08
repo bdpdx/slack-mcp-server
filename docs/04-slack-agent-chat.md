@@ -66,7 +66,8 @@ trust new hooks in the next session.
   show a permission dialog. Codex runs it *before* its `auto_review` reviewer, so with
   `approvals_reviewer = "auto_review"` the hook would take over every request the reviewer would
   approve on its own; leave it out of such Codex homes. When installed: approval requests
-  come to that channel with Allow / Deny / Answer in terminal buttons. Only the button can allow;
+  come to that channel with Allow / Deny / Answer in terminal buttons (in Claude Code also Allow
+  similar, and `allow <rule>` replies confirmed by a button; see the README). Only a button can allow;
   a reply in the channel or the request's thread can deny (`no` plus a reason for the agent) or say
   `terminal`. Claude Code has been observed to show its own terminal prompt at
   the same time (its docs don't say), and the first answer wins. A hook that

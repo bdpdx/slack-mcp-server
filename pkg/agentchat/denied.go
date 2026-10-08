@@ -141,7 +141,7 @@ func (c *cli) deniedHook(ctx context.Context, ev hookEvent, wait time.Duration) 
 	}
 
 	waitCtx, cancelWait := context.WithTimeout(ctx, wait)
-	decision, reason := c.waitForApproval(waitCtx, posted, id, text, deniedHint)
+	decision, reason := c.waitForApproval(waitCtx, posted, id, text, deniedHint, nil)
 	cancelWait()
 
 	finish, cancelFinish := context.WithTimeout(context.WithoutCancel(ctx), relayTimeout)
