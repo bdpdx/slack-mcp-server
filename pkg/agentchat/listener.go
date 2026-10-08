@@ -78,7 +78,6 @@ type Listener struct {
 	backlogRetry  map[string]backlogRetry   // kept backlogs' retry backoff by session|channel (under mu)
 	catchUpOwed   map[string]backlogRetry   // sessions whose catch-up failed partway, with retry backoff (under mu)
 	owedGen       map[string]int            // bumped each time a session becomes owed, so a catch-up clears only what it covered (under mu)
-	catchUpFloor  map[string]string         // per session: the oldest message a capped catch-up sent; older ones were left to history (under mu)
 	approvals     map[string]*approval      // approval-hook requests by approval ID
 	closing       bool                      // shutting down: records no new answer (set under mu)
 	inflight      int                       // restart notes and redraws still being posted (under mu)
@@ -460,10 +459,7 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 		// stop holding its live messages. The older ones stay in history,
 		// the note says so, and the floor keeps them from arriving late.
 		delete(l.catchUpOwed, sub.SessionID)
-		if l.catchUpFloor == nil {
-			l.catchUpFloor = map[string]string{}
-		}
-		l.catchUpFloor[sub.SessionID] = fresh[0].msg.TS
+		l.setFloorLocked(sub.SessionID, fresh[0].msg.TS)
 		note, owed = unreadNote, false
 	case owed:
 		// New activity: try the owed catch-up at the next sweep rather than
@@ -479,7 +475,7 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 		return deliverDeferred
 	}
 	l.mu.Lock()
-	if floor := l.catchUpFloor[sub.SessionID]; floor != "" {
+	if floor := l.state.CatchUpFloor[sub.SessionID]; floor != "" {
 		// A capped catch-up already sent newer messages and told the agent
 		// older ones were left to history: a queued older one would now
 		// arrive out of order, so it stays there too.
@@ -491,6 +487,19 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 		l.oweCatchUp(sub.SessionID) // the next sweep sends it with whatever else is pending
 	}
 	return o
+}
+
+// setFloorLocked records session's catch-up floor in the state file: older
+// messages were left to history and are never sent to it. Call with l.mu
+// held.
+func (l *Listener) setFloorLocked(session, ts string) {
+	if l.state.CatchUpFloor == nil {
+		l.state.CatchUpFloor = map[string]string{}
+	}
+	if TSLess(l.state.CatchUpFloor[session], ts) {
+		l.state.CatchUpFloor[session] = ts
+		l.saveStateLocked()
+	}
 }
 
 // oweCatchUp marks session as owed a catch-up, which RetryBacklogs sends
@@ -509,9 +518,11 @@ func (l *Listener) oweCatchUpLocked(session string) {
 	if l.catchUpOwed == nil {
 		l.catchUpOwed = map[string]backlogRetry{}
 	}
-	if _, ok := l.catchUpOwed[session]; !ok {
-		l.catchUpOwed[session] = backlogRetry{}
-	}
+	// A new debt, or one a delivery failure or drop added to: not read-only
+	// (recoverKept marks a fresh read-only debt itself).
+	r := l.catchUpOwed[session]
+	r.readOnly = false
+	l.catchUpOwed[session] = r
 }
 
 // catchUp numbers one part of a catch-up for its notice header: part of
@@ -756,16 +767,20 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 	// the join, the newest maxRecovery go; the notice says how many older
 	// ones were not sent. Everything is sent oldest first.
 	newer = l.freshItems(sub, newer)
+	l.mu.Lock()
+	if floor := l.state.CatchUpFloor[sub.SessionID]; floor != "" {
+		// Left to history by an earlier catch-up (the agent was told so):
+		// never sent later, out of order, even after a restart.
+		newer = slices.DeleteFunc(newer, func(p pending) bool { return TSLess(p.msg.TS, floor) })
+	}
+	l.mu.Unlock()
 	sort.SliceStable(newer, func(i, j int) bool { return TSLess(newer[i].msg.TS, newer[j].msg.TS) })
 	skipped := 0
 	if len(newer) > maxRecovery {
 		skipped = len(newer) - maxRecovery
 		newer = newer[skipped:]
 		l.mu.Lock()
-		if l.catchUpFloor == nil {
-			l.catchUpFloor = map[string]string{}
-		}
-		l.catchUpFloor[sub.SessionID] = newer[0].msg.TS
+		l.setFloorLocked(sub.SessionID, newer[0].msg.TS)
 		l.mu.Unlock()
 	}
 	items := append(asked, newer...)
@@ -795,9 +810,13 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 	l.mu.Lock()
 	switch {
 	case outcome == deliverFailed || sinceFailed:
+		prev, existed := l.catchUpOwed[sub.SessionID]
 		l.oweCatchUpLocked(sub.SessionID)
 		r := l.catchUpOwed[sub.SessionID]
-		r.readOnly = outcome != deliverFailed
+		// Read-only only while nothing but reading has failed: once a
+		// delivery failed or a message was dropped, the note's "could not be
+		// fetched" would be wrong, so it stays false.
+		r.readOnly = outcome != deliverFailed && (!existed || prev.readOnly)
 		l.catchUpOwed[sub.SessionID] = r
 	case outcome != deliverRefused && l.owedGen[sub.SessionID] == gen:
 		// Settled, unless something became owed after the history read
@@ -1115,7 +1134,7 @@ func (l *Listener) Unsubscribe(sessionID, channel string) {
 	if channel == "" || len(sub.Channels) == 0 {
 		delete(l.catchUpOwed, sessionID)
 		delete(l.owedGen, sessionID)
-		delete(l.catchUpFloor, sessionID)
+		delete(l.state.CatchUpFloor, sessionID)
 		delete(l.state.Subscriptions, sessionID)
 		if q := l.queues[sessionID]; q != nil {
 			close(q)

@@ -973,14 +973,38 @@ func TestUnreadableHistoryReleasesLive(t *testing.T) {
 	assert.True(t, strings.HasPrefix(d.got[0].text, unreadNote))
 	l.mu.Lock()
 	_, owed := l.catchUpOwed["s6"]
-	floor := l.catchUpFloor["s6"]
+	floor := l.state.CatchUpFloor["s6"]
 	l.mu.Unlock()
 	assert.False(t, owed)
 	assert.Equal(t, "2001.000100", floor, "older ones stay in history")
 
 	l.Unsubscribe("s6", "")
 	l.mu.Lock()
-	_, kept := l.catchUpFloor["s6"]
+	_, kept := l.state.CatchUpFloor["s6"]
 	l.mu.Unlock()
 	assert.False(t, kept, "a full unsubscribe clears the session's catch-up state")
+}
+
+// Messages left to history stay there after a listener restart: the floor
+// is kept in the state file.
+func TestFloorSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	path := filepath.Join(t.TempDir(), "state.json")
+	l1, err := NewListener(api, &fakeDeliverer{}, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	l1.Now = func() time.Time { return time.Unix(2000, 0) }
+	require.NoError(t, l1.Subscribe(ctx, claudeSub("s6"), 0))
+	l1.mu.Lock()
+	l1.setFloorLocked("s6", "2001.000300")
+	l1.mu.Unlock()
+	api.history["C1"] = []slack.Message{msg("2001.000400", "UBR", "kept"), msg("2001.000100", "UBR", "left to history")}
+
+	d2 := &fakeDeliverer{}
+	l2, err := NewListener(api, d2, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	l2.RecoverAll(ctx)
+	require.Len(t, d2.got, 1)
+	assert.Contains(t, d2.got[0].text, "kept")
+	assert.NotContains(t, d2.got[0].text, "left to history", "below the persisted floor")
 }

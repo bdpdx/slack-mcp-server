@@ -57,6 +57,10 @@ type State struct {
 	// backlog counts back from: the backlog is the messages before the
 	// watch started, however late it is finally sent.
 	BacklogBefore map[string]string `json:"backlog_before,omitempty"`
+	// CatchUpFloor holds, by session, the oldest message a capped or
+	// released catch-up sent: older ones were left to channel history (the
+	// agent was told) and are never sent to that session later.
+	CatchUpFloor map[string]string `json:"catch_up_floor,omitempty"`
 }
 
 // Recheck is a message kept for GM classification until Until.
