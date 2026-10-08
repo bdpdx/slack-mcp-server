@@ -741,7 +741,7 @@ type approval struct {
 	msgs             []approvalMsg // the request's copies, as the hook registers them
 	decision, reason string        // "" until answered
 	hint             *approvalMsg  // the copy where the owner typed an allow word, which cannot approve; read only under l.mu
-	clicks           []click       // owner clicks not yet applied, oldest first: one waits for its copy to register
+	clicks           []click       // owner Allow clicks waiting for their copy to register
 	at               time.Time
 	text             string    // the request as posted, to redraw it once it ends
 	polled           time.Time // the hook's last poll; a hook that stops polling is gone
@@ -757,10 +757,10 @@ type approvalMsg struct {
 	drawn       bool // shows the owed outcome
 }
 
-// maxPendingClicks bounds the clicks kept waiting for their copies, and
-// clickCopyWait is how long a click waits for its copy to register before it
-// is dropped (a hook registers each copy right after posting it), so a click
-// on a copy that never registers holds up later clicks only briefly.
+// maxPendingClicks bounds the Allow clicks kept waiting for their copies,
+// and clickCopyWait is how long one waits for its copy to register before it
+// is dropped (a hook registers each copy right after posting it). Dropping
+// an Allow is always safe: the request just stays unanswered.
 const (
 	maxPendingClicks = 8
 	clickCopyWait    = 10 * time.Second
@@ -776,22 +776,26 @@ func (a *approval) copyAt(channel, ts string) *approvalMsg {
 	return nil
 }
 
-// applyClicks decides the request by its oldest pending click once that
-// click's copy is registered. Clicks apply strictly in the order they were
-// made: a later click never overtakes an earlier one still waiting for its
-// copy, so an approval can't win over a denial clicked before it. Call with
-// l.mu held.
+// applyClicks approves the request once a waiting Allow click's copy is
+// registered, so an approval only ever counts on a copy the hook vouched
+// for, and drops Allow clicks whose copy never registered. Call with l.mu
+// held.
 func (a *approval) applyClicks(now time.Time) {
-	for a.decision == "" && len(a.clicks) > 0 {
-		first := a.clicks[0]
+	kept := a.clicks[:0]
+	for _, c := range a.clicks {
 		switch {
-		case a.copyAt(first.channel, first.ts) != nil:
-			a.decision, a.clicks = first.decision, nil
-		case now.Sub(first.at) < clickCopyWait:
-			return // wait for the hook to register that copy
+		case a.decision != "":
+		case now.Sub(c.at) >= clickCopyWait:
+			// waited too long for its copy: dropped, never applied late
+		case a.copyAt(c.channel, c.ts) != nil:
+			a.decision = c.decision
 		default:
-			a.clicks = a.clicks[1:] // its copy never registered
+			kept = append(kept, c)
 		}
+	}
+	a.clicks = kept
+	if a.decision != "" {
+		a.clicks = nil
 	}
 }
 
@@ -900,6 +904,12 @@ func (l *Listener) HandleInteraction(payload []byte) {
 		case a.ended:
 			l.Log.Info("ignoring a click on an ended approval request", zap.String("approval", act.Value))
 		case a.decision != "":
+		case decision != decisionAllow:
+			// Deny or terminal can only make the request less permissive, and
+			// the owner clicked it on this bot's message carrying the request's
+			// id: it decides at once, before any Allow still waiting for its
+			// copy, and whether or not this copy is registered yet.
+			a.decision, a.clicks = decision, nil
 		case len(a.clicks) < maxPendingClicks:
 			a.clicks = append(a.clicks, c)
 			a.applyClicks(c.at)

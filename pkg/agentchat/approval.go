@@ -245,10 +245,13 @@ func (c *cli) postRequest(ctx context.Context, targets []namedChannel, what, id,
 }
 
 // postCopies posts a request in each target and registers each copy (watch
-// returns how many copies the listener holds). A listener that answers the
-// first registration without a count predates multi-copy requests and keeps
-// only the last copy registered, so it gets that one copy and no more: a
-// denial on an earlier copy could otherwise be lost.
+// returns how many copies the listener holds). A further copy is posted only
+// after a registration has confirmed a count: a listener that answers
+// without one predates multi-copy requests and keeps only the last copy
+// registered, so an answer on any other copy would be lost. Until a count
+// confirms support (the first registration failed, or the listener is
+// older), the request stays at the one copy posted, which the poll
+// registers again.
 func postCopies(targets []namedChannel, post func(namedChannel) (string, error), watch func(postedMsg) (int, error)) []postedMsg {
 	var posted []postedMsg
 	for _, t := range targets {
@@ -258,9 +261,8 @@ func postCopies(targets []namedChannel, post func(namedChannel) (string, error),
 		}
 		p := postedMsg{t.id, t.name, ts}
 		posted = append(posted, p)
-		n, err := watch(p)
-		if err == nil && n == 0 && len(posted) == 1 {
-			return posted // an older listener: one copy only
+		if n, err := watch(p); err != nil || n == 0 {
+			return posted // multi-copy support not confirmed: one copy only
 		}
 	}
 	return posted

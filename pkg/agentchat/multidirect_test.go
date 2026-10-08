@@ -145,9 +145,10 @@ func TestApprovalPollCountsCopies(t *testing.T) {
 	assert.Equal(t, 2, l.Control(ctx, ControlRequest{Op: "approval", Approval: "p"}).Copies, "registering a copy again adds nothing")
 }
 
-// Clicks apply in the order they were made: an approval clicked after a
-// denial never wins just because its copy registered first.
-func TestClicksApplyInClickOrder(t *testing.T) {
+// A denial counts the moment the owner clicks it, on any copy, registered or
+// not; an approval counts only on a registered copy, so it can never win
+// over a denial clicked before it.
+func TestDenialsApplyAtOnce(t *testing.T) {
 	ctx := context.Background()
 	watch := func(l *Listener, id, ch, ts string) {
 		require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: id, Channel: ch, TS: ts}).OK)
@@ -157,20 +158,31 @@ func TestClicksApplyInClickOrder(t *testing.T) {
 	l.HandleInteraction(clickOn("UBR", decisionDeny, "o", "C2", "3000.1", "BCL"))
 	l.HandleInteraction(clickOn("UBR", decisionAllow, "o", "C1", "2000.1", "BCL"))
 	watch(l, "o", "C1", "2000.1")
-	d, _ := takeApproval(t, l, "o")
-	assert.Equal(t, "", d, "the earlier denial waits for its copy; the later approval may not overtake it")
 	watch(l, "o", "C2", "3000.1")
-	d, _ = takeApproval(t, l, "o")
-	assert.Equal(t, decisionDeny, d)
+	d, _ := takeApproval(t, l, "o")
+	assert.Equal(t, decisionDeny, d, "the earlier denial on an unregistered copy wins")
 
 	l = newTestListener(t, newFakeSlack(), &fakeDeliverer{})
 	watch(l, "r", "C1", "2000.1")
-	l.HandleInteraction(clickOn("UBR", decisionDeny, "r", "C2", "3000.1", "BCL"))
-	l.HandleInteraction(clickOn("UBR", decisionAllow, "r", "C1", "2000.1", "BCL"))
-	d, _ = takeApproval(t, l, "r")
-	assert.Equal(t, "", d, "a click on a registered copy waits behind an earlier one too")
+	l.HandleInteraction(clickOn("UBR", decisionAllow, "r", "C2", "3000.1", "BCL"))
+	l.HandleInteraction(clickOn("UBR", decisionTerminal, "r", "C2", "3000.1", "BCL"))
 	watch(l, "r", "C2", "3000.1")
 	d, _ = takeApproval(t, l, "r")
+	assert.Equal(t, decisionTerminal, d, "a waiting approval never overtakes a later terminal click")
+}
+
+// A denial on a copy whose registration is slow still counts, however late
+// the copy registers; only a waiting approval expires.
+func TestSlowRegistrationKeepsDenial(t *testing.T) {
+	ctx := context.Background()
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	now := time.Unix(2000, 0)
+	l.Now = func() time.Time { return now }
+	l.HandleInteraction(clickOn("UBR", decisionDeny, "s", "C2", "3000.1", "BCL"))
+	now = now.Add(2 * clickCopyWait)
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "s", Channel: "C1", TS: "2000.1"}).OK)
+	l.HandleInteraction(clickOn("UBR", decisionAllow, "s", "C1", "2000.1", "BCL"))
+	d, _ := takeApproval(t, l, "s")
 	assert.Equal(t, decisionDeny, d)
 }
 
@@ -182,55 +194,67 @@ func TestWatchReportsCopies(t *testing.T) {
 	assert.Equal(t, 2, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "w", Channel: "C2", TS: "3000.1"}).Copies)
 }
 
-// Against a listener too old to hold several copies (it reports no count),
-// the hook posts one copy only; a newer one gets every copy. A failed post
-// or registration does not stop the rest.
+// A second copy is posted only after a registration confirms a count, so an
+// older listener (no count) or a failed first registration leaves one copy.
+// A failed post does not stop the rest.
 func TestPostCopiesNegotiates(t *testing.T) {
 	targets := []namedChannel{{"C1", "a"}, {"C2", "b"}, {"C3", "c"}}
-	run := func(fail string, count func(n int) int) (posted []postedMsg, calls int) {
-		n := 0
+	run := func(failPost string, watch func(n int) (int, error)) ([]postedMsg, int) {
+		calls, n := 0, 0
 		got := postCopies(targets,
 			func(t namedChannel) (string, error) {
 				calls++
-				if t.id == fail {
+				if t.id == failPost {
 					return "", errors.New("post failed")
 				}
 				return t.id + "-ts", nil
 			},
 			func(p postedMsg) (int, error) {
 				n++
-				return count(n), nil
+				return watch(n)
 			})
 		return got, calls
 	}
-	old, calls := run("", func(int) int { return 0 })
+	old, calls := run("", func(int) (int, error) { return 0, nil })
 	assert.Equal(t, []postedMsg{{"C1", "a", "C1-ts"}}, old, "an older listener gets one copy")
 	assert.Equal(t, 1, calls)
 
-	all, _ := run("", func(n int) int { return n })
+	all, _ := run("", func(n int) (int, error) { return n, nil })
 	assert.Len(t, all, 3)
 
-	skip, _ := run("C1", func(n int) int { return n })
+	skip, _ := run("C1", func(n int) (int, error) { return n, nil })
 	assert.Equal(t, []postedMsg{{"C2", "b", "C2-ts"}, {"C3", "c", "C3-ts"}}, skip)
 
-	unreg := postCopies(targets,
-		func(t namedChannel) (string, error) { return t.id + "-ts", nil },
-		func(p postedMsg) (int, error) { return 0, errors.New("no listener") })
-	assert.Len(t, unreg, 3, "a failed registration is healed by the poll, not by posting fewer copies")
+	unconfirmed, calls := run("", func(n int) (int, error) {
+		if n == 1 {
+			return 0, errors.New("timeout")
+		}
+		return 0, nil // an older listener behind the failed registration
+	})
+	assert.Equal(t, []postedMsg{{"C1", "a", "C1-ts"}}, unconfirmed, "no second copy before a count confirms support")
+	assert.Equal(t, 1, calls)
 }
 
-// A click whose copy never registers holds up later clicks only briefly.
-func TestUnregisteredClickExpires(t *testing.T) {
+// A denial counts even on a copy that never registers; an approval on such a
+// copy expires.
+func TestUnregisteredDenialCounts(t *testing.T) {
 	ctx := context.Background()
 	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
-	now := time.Unix(2000, 0)
-	l.Now = func() time.Time { return now }
 	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "x", Channel: "C1", TS: "2000.1"}).OK)
 	l.HandleInteraction(clickOn("UBR", decisionDeny, "x", "C9", "9000.1", "BCL"))
 	l.HandleInteraction(clickOn("UBR", decisionAllow, "x", "C1", "2000.1", "BCL"))
 	d, _ := takeApproval(t, l, "x")
-	assert.Equal(t, "", d)
+	assert.Equal(t, decisionDeny, d, "the denial counted at once, though its copy never registered")
+}
+
+func TestUnregisteredAllowExpires(t *testing.T) {
+	ctx := context.Background()
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	now := time.Unix(2000, 0)
+	l.Now = func() time.Time { return now }
+	l.HandleInteraction(clickOn("UBR", decisionAllow, "y", "C9", "9000.1", "BCL"))
 	now = now.Add(clickCopyWait)
-	d, _ = takeApproval(t, l, "x")
-	assert.Equal(t, decisionAllow, d, "the click on a copy that never registered is dropped")
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "y", Channel: "C9", TS: "9000.1"}).OK)
+	d, _ := takeApproval(t, l, "y")
+	assert.Equal(t, "", d, "an approval that waited past clickCopyWait is dropped, never applied late")
 }
