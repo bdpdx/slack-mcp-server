@@ -651,22 +651,22 @@ func TestKeptBacklogIncludesTheGap(t *testing.T) {
 	require.NoError(t, err)
 	l1.Now = func() time.Time { return time.Unix(2000, 0) }
 	l1.Stop = func() {}
-	api.history["C1"] = []slack.Message{msg("1999.5", "UBR", "before")}
+	api.history["C1"] = []slack.Message{msg("1999.5", "UBR", "pre-watch")}
 	require.True(t, l1.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
 	require.NoError(t, l1.Subscribe(ctx, claudeSub("s2"), 2))
 	require.Equal(t, 2, l1.state.Backlogs["s2|C1"], "refused, so kept")
 
-	api.history["C1"] = []slack.Message{msg("2000.6", "UBR", "gap two"), msg("2000.5", "UBR", "gap one"), msg("1999.5", "UBR", "before")}
+	api.history["C1"] = []slack.Message{msg("2000.6", "UBR", "gap two"), msg("2000.5", "UBR", "gap one"), msg("1999.5", "UBR", "pre-watch")}
 	d2 := &fakeDeliverer{}
 	l2, err := NewListener(api, d2, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
 	require.NoError(t, err)
 	l2.RecoverAll(ctx)
 	require.Len(t, d2.got, 1)
 	text := d2.got[0].text
-	assert.Equal(t, 1, strings.Count(text, "before"), "the backlog counts back from the watch's start, however many messages followed")
+	assert.Equal(t, 1, strings.Count(text, "pre-watch"), "the backlog counts back from the watch's start, however many messages followed")
 	assert.Equal(t, 1, strings.Count(text, "gap one"), "messages since the join follow it")
 	assert.Equal(t, 1, strings.Count(text, "gap two"))
-	assert.Less(t, strings.Index(text, "before"), strings.Index(text, "gap one"), "oldest first")
+	assert.Less(t, strings.Index(text, "pre-watch"), strings.Index(text, "gap one"), "oldest first")
 	assert.Empty(t, l2.state.Backlogs, "cleared once delivered")
 
 	d3 := &fakeDeliverer{}
@@ -707,9 +707,9 @@ func TestFailedBacklogIsRetried(t *testing.T) {
 	assert.Len(t, d.got, 1, "not sent again")
 }
 
-// A long restart gap is capped from the oldest end, but never cuts the
-// requested backlog.
-func TestRecoveryCapSparesTheBacklog(t *testing.T) {
+// A long backlog is delivered whole, oldest first, in consecutive parts, each
+// telling the agent to read every part before acting.
+func TestLongBacklogIsDeliveredInParts(t *testing.T) {
 	ctx := context.Background()
 	api := newFakeSlack()
 	path := filepath.Join(t.TempDir(), "state.json")
@@ -723,17 +723,27 @@ func TestRecoveryCapSparesTheBacklog(t *testing.T) {
 
 	var hist []slack.Message
 	for i := maxRecovery + 9; i >= 0; i-- { // newest first
-		hist = append(hist, msg(fmt.Sprintf("%d.000100", 2001+i), "UBR", fmt.Sprintf("gap %d", i)))
+		hist = append(hist, msg(fmt.Sprintf("%d.000100", 2001+i), "UBR", fmt.Sprintf("gap %03d", i)))
 	}
 	api.history["C1"] = append(hist, msg("1999.5", "UBR", "before the watch"))
 	d2 := &fakeDeliverer{}
 	l2, err := NewListener(api, d2, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
 	require.NoError(t, err)
 	l2.RecoverAll(ctx)
-	require.Len(t, d2.got, 1)
-	assert.Contains(t, d2.got[0].text, "before the watch")
-	assert.Equal(t, maxRecovery+1, strings.Count(d2.got[0].text, "> "), "the backlog plus the newest gap messages up to the cap")
-	assert.Contains(t, d2.got[0].text, fmt.Sprintf("gap %d", maxRecovery+9))
+	require.Len(t, d2.got, 2, "two parts")
+	first, last := d2.got[0].text, d2.got[1].text
+	assert.Contains(t, first, "part 1 of 2")
+	assert.Contains(t, first, "read every part before acting")
+	assert.Contains(t, last, "part 2 of 2")
+	assert.Contains(t, last, "last part")
+	assert.Contains(t, first, "before the watch", "the oldest message comes first")
+	assert.Contains(t, first, "gap 000")
+	assert.Contains(t, last, fmt.Sprintf("gap %03d", maxRecovery+9), "the newest comes last")
+	all := first + last
+	for i := 0; i <= maxRecovery+9; i++ {
+		assert.Equal(t, 1, strings.Count(all, fmt.Sprintf("gap %03d", i)), "every message once")
+	}
+	assert.Less(t, strings.Index(all, "gap 010"), strings.Index(all, "gap 011"), "in order")
 }
 
 // Recovery sends nothing from a channel the session stopped watching while

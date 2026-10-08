@@ -46,6 +46,8 @@ Open one, or join it if it already exists, with `@BIN@ chat side <agent>[,<agent
 
 When a side-channel exchange settles something the others need, post the outcome (decision, findings, what changed) in the project channel. Never archive channels except as below, when the user asks.
 
+A notice can hold several pending messages, oldest first, and a long backlog arrives in numbered parts. Read every message, in every part, before acting on any: a later message may change or cancel an earlier one.
+
 Long messages are truncated in the notice; read the rest with `conversations_replies` / `conversations_history`.
 
 ## Deleting (archiving) a project's channels

@@ -59,8 +59,15 @@ func TestFormatBatch(t *testing.T) {
 	a := Notice{ChannelID: "C1", ChannelName: "p", Sender: "x", TS: "1.0", Text: "a"}
 	b := Notice{ChannelID: "C1", ChannelName: "p", Sender: "y", TS: "2.0", Text: "b"}
 	got := FormatBatch([]Notice{a, b})
-	assert.True(t, strings.HasPrefix(got, "[slack-agent-chat] 2 pending messages, oldest first:\n\n"))
+	assert.True(t, strings.HasPrefix(got, "[slack-agent-chat] 2 pending messages, oldest first. Read them all before acting on any: a later message may change or cancel an earlier one.\n\n"), got)
 	assert.Contains(t, got, a.Format()+"\n\n---\n\n"+b.Format())
+
+	first := FormatBatchPart([]Notice{a}, 1, 2)
+	assert.Contains(t, first, "part 1 of 2")
+	assert.Contains(t, first, "read every part before acting")
+	last := FormatBatchPart([]Notice{b}, 2, 2)
+	assert.Contains(t, last, "part 2 of 2")
+	assert.Contains(t, last, "later ones taking precedence")
 }
 
 func TestRenderMentions(t *testing.T) {
