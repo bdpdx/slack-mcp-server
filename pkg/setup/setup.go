@@ -538,6 +538,9 @@ func Main(args []string) int {
 		Clipboard: pbcopy,
 	})
 	printSummary(os.Stdout, linkPath, results, errors.Is(err, ErrAborted))
+	if st, serr := LoadState(filepath.Join(*repo, ".install-state.json")); serr == nil {
+		RestartListeners(os.Stdout, ExecRunner{}, linkPath, DiscoverHomes(user, st))
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "setup:", err)
 		return 1

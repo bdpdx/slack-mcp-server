@@ -97,7 +97,15 @@ A home that already has an env file offers **Update** (keep tokens, refresh ever
 - A config file that isn't valid JSON is left alone.
 - Hooks and rules from an earlier install are replaced, not duplicated.
 
-Setup saves the binary path and homes in `.install-state.json`, which is gitignored. A summary at the end lists every change. Restart running Claude Code and Codex sessions afterwards. Codex asks you to trust the new hooks in its next session.
+Setup saves the binary path and homes in `.install-state.json`, which is gitignored. A summary at the end lists every change. Restart running Claude Code and Codex sessions after a first install. Codex asks you to trust the new hooks in its next session.
+
+### Upgrading
+
+To upgrade, pull and run `./install.sh` again. At the end it restarts each home's running listener on the new binary (`slack-mcp-server chat --env-file <home>/slack-mcp-server.env listener restart --if-running`). Every session keeps its watches, cohort registrations and delivery marks, and messages posted during the restart are caught up. Hooks and chat commands use the new binary from their next run. A listener built before this command existed is stopped with SIGTERM and replaced the same way.
+
+Running sessions don't need a restart, with one exception: each session's MCP server (the `conversations_*` and other Slack tools) is a process Claude Code or Codex started, and it stays on the old binary until that session restarts, or until `/mcp` reconnects it in Claude Code. Restart sessions only when a release changes those tools, or when setup changed a home's hooks or MCP configuration.
+
+`slack-mcp-server chat listener stop` stops a home's listener without starting another.
 
 ## Uninstall
 

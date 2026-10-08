@@ -267,6 +267,8 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = c.capabilities()
 	case "whoami":
 		err = c.whoami(ctx)
+	case "listener":
+		err = c.listenerCmd(ctx, rest[1:])
 	case "relay-hook":
 		ctx, cancel := context.WithTimeout(ctx, relayTimeout)
 		defer cancel()

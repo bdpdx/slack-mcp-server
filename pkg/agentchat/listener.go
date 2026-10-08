@@ -61,6 +61,9 @@ type Listener struct {
 	Async bool
 	// Users acts as the owner; nil leaves <project>__users alone.
 	Users UserAPI
+	// Stop ends the running daemon (control op shutdown); nil when the
+	// listener is not run as a daemon.
+	Stop func()
 
 	mu            sync.Mutex
 	state         *State
@@ -710,6 +713,15 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 		p := l.takeApproval(req.Approval)
 		return ControlResponse{OK: true, Decision: p.decision, Text: p.reason, Unknown: p.copies == 0, Ended: p.ended,
 			Channel: p.hintChannel, TS: p.hintTS, Copies: p.copies}
+	case "shutdown":
+		if l.Stop == nil {
+			return ControlResponse{Error: "this listener cannot be shut down"}
+		}
+		// After the reply is written: state is saved as it changes, so
+		// nothing else needs flushing.
+		time.AfterFunc(shutdownDelay, l.Stop)
+		l.Log.Info("shutting down on request")
+		return ControlResponse{OK: true, Version: version.Version}
 	case "approval-end":
 		l.EndApproval(req.Approval, req.Text)
 	case "cohort-register", "cohort-leave", "cohort-duty", "cohort-checkpoint", "cohort-status":
