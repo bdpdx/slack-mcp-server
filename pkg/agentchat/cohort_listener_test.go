@@ -600,3 +600,44 @@ func TestCohortCodexWaitIsPerRegistration(t *testing.T) {
 	assert.Len(t, api.posts(), 3)
 	assert.Equal(t, "C2|"+blockedNotice("codex-b", "", defaultApprovalWait), api.posts()[2])
 }
+
+// A mention of a new GM arriving while each home's cached view still names
+// the former one is classified against a re-read view, so the single
+// unanswered mention still produces its successor notice.
+func TestCohortNewGMMentionSurvivesCachedFormerAuthority(t *testing.T) {
+	f := newCohortFixture(t)
+	// Registration primed each home's view with the original term-0 GM.
+	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "gm.json"),
+		[]byte(`{"term":1,"gm":"codex-r","claim_id":"changed-authority"}`), 0o600))
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100",
+		User: "UBR", Text: "<@UCR> please decide"})
+	f.at(26 * time.Minute)
+	f.tick()
+	f.tick()
+	require.Len(t, f.notices("s2"), 1, "the mention survives the stale view")
+}
+
+// A BLOCKED notice from a new GM the cached view does not yet name is still
+// an outage.
+func TestCohortNewGMBlockedSurvivesCachedFormerAuthority(t *testing.T) {
+	f := newCohortFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "gm.json"),
+		[]byte(`{"term":1,"gm":"codex-r","claim_id":"changed-authority"}`), 0o600))
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100",
+		User: "UCR", Text: "BLOCKED: codex-r has waited 10m0s for approval of Bash; it is now waiting at the terminal."})
+	f.at(11 * time.Minute)
+	f.tick()
+	require.Len(t, f.notices("s2"), 1, "the next live successor is told")
+}
+
+// Ordinary chatter that names no other roster agent does not force a re-read.
+func TestCohortRecheckOnlyForPossibleGMSignals(t *testing.T) {
+	f := newCohortFixture(t)
+	p, err := f.l.projectView(context.Background(), f.root, "proj", false)
+	require.NoError(t, err)
+	assert.False(t, f.l.mayNameUncachedGM(context.Background(), Message{User: "UCR", Text: "status update"}, p))
+	assert.False(t, f.l.mayNameUncachedGM(context.Background(), Message{User: "UBR", Text: "<@UCL> please decide"}, p), "the cached GM")
+	assert.True(t, f.l.mayNameUncachedGM(context.Background(), Message{User: "UBR", Text: "<@UCR> please decide"}, p))
+	assert.True(t, f.l.mayNameUncachedGM(context.Background(), Message{User: "UCR", Text: "BLOCKED: codex-r has waited"}, p))
+	assert.False(t, f.l.mayNameUncachedGM(context.Background(), Message{User: "UCR", Text: "<@UCR> self"}, p), "a self-mention")
+}
