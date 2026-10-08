@@ -77,6 +77,8 @@ type Listener struct {
 	delivering    int                       // deliveries in progress, until marked (under mu)
 	backlogRetry  map[string]backlogRetry   // kept backlogs' retry backoff by session|channel (under mu)
 	catchUpOwed   map[string]backlogRetry   // sessions whose catch-up failed partway, with retry backoff (under mu)
+	owedGen       map[string]int            // bumped each time a session becomes owed, so a catch-up clears only what it covered (under mu)
+	catchUpFloor  map[string]string         // per session: the oldest message a capped catch-up sent; older ones were left to history (under mu)
 	approvals     map[string]*approval      // approval-hook requests by approval ID
 	closing       bool                      // shutting down: records no new answer (set under mu)
 	inflight      int                       // restart notes and redraws still being posted (under mu)
@@ -432,11 +434,12 @@ func (l *Listener) sessionLock(sessionID string) *sync.Mutex {
 type deliverOutcome int
 
 const (
-	deliverNone    deliverOutcome = iota // nothing new to deliver
-	deliverDone                          // delivered and marked
-	deliverRefused                       // shutting down; delivered nothing
-	deliverFailed                        // the delivery failed; nothing marked
-	deliverGone                          // the session is gone; its subscription was dropped
+	deliverNone     deliverOutcome = iota // nothing new to deliver
+	deliverDone                           // delivered and marked
+	deliverRefused                        // shutting down; delivered nothing
+	deliverFailed                         // the delivery failed; nothing marked
+	deliverGone                           // the session is gone; its subscription was dropped
+	deliverDeferred                       // held for an owed catch-up; nothing marked
 )
 
 // It reports what happened, so a caller can keep what it cannot redo from
@@ -447,7 +450,24 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 	sl := l.sessionLock(sub.SessionID)
 	sl.Lock()
 	defer sl.Unlock()
-	o := l.deliverLocked(ctx, sub, l.freshItems(sub, items), catchUp{})
+	l.mu.Lock()
+	_, owed := l.catchUpOwed[sub.SessionID]
+	l.mu.Unlock()
+	if owed {
+		// Older messages are still owed to this session: hold this one
+		// (unmarked) so the owed catch-up sends everything oldest first.
+		return deliverDeferred
+	}
+	fresh := l.freshItems(sub, items)
+	l.mu.Lock()
+	if floor := l.catchUpFloor[sub.SessionID]; floor != "" {
+		// A capped catch-up already sent newer messages and told the agent
+		// older ones were left to history: a queued older one would now
+		// arrive out of order, so it stays there too.
+		fresh = slices.DeleteFunc(fresh, func(p pending) bool { return TSLess(p.msg.TS, floor) })
+	}
+	l.mu.Unlock()
+	o := l.deliverLocked(ctx, sub, fresh, catchUp{})
 	if o == deliverFailed {
 		l.oweCatchUp(sub.SessionID) // the next sweep sends it with whatever else is pending
 	}
@@ -463,6 +483,10 @@ func (l *Listener) oweCatchUp(session string) {
 }
 
 func (l *Listener) oweCatchUpLocked(session string) {
+	if l.owedGen == nil {
+		l.owedGen = map[string]int{}
+	}
+	l.owedGen[session]++
 	if l.catchUpOwed == nil {
 		l.catchUpOwed = map[string]backlogRetry{}
 	}
@@ -646,6 +670,9 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 	sl := l.sessionLock(sub.SessionID)
 	sl.Lock()
 	defer sl.Unlock()
+	l.mu.Lock()
+	gen := l.owedGen[sub.SessionID] // what this catch-up's history read covers
+	l.mu.Unlock()
 	var backlogs []string // first-join channels whose backlog (sizes) was requested
 	for _, ch := range channels {
 		if first[ch] && sizes[ch] > 0 {
@@ -711,6 +738,12 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 	if len(newer) > maxRecovery {
 		skipped = len(newer) - maxRecovery
 		newer = newer[skipped:]
+		l.mu.Lock()
+		if l.catchUpFloor == nil {
+			l.catchUpFloor = map[string]string{}
+		}
+		l.catchUpFloor[sub.SessionID] = newer[0].msg.TS
+		l.mu.Unlock()
 	}
 	items := append(asked, newer...)
 	sort.SliceStable(items, func(i, j int) bool { return TSLess(items[i].msg.TS, items[j].msg.TS) })
@@ -740,7 +773,9 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 	switch {
 	case outcome == deliverFailed || sinceFailed:
 		l.oweCatchUpLocked(sub.SessionID)
-	case outcome != deliverRefused:
+	case outcome != deliverRefused && l.owedGen[sub.SessionID] == gen:
+		// Settled, unless something became owed after the history read
+		// began (a drop while this catch-up held the session): that stays.
 		delete(l.catchUpOwed, sub.SessionID)
 	}
 	l.mu.Unlock()
@@ -789,25 +824,42 @@ func (l *Listener) RetryBacklogs(ctx context.Context) {
 	}
 	var owed []*Subscription
 	for session, r := range l.catchUpOwed {
-		if sub := l.state.Subscriptions[session]; sub == nil {
+		sub := l.state.Subscriptions[session]
+		switch {
+		case sub == nil:
 			delete(l.catchUpOwed, session)
-		} else if !now.Before(r.next) {
-			owed = append(owed, snapshot(sub))
+		case now.Before(r.next):
+		default:
+			merged := false
+			for i := range jobs {
+				if jobs[i].sub.SessionID == session {
+					// One pass covers both: read every channel, not just
+					// the ones with a due backlog.
+					jobs[i].channels, merged = slices.Clone(sub.Channels), true
+				}
+			}
+			if !merged {
+				owed = append(owed, snapshot(sub))
+			}
 		}
 	}
 	l.mu.Unlock()
-	for _, sub := range owed {
-		l.recover(ctx, sub, sub.Channels, nil, 0)
+	backOff := func(session string) {
 		l.mu.Lock()
-		if r, ok := l.catchUpOwed[sub.SessionID]; ok {
+		defer l.mu.Unlock()
+		if r, ok := l.catchUpOwed[session]; ok {
 			r.tries++
 			r.next = time.Now().Add(min(backlogRetryMin<<min(r.tries-1, 6), backlogRetryMax))
-			l.catchUpOwed[sub.SessionID] = r
+			l.catchUpOwed[session] = r
 		}
-		l.mu.Unlock()
+	}
+	for _, sub := range owed {
+		l.recover(ctx, sub, sub.Channels, nil, 0)
+		backOff(sub.SessionID)
 	}
 	for _, j := range jobs {
 		l.recoverKept(ctx, j.sub, j.channels, j.first, j.sizes, true)
+		backOff(j.sub.SessionID)
 		l.mu.Lock()
 		for ch := range j.first {
 			k := j.sub.SessionID + "|" + ch

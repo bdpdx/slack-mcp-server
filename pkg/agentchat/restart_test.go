@@ -868,3 +868,71 @@ func TestFailedCatchUpIsRetried(t *testing.T) {
 	}
 	assert.Equal(t, 1, n, "not sent again")
 }
+
+// While a session is owed a catch-up, a newer live message waits for it,
+// so the older owed messages still arrive first.
+func TestOwedCatchUpKeepsOrder(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	d := &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s8"), 0)) // join point = 2000
+	a := Message{Channel: "C1", TS: "2001.000100", User: "UBR", Text: "older A"}
+	b := Message{Channel: "C1", TS: "2001.000200", User: "UBR", Text: "newer B"}
+	api.history["C1"] = []slack.Message{msg(b.TS, "UBR", b.Text), msg(a.TS, "UBR", a.Text)}
+	d.mu.Lock()
+	d.errs = map[string]error{"s8": errors.New("socket busy")}
+	d.mu.Unlock()
+	l.HandleMessage(ctx, a) // fails: the session is owed a catch-up
+	d.mu.Lock()
+	d.errs = nil
+	d.mu.Unlock()
+	l.HandleMessage(ctx, b) // would succeed, but waits for the owed catch-up
+	assert.Empty(t, d.got, "B does not overtake A")
+	l.RetryBacklogs(ctx)
+	require.Len(t, d.got, 1)
+	assert.Less(t, strings.Index(d.got[0].text, "older A"), strings.Index(d.got[0].text, "newer B"), "oldest first")
+	l.HandleMessage(ctx, Message{Channel: "C1", TS: "2001.000300", User: "UBR", Text: "after"})
+	require.Len(t, d.got, 2, "live delivery resumes once the catch-up is sent")
+}
+
+// Something owed while a catch-up is under way (a queue drop) stays owed
+// after that catch-up settles, instead of being cleared with it.
+func TestOwedDuringCatchUpSurvivesIt(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	api.history["C1"] = []slack.Message{msg("1999.5", "UBR", "context")}
+	d := &heldDeliverer{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	l, err := NewListener(api, d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", filepath.Join(t.TempDir(), "state.json"), zap.NewNop())
+	require.NoError(t, err)
+	done := make(chan struct{})
+	go func() { _ = l.Subscribe(ctx, claudeSub("s9"), 1); close(done) }()
+	<-d.entered        // the catch-up is delivering
+	l.oweCatchUp("s9") // e.g. a live batch dropped from the full queue meanwhile
+	close(d.release)
+	<-done
+	l.mu.Lock()
+	_, owed := l.catchUpOwed["s9"]
+	l.mu.Unlock()
+	assert.True(t, owed, "the later debt is not cleared by the earlier catch-up")
+}
+
+// After a capped catch-up, a queued live message older than what it sent is
+// left to history, not delivered out of order.
+func TestQueuedOlderThanCappedCatchUpIsNotSentLate(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	d := &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0)) // join point = 2000
+	var hist []slack.Message
+	for i := maxRecovery + 4; i >= 0; i-- {
+		hist = append(hist, msg(fmt.Sprintf("%d.000100", 2001+i), "UBR", fmt.Sprintf("m %03d", i)))
+	}
+	api.history["C1"] = hist
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s5"), 0))
+	n := len(d.got)
+	old := Message{Channel: "C1", TS: "2001.000100", User: "UBR", Text: "m 000"} // skipped by the cap
+	l.deliverTo(ctx, l.state.Subscriptions["s5"], []pending{{msg: old}})
+	assert.Len(t, d.got, n, "not delivered after newer ones")
+}
