@@ -425,7 +425,9 @@ func (l *Listener) sessionLock(sessionID string) *sync.Mutex {
 
 // deliverTo pushes the items sub hasn't had yet as one notice, records them
 // and marks each one delivered with a reaction.
-func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pending) {
+// It reports refused when the listener is shutting down and delivered
+// nothing, so the caller can keep what it cannot redo from history.
+func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pending) (refused bool) {
 	// One delivery per session at a time, so live events and recovery cannot
 	// both push the same message.
 	sl := l.sessionLock(sub.SessionID)
@@ -452,7 +454,7 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 	}
 	last := fresh[len(fresh)-1].msg
 	if !l.beginDelivery() {
-		return // shutting down: left unmarked for the next listener
+		return true // shutting down: left unmarked for the next listener
 	}
 	defer l.endDelivery() // after the delivery is marked below
 	method, err := l.Deliverer.Deliver(ctx, sub, clientMessageID(sub.SessionID, last.Channel, last.TS), text)
@@ -479,6 +481,7 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 	for _, it := range fresh {
 		l.react(ctx, it.msg, reactionDelivered)
 	}
+	return false
 }
 
 func (l *Listener) react(ctx context.Context, m Message, name string) {
@@ -539,9 +542,11 @@ func (l *Listener) register(sub *Subscription) (*Subscription, map[string]bool, 
 // a first join, or pending (unacknowledged) messages since the join point.
 func (l *Listener) recover(ctx context.Context, sub *Subscription, channels []string, first map[string]bool, backlog int) {
 	var items []pending
+	var backlogs []string // first-join channels whose backlog was requested
 	for _, ch := range channels {
 		if first[ch] {
 			if backlog > 0 {
+				backlogs = append(backlogs, ch)
 				found, err := l.routedBacklog(ctx, ch, backlog)
 				if err != nil {
 					l.Log.Warn("reading history failed", zap.String("channel", ch), zap.Error(err))
@@ -569,8 +574,18 @@ func (l *Listener) recover(ctx context.Context, sub *Subscription, channels []st
 	if len(items) > maxRecovery {
 		items = items[len(items)-maxRecovery:]
 	}
-	if len(items) > 0 {
-		l.deliverTo(ctx, sub, items)
+	if len(items) > 0 && l.deliverTo(ctx, sub, items) && len(backlogs) > 0 {
+		// Shutting down: the next listener's recovery only reads messages
+		// newer than the join, so keep the requested backlog for it.
+		l.mu.Lock()
+		if l.state.Backlogs == nil {
+			l.state.Backlogs = map[string]int{}
+		}
+		for _, ch := range backlogs {
+			l.state.Backlogs[sub.SessionID+"|"+ch] = backlog
+		}
+		l.saveStateLocked()
+		l.mu.Unlock()
 	}
 }
 
@@ -1393,6 +1408,27 @@ func (l *Listener) RecoverAll(ctx context.Context) {
 	}
 	l.mu.Unlock()
 	for _, sub := range subs {
-		l.recover(ctx, sub, sub.Channels, nil, 0)
+		first, backlog := l.takeBacklogs(sub)
+		l.recover(ctx, sub, sub.Channels, first, backlog)
 	}
+}
+
+// takeBacklogs removes and returns the first-join backlogs a previous
+// listener kept for sub (see recover): the channels to treat as first
+// joined, and the largest backlog asked.
+func (l *Listener) takeBacklogs(sub *Subscription) (map[string]bool, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	first, backlog := map[string]bool{}, 0
+	for _, ch := range sub.Channels {
+		k := sub.SessionID + "|" + ch
+		if n := l.state.Backlogs[k]; n > 0 {
+			first[ch], backlog = true, max(backlog, n)
+			delete(l.state.Backlogs, k)
+		}
+	}
+	if len(first) > 0 {
+		l.saveStateLocked()
+	}
+	return first, backlog
 }

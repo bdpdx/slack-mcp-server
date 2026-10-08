@@ -50,6 +50,9 @@ type State struct {
 	// classified again once a refreshed project view names their agent as
 	// GM (see replayRechecks); kept here so a listener restart keeps them.
 	Rechecks map[string]*Recheck `json:"rechecks,omitempty"`
+	// Backlogs holds, by session|channel, a first-join backlog a stopping
+	// listener could not deliver, for the next listener's recovery to send.
+	Backlogs map[string]int `json:"backlogs,omitempty"`
 }
 
 // Recheck is a message kept for GM classification until Until.

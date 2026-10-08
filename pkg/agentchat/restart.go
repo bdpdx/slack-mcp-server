@@ -23,9 +23,12 @@ import (
 // the shutdown request itself; stopWait bounds the wait for the old
 // listener to exit; probeTimeout bounds one status probe.
 var (
-	shutdownDelay   = 200 * time.Millisecond
-	answerDrain     = 5 * time.Second
-	deliveryDrain   = 5 * time.Second // see waitDeliveries
+	shutdownDelay = 200 * time.Millisecond
+	answerDrain   = 5 * time.Second
+	// deliveryDrain bounds the wait for deliveries in progress (see
+	// waitDeliveries); past it the listener stops anyway, and a delivery
+	// cut off after reaching its session is sent once more by the next.
+	deliveryDrain   = 5 * time.Second
 	shutdownTimeout = 10 * time.Second
 	// stopWait must exceed the daemon's own exit time after a shutdown:
 	// shutdownDelay and deliveryDrain, then up to 5 s for the event loop

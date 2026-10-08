@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/slack-go/slack"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -568,4 +569,48 @@ func TestShutdownStartsNoNewDelivery(t *testing.T) {
 	assert.Empty(t, d.got, "nothing delivered after the fence")
 	assert.False(t, l.state.WasDelivered("s1", "C1", "2000.6"), "left for the next listener")
 	assert.Error(t, l.deliverCohort(ctx, l.state.Subscriptions["s1"], "k", "notice"), "cohort notices wait for the next listener too")
+}
+
+// A watch started after the fence gets its backlog from the next listener,
+// exactly once.
+func TestBacklogAfterFenceGoesToNextListener(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	api.history["C1"] = []slack.Message{msg("1999.5", "UBR", "context before the watch")}
+	path := filepath.Join(t.TempDir(), "state.json")
+	d1 := &fakeDeliverer{}
+	l1, err := NewListener(api, d1, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	l1.Stop = func() {}
+	require.True(t, l1.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+	require.NoError(t, l1.Subscribe(ctx, claudeSub("s2"), 5))
+	assert.Empty(t, d1.got, "refused after the fence")
+
+	d2 := &fakeDeliverer{}
+	l2, err := NewListener(api, d2, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", path, zap.NewNop())
+	require.NoError(t, err)
+	l2.RecoverAll(ctx)
+	require.Len(t, d2.got, 1)
+	assert.Contains(t, d2.got[0].text, "context before the watch")
+	l2.RecoverAll(ctx)
+	assert.Len(t, d2.got, 1, "sent once")
+	assert.Empty(t, l2.state.Backlogs)
+}
+
+// A cohort tick during shutdown sends no notice, leaves it owed for the next
+// listener, and releases its delivery count.
+func TestCohortTickDuringShutdown(t *testing.T) {
+	f := newCohortFixture(t)
+	f.at(2 * time.Hour)
+	f.l.Stop = func() {}
+	require.True(t, f.l.Control(context.Background(), ControlRequest{Op: "shutdown"}).OK)
+	f.tick()
+	assert.Empty(t, f.notices("s2"), "no notice after the fence")
+	f.l.mu.Lock()
+	n := f.l.delivering
+	reg := f.l.state.Cohort[cohortKey("s2", "proj")]
+	f.l.mu.Unlock()
+	assert.Equal(t, 0, n, "the send phase released its count")
+	require.NotNil(t, reg)
+	assert.True(t, reg.CheckpointNotified.IsZero(), "still owed: the next listener sends it")
 }
