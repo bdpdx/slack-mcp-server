@@ -103,6 +103,7 @@ type cli struct {
 	stderr io.Writer
 	bot    *slack.Client
 	user   *slack.Client
+	kill   func() error // stops the home's listener process; nil means SIGTERM it (tests replace it)
 }
 
 const chatUsage = `usage: slack-mcp-server chat [--env-file FILE] COMMAND
@@ -267,6 +268,8 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = c.capabilities()
 	case "whoami":
 		err = c.whoami(ctx)
+	case "listener":
+		err = c.listenerCmd(ctx, rest[1:])
 	case "relay-hook":
 		ctx, cancel := context.WithTimeout(ctx, relayTimeout)
 		defer cancel()

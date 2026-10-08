@@ -538,11 +538,21 @@ func Main(args []string) int {
 		Clipboard: pbcopy,
 	})
 	printSummary(os.Stdout, linkPath, results, errors.Is(err, ErrAborted))
+	code := 0
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "setup:", err)
+		code = 1
+	}
+	st, serr := LoadState(filepath.Join(*repo, ".install-state.json"))
+	if serr != nil {
+		fmt.Fprintln(os.Stderr, "setup: listeners were not restarted:", serr)
 		return 1
 	}
-	return 0
+	if RestartListeners(os.Stdout, ExecRunner{}, linkPath, DiscoverHomes(user, st)) {
+		fmt.Fprintln(os.Stderr, "setup: a listener restart failed; see Listeners above")
+		code = 1
+	}
+	return code
 }
 
 // printSummary reports each home, then the remaining manual steps when at
