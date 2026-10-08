@@ -824,3 +824,47 @@ func TestBacklogBackoffIsPerChannel(t *testing.T) {
 	_, kept := l.backlogRetry["s6|C2"]
 	assert.False(t, kept, "unsubscribing clears its backoff")
 }
+
+// A catch-up (or live delivery) that fails is owed and sent by the sweep,
+// once, instead of waiting for the next restart.
+func TestFailedCatchUpIsRetried(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	d := &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0)) // the channel's join point = 2000
+	api.history["C1"] = []slack.Message{msg("2001.5", "UBR", "missed while away")}
+	d.mu.Lock()
+	d.errs = map[string]error{"s7": errors.New("socket busy")}
+	d.mu.Unlock()
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s7"), 0))
+	l.mu.Lock()
+	_, owed := l.catchUpOwed["s7"]
+	l.mu.Unlock()
+	require.True(t, owed, "the failed catch-up is owed")
+
+	d.mu.Lock()
+	d.errs = nil
+	d.mu.Unlock()
+	l.RetryBacklogs(ctx)
+	var got []string
+	for _, g := range d.got {
+		if g.session == "s7" {
+			got = append(got, g.text)
+		}
+	}
+	require.Len(t, got, 1)
+	assert.Contains(t, got[0], "missed while away")
+	l.mu.Lock()
+	_, owed = l.catchUpOwed["s7"]
+	l.mu.Unlock()
+	assert.False(t, owed, "settled")
+	l.RetryBacklogs(ctx)
+	n := 0
+	for _, g := range d.got {
+		if g.session == "s7" {
+			n++
+		}
+	}
+	assert.Equal(t, 1, n, "not sent again")
+}

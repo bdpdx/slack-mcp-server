@@ -76,7 +76,7 @@ func FormatCatchUp(notices []Notice, part, parts, start, total, skipped int) str
 		head = fmt.Sprintf("[slack-agent-chat] Catch-up: %d messages, oldest first, in %d parts (part %d of %d: messages %d–%d of %d).", total, parts, part, parts, start, end, total)
 	}
 	if part < parts {
-		head += fmt.Sprintf(" More follow in the next notices. Do not act on any message until you have read all %d: a later one may change or cancel an earlier one.", total)
+		head += fmt.Sprintf(" More follow in the next notices. Do not act on any message until you have read all %d: a later one may change or cancel an earlier one. If the remaining parts have not arrived within a few minutes, read the rest from the channel history instead.", total)
 	} else if parts > 1 {
 		head += fmt.Sprintf(" This is the last part: now act on all %d, with later messages taking precedence over earlier ones.", total)
 	} else {

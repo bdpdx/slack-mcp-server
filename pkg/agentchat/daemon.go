@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/slack-go/slack"
@@ -167,6 +168,7 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 		}
 	}()
 
+	var retrying atomic.Bool // a RetryBacklogs pass is running
 	go func() {
 		idleSince, lastSweep, lastCohort := time.Now(), time.Now(), time.Now()
 		tick := time.NewTicker(5 * time.Second)
@@ -178,7 +180,14 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 			case now := <-tick.C:
 				if now.Sub(lastSweep) >= sweepInterval {
 					l.Sweep(ctx)
-					l.RetryBacklogs(ctx)
+					// Off the ticker: a slow retry must not hold up the
+					// approval sweep or cohort deadlines.
+					if retrying.CompareAndSwap(false, true) {
+						go func() {
+							defer retrying.Store(false)
+							l.RetryBacklogs(ctx)
+						}()
+					}
 					lastSweep = now
 				}
 				l.SweepApprovals(ctx)

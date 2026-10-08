@@ -76,6 +76,7 @@ type Listener struct {
 	queued        int                       // deliveries waiting on those queues (under mu)
 	delivering    int                       // deliveries in progress, until marked (under mu)
 	backlogRetry  map[string]backlogRetry   // kept backlogs' retry backoff by session|channel (under mu)
+	catchUpOwed   map[string]backlogRetry   // sessions whose catch-up failed partway, with retry backoff (under mu)
 	approvals     map[string]*approval      // approval-hook requests by approval ID
 	closing       bool                      // shutting down: records no new answer (set under mu)
 	inflight      int                       // restart notes and redraws still being posted (under mu)
@@ -321,6 +322,7 @@ func (l *Listener) dispatch(ctx context.Context, sub *Subscription, items []pend
 		l.queued++
 	default:
 		l.Log.Warn("delivery queue full; message left for catch-up", zap.String("session", sub.SessionID))
+		l.oweCatchUpLocked(sub.SessionID)
 	}
 }
 
@@ -445,7 +447,28 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 	sl := l.sessionLock(sub.SessionID)
 	sl.Lock()
 	defer sl.Unlock()
-	return l.deliverLocked(ctx, sub, l.freshItems(sub, items), catchUp{})
+	o := l.deliverLocked(ctx, sub, l.freshItems(sub, items), catchUp{})
+	if o == deliverFailed {
+		l.oweCatchUp(sub.SessionID) // the next sweep sends it with whatever else is pending
+	}
+	return o
+}
+
+// oweCatchUp marks session as owed a catch-up, which RetryBacklogs sends
+// (with backoff) until one succeeds.
+func (l *Listener) oweCatchUp(session string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.oweCatchUpLocked(session)
+}
+
+func (l *Listener) oweCatchUpLocked(session string) {
+	if l.catchUpOwed == nil {
+		l.catchUpOwed = map[string]backlogRetry{}
+	}
+	if _, ok := l.catchUpOwed[session]; !ok {
+		l.catchUpOwed[session] = backlogRetry{}
+	}
 }
 
 // catchUp numbers one part of a catch-up for its notice header: part of
@@ -634,6 +657,7 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 	}
 	var asked, newer []pending // the requested backlogs, and messages since the join
 	readFailed := false        // a kept backlog's history read failed: keep it to retry
+	sinceFailed := false       // reading messages since a join failed
 	seen := map[string]bool{}
 	add := func(to *[]pending, p pending) {
 		if k := p.msg.Channel + "|" + p.msg.TS; !seen[k] {
@@ -668,6 +692,7 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 		if err != nil {
 			l.Log.Warn("reading history failed", zap.String("channel", ch), zap.Error(err))
 			readFailed = readFailed || (kept && first[ch])
+			sinceFailed = true
 			continue
 		}
 		for _, m := range msgs {
@@ -708,6 +733,17 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 	case len(backlogs) > 0:
 		l.clearBacklogs(sub.SessionID, backlogs) // settled
 	}
+	// A catch-up that failed partway (the agent may be waiting for the rest
+	// before acting) is retried soon by RetryBacklogs; a shutdown refusal is
+	// left to the next listener, which catches up anyway.
+	l.mu.Lock()
+	switch {
+	case outcome == deliverFailed || sinceFailed:
+		l.oweCatchUpLocked(sub.SessionID)
+	case outcome != deliverRefused:
+		delete(l.catchUpOwed, sub.SessionID)
+	}
+	l.mu.Unlock()
 }
 
 // backlogRetry backs off retries of one kept backlog.
@@ -751,7 +787,25 @@ func (l *Listener) RetryBacklogs(ctx context.Context) {
 			jobs = append(jobs, j)
 		}
 	}
+	var owed []*Subscription
+	for session, r := range l.catchUpOwed {
+		if sub := l.state.Subscriptions[session]; sub == nil {
+			delete(l.catchUpOwed, session)
+		} else if !now.Before(r.next) {
+			owed = append(owed, snapshot(sub))
+		}
+	}
 	l.mu.Unlock()
+	for _, sub := range owed {
+		l.recover(ctx, sub, sub.Channels, nil, 0)
+		l.mu.Lock()
+		if r, ok := l.catchUpOwed[sub.SessionID]; ok {
+			r.tries++
+			r.next = time.Now().Add(min(backlogRetryMin<<min(r.tries-1, 6), backlogRetryMax))
+			l.catchUpOwed[sub.SessionID] = r
+		}
+		l.mu.Unlock()
+	}
 	for _, j := range jobs {
 		l.recoverKept(ctx, j.sub, j.channels, j.first, j.sizes, true)
 		l.mu.Lock()
