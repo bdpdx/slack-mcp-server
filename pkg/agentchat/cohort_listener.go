@@ -719,6 +719,17 @@ func (l *Listener) cohortTick(ctx context.Context) {
 
 	l.checkApprovalWaits(ctx, regs, subs, now)
 
+	// The whole send-and-mark phase counts as one delivery in progress, so a
+	// shutdown waits until the notices sent here are also marked (or sends
+	// none once it has begun): the next listener neither repeats nor drops
+	// them.
+	if len(sends) > 0 {
+		if l.beginDelivery() {
+			defer l.endDelivery() // runs after the mark-and-save below releases l.mu
+		} else {
+			sends = nil
+		}
+	}
 	delivered := map[int]bool{}
 	for i, s := range sends {
 		// A watch retired since the snapshot (an UNBLOCKED notice this

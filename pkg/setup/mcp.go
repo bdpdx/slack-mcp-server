@@ -52,6 +52,10 @@ func commandEnv(base, env []string) []string {
 // agent's CLI is not installed it returns the command to run later. The
 // default Claude home (~/.claude) runs claude without CLAUDE_CONFIG_DIR; any
 // other home sets it, and Codex always gets CODEX_HOME.
+//
+// Running sessions keep the MCP server they started with. Its command line
+// depends only on bin and the home's env path, so setup marks a home Stale
+// when bin changes; a change to serve or mcpEnv must mark it too.
 func RegisterMCP(r Runner, kind, home, userHome, bin string) (string, error) {
 	serve := []string{"--", bin, "--transport", "stdio", "--env-file", EnvPath(home)}
 	var name string

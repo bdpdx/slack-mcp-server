@@ -16,6 +16,7 @@ type Result struct {
 	Installed bool     // the home was set up completely
 	Fresh     bool     // set up new or reinstalled (new tokens), not just updated
 	Stale     bool     // running sessions keep old hooks or MCP settings until they restart
+	Hooks     bool     // the hooks changed (Codex asks to trust them in its next session)
 	Changed   []string // files written or registrations made
 	Manual    []string // commands the user must run
 	Notes     []string // anything else to tell the user

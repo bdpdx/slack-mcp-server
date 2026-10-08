@@ -595,7 +595,7 @@ func printSummary(w io.Writer, bin string, results []Result, aborted bool) {
 		if r.Installed && !r.Fresh && r.Stale {
 			stale = append(stale, r.Home)
 		}
-		codex = codex || (r.Installed && (r.Fresh || r.Stale) && r.Type == TypeCodex)
+		codex = codex || (r.Installed && (r.Fresh || r.Hooks) && r.Type == TypeCodex)
 	}
 	if aborted {
 		fmt.Fprintln(w, "\nSetup stopped before it finished. Run ./install.sh again to set up the remaining homes.")
@@ -619,10 +619,8 @@ func printSummary(w io.Writer, bin string, results []Result, aborted bool) {
 	if len(stale) > 0 {
 		steps = append(steps, fmt.Sprintf("Restart agent sessions in %s: setup changed hooks or Slack MCP settings, which running sessions read only when they start.", strings.Join(stale, ", ")))
 	}
-	if fresh || len(stale) > 0 {
-		if codex {
-			steps = append(steps, "Trust the hooks when Codex asks.")
-		}
+	if codex {
+		steps = append(steps, "Trust the hooks when Codex asks.")
 	}
 	if fresh {
 		steps = append(steps, "Tell the agent: start a project chat called <name>.")

@@ -191,7 +191,7 @@ func InstallCodex(home, userHome, bin string, r Runner, p Prompter, now time.Tim
 		return res, err
 	} else if wrote {
 		res.Changed = append(res.Changed, hooksPath)
-		res.Stale = true // Codex reads (and asks to trust) hooks when a session starts
+		res.Stale, res.Hooks = true, true // Codex reads (and asks to trust) hooks when a session starts
 	}
 	if autoReview {
 		res.Notes = append(res.Notes, "approval requests stay with Codex's auto_review (no Slack approval hook)")
