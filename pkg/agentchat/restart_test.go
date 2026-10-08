@@ -213,29 +213,6 @@ func TestReplaceWithRetriesStart(t *testing.T) {
 	assert.Contains(t, err.Error(), "RECOVER")
 }
 
-// Shutdown waits for a hook to collect an answer the owner already gave.
-func TestShutdownWaitsForAnswers(t *testing.T) {
-	ctx := context.Background()
-	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
-	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "a", Channel: "C1", TS: "2000.1"}).OK)
-	l.HandleInteraction(clickOn("UBR", decisionAllow, "a", "C1", "2000.1", "BCL"))
-	stopped := make(chan struct{})
-	l.Stop = func() { close(stopped) }
-	require.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
-	select {
-	case <-stopped:
-		t.Fatal("stopped while an answer was waiting for its hook")
-	case <-time.After(500 * time.Millisecond):
-	}
-	d, _ := takeApproval(t, l, "a")
-	assert.Equal(t, decisionAllow, d)
-	select {
-	case <-stopped:
-	case <-time.After(2 * time.Second):
-		t.Fatal("never stopped after the answer was collected")
-	}
-}
-
 // A listener that accepts the shutdown but never exits is signalled after
 // the wait; one that exits just before the signal is not a failure.
 func TestAcceptedShutdownButStillRunning(t *testing.T) {
@@ -276,36 +253,72 @@ func TestStaleSocketIsNoListener(t *testing.T) {
 	assert.True(t, c.waitStopped(context.Background()))
 }
 
-// An answer given during the shutdown's reply delay is accepted and then
-// collected before the listener stops; once fenced, a click is not
-// recorded and the owner is asked to click again.
-func TestShutdownFencesLateAnswers(t *testing.T) {
+// Shutdown waits for hooks to collect answers the owner already gave, and
+// refuses, leaving the listener running and recording, if they stay
+// uncollected.
+func TestShutdownDrainsOrRefuses(t *testing.T) {
 	ctx := context.Background()
-	api := newFakeSlack()
-	l := newTestListener(t, api, &fakeDeliverer{})
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
 	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "a", Channel: "C1", TS: "2000.1"}).OK)
+	l.HandleInteraction(clickOn("UBR", decisionDeny, "a", "C1", "2000.1", "BCL"))
 	stopped := make(chan struct{})
 	l.Stop = func() { close(stopped) }
-	require.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
-	time.Sleep(shutdownDelay / 2)
-	l.HandleInteraction(clickOn("UBR", decisionDeny, "a", "C1", "2000.1", "BCL"))
+	done := make(chan ControlResponse, 1)
+	go func() { done <- l.Control(ctx, ControlRequest{Op: "shutdown"}) }()
 	select {
-	case <-stopped:
-		t.Fatal("stopped with an accepted denial its hook has not collected")
-	case <-time.After(shutdownDelay + 300*time.Millisecond):
+	case <-done:
+		t.Fatal("shutdown replied while an accepted denial was uncollected")
+	case <-time.After(300 * time.Millisecond):
 	}
 	d, _ := takeApproval(t, l, "a")
 	assert.Equal(t, decisionDeny, d)
+	assert.True(t, (<-done).OK)
 	select {
 	case <-stopped:
 	case <-time.After(2 * time.Second):
 		t.Fatal("never stopped")
 	}
 
-	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "b", Channel: "C1", TS: "2000.5"}).OK)
-	l.HandleInteraction(clickOn("UBR", decisionAllow, "b", "C1", "2000.5", "BCL"))
+	defer func(d time.Duration) { answerDrain = d }(answerDrain)
+	answerDrain = 200 * time.Millisecond
+	l = newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	l.Stop = func() { t.Fatal("stopped with an accepted answer still uncollected") }
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "b", Channel: "C1", TS: "2000.1"}).OK)
+	l.HandleInteraction(clickOn("UBR", decisionDeny, "b", "C1", "2000.1", "BCL"))
+	resp := l.Control(ctx, ControlRequest{Op: "shutdown"})
+	assert.False(t, resp.OK, "refused: the restart fails instead of losing the answer")
+	assert.Contains(t, resp.Error, "answers are waiting")
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "c", Channel: "C1", TS: "2000.2"}).OK)
+	l.HandleInteraction(clickOn("UBR", decisionDeny, "c", "C1", "2000.2", "BCL"))
+	d, _ = takeApproval(t, l, "c")
+	assert.Equal(t, decisionDeny, d, "a refused shutdown leaves the listener recording")
 	d, _ = takeApproval(t, l, "b")
-	assert.Equal(t, "", d, "after the fence a click is not recorded")
+	assert.Equal(t, decisionDeny, d, "and the answer it protected is still there")
+}
+
+// Once fenced, nothing is recorded or marked: a click gets a click-again
+// note, and a reply, even one already past HandleMessage's entry check, is
+// neither taken as an answer nor marked delivered, so the next listener
+// recovers it.
+func TestShutdownFenceRecordsNothing(t *testing.T) {
+	ctx := context.Background()
+	api, del := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListener(t, api, del)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0))
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "a", Channel: "C1", TS: "2000.1"}).OK)
+	l.Stop = func() {}
+	require.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+
+	l.HandleInteraction(clickOn("UBR", decisionDeny, "a", "C1", "2000.1", "BCL"))
+	reply := Message{Channel: "C1", TS: "2000.2", ThreadTS: "2000.1", User: "UBR", Text: "no, wrong table"}
+	assert.True(t, l.approvalReply(reply), "a reply past the entry check is held back from delivery")
+	l.markConsumed(reply)
+	l.HandleMessage(ctx, Message{Channel: "C1", TS: "2000.3", User: "UBR", Text: "hello"})
+	d, _ := takeApproval(t, l, "a")
+	assert.Equal(t, "", d, "neither the click nor the reply was recorded")
+	assert.False(t, l.state.WasDelivered("s1", "C1", "2000.2"), "left unmarked for recovery")
+	assert.False(t, l.state.WasDelivered("s1", "C1", "2000.3"))
+	assert.Empty(t, del.got)
 	assert.Eventually(t, func() bool {
 		for _, p := range api.posts() {
 			if strings.Contains(p, "Click again") {

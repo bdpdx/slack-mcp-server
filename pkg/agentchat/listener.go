@@ -355,6 +355,9 @@ func (l *Listener) consumeRelay(sessionID string, m Message) bool {
 		return false
 	}
 	delete(l.relays, key)
+	if l.closing {
+		return true // not delivered, and left unmarked for the next listener
+	}
 	l.state.MarkDelivered(sessionID, m.Channel, m.TS, now)
 	if err := l.state.Save(l.StateFile); err != nil {
 		l.Log.Error("saving state failed", zap.Error(err))
@@ -414,7 +417,7 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 	l.Log.Info("delivered", zap.String("session", sub.SessionID), zap.String("kind", sub.Kind), zap.String("method", method), zap.Int("messages", len(fresh)))
 	l.mu.Lock()
 	for _, it := range fresh {
-		l.state.MarkDelivered(sub.SessionID, it.msg.Channel, it.msg.TS, l.Now())
+		l.state.MarkDelivered(sub.SessionID, it.msg.Channel, it.msg.TS, l.Now()) // delivered, so marked even while closing
 	}
 	l.state.Prune(l.Now())
 	err = l.state.Save(l.StateFile)
@@ -727,12 +730,15 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 		// After the reply is written, and once hooks have collected answers
 		// the owner already gave (an answer lives only in memory): state is
 		// saved as it changes, so nothing else needs flushing.
+		// Fence first: wait for hooks to collect every answer already given,
+		// then stop recording new ones. If answers are still uncollected at
+		// the deadline, refuse: the restart fails visibly instead of losing
+		// them with the listener's memory.
+		if !l.closeForShutdown(time.Now().Add(answerDrain)) {
+			return ControlResponse{Error: "answers are waiting for their hooks; try the restart again shortly"}
+		}
 		l.Log.Info("shutting down on request")
-		go func() {
-			time.Sleep(shutdownDelay)
-			l.closeForShutdown(time.Now().Add(answerDrain))
-			l.Stop()
-		}()
+		time.AfterFunc(shutdownDelay, l.Stop) // after the reply is written
 		return ControlResponse{OK: true, Version: version.Version}
 	case "approval-end":
 		l.EndApproval(req.Approval, req.Text)
@@ -964,6 +970,12 @@ func (l *Listener) HandleInteraction(payload []byte) {
 func (l *Listener) approvalReply(m Message) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.closing {
+		// Shutting down: record no answer. Report it consumed so it is not
+		// delivered either; markConsumed leaves it unmarked, and the next
+		// listener's recovery delivers it.
+		return true
+	}
 	var target *approval
 	var at *approvalMsg // the copy answered
 	explicit := true
@@ -1028,6 +1040,9 @@ func (l *Listener) dropChannel(channel string) {
 func (l *Listener) markConsumed(m Message) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.closing {
+		return // the answer was not recorded; the next listener recovers the message
+	}
 	for _, sub := range l.state.Watchers(m.Channel) {
 		l.state.MarkDelivered(sub.SessionID, m.Channel, m.TS, l.Now())
 	}
@@ -1099,16 +1114,20 @@ func (l *Listener) EndApproval(id, owed string) {
 // closeForShutdown waits, until deadline, for hooks to collect every answer
 // the owner already gave, then fences: in the same critical section that
 // finds nothing waiting, it stops recording messages and answers, so none
-// can be accepted and then lost with the listener's memory.
-func (l *Listener) closeForShutdown(deadline time.Time) {
+// can be accepted and then lost with the listener's memory. It reports
+// false, without fencing, when answers are still waiting at the deadline.
+func (l *Listener) closeForShutdown(deadline time.Time) bool {
 	for {
 		l.mu.Lock()
-		if !l.answersWaitingLocked() || !time.Now().Before(deadline) {
+		if !l.answersWaitingLocked() {
 			l.closing = true
 			l.mu.Unlock()
-			return
+			return true
 		}
 		l.mu.Unlock()
+		if !time.Now().Before(deadline) {
+			return false
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }
