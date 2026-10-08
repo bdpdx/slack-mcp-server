@@ -95,6 +95,7 @@ func TestSnapshotSessionFiles(t *testing.T) {
 	home := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(home, "config.toml"), []byte("a = 1\n"), 0o600))
 	before := snapshotSessionFiles(home)
+	assert.Contains(t, before, "rules/default.rules", "Codex's execpolicy file is compared too")
 	require.NoError(t, os.WriteFile(filepath.Join(home, "config.toml"), []byte("a = 2\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(home, "config.toml"), []byte("a = 1\n"), 0o600))
 	after := snapshotSessionFiles(home)

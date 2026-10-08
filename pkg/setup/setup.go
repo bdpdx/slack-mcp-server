@@ -252,9 +252,9 @@ func processHome(ctx context.Context, o Options, st *State, h Home) (Result, boo
 	for name, was := range before {
 		if !sameContent(name, was, after[name]) {
 			res.Stale = true
-			if name == "hooks.json" {
-				res.Hooks = true // Codex asks to trust changed hooks
-			}
+		}
+		if name == "hooks.json" && !bytes.Equal(was, after[name]) {
+			res.Hooks = true // Codex asks to trust hooks whose file changed at all
 		}
 	}
 	res.Notes = append(res.Notes, notes...)
@@ -650,7 +650,7 @@ func printSummary(w io.Writer, bin string, results []Result, aborted bool) {
 
 // sessionFiles are the files in a home that agent sessions read when they
 // start: hooks and MCP settings.
-var sessionFiles = []string{"settings.json", "hooks.json", "config.toml"}
+var sessionFiles = []string{"settings.json", "hooks.json", "config.toml", "rules/default.rules"}
 
 // snapshotSessionFiles reads home's session files (nil for a missing one).
 func snapshotSessionFiles(home string) map[string][]byte {
