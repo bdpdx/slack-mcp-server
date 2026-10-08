@@ -707,12 +707,9 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 	case "approval-watch":
 		l.WatchApproval(req.Approval, req.Channel, req.TS, req.Text)
 	case "approval":
-		decision, reason, hint, known, ended := l.takeApproval(req.Approval)
-		resp := ControlResponse{OK: true, Decision: decision, Text: reason, Unknown: !known, Ended: ended}
-		if hint != nil {
-			resp.Channel, resp.TS = hint.channel, hint.ts
-		}
-		return resp
+		p := l.takeApproval(req.Approval)
+		return ControlResponse{OK: true, Decision: p.decision, Text: p.reason, Unknown: p.copies == 0, Ended: p.ended,
+			Channel: p.hintChannel, TS: p.hintTS, Copies: p.copies}
 	case "approval-end":
 		l.EndApproval(req.Approval, req.Text)
 	case "cohort-register", "cohort-leave", "cohort-duty", "cohort-checkpoint", "cohort-status":
@@ -743,7 +740,7 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 type approval struct {
 	msgs             []approvalMsg // the request's copies, as the hook registers them
 	decision, reason string        // "" until answered
-	hint             *approvalMsg  // the copy where the owner typed an allow word, which cannot approve
+	hint             *approvalMsg  // the copy where the owner typed an allow word, which cannot approve; read only under l.mu
 	early            []click       // clicks on copies not registered yet
 	at               time.Time
 	text             string    // the request as posted, to redraw it once it ends
@@ -984,38 +981,45 @@ func (l *Listener) markConsumed(m Message) {
 // with its reason, decisionHint once after the owner typed an allow word, or
 // "" while unanswered.
 func (l *Listener) TakeApproval(id string) (decision, reason string) {
-	decision, reason, _, _, _ = l.takeApproval(id)
-	return decision, reason
+	t := l.takeApproval(id)
+	return t.decision, t.reason
 }
 
-// takeApproval is TakeApproval that also reports whether the request is
-// known (registered) to this listener, and whether it has ended: an ended
-// request never hands out an answer, so a hook that resumes late learns it
-// can decide nothing. With decisionHint, hint is the copy to answer in.
-func (l *Listener) takeApproval(id string) (decision, reason string, hint *approvalMsg, known, ended bool) {
+// approvalAnswer is one hook poll's answer from takeApproval.
+type approvalAnswer struct {
+	decision, reason    string
+	hintChannel, hintTS string // with decisionHint: the copy to answer in
+	copies              int    // copies registered; fewer than the hook posted means some need registering again
+	ended               bool
+}
+
+// takeApproval is TakeApproval that also reports how many copies of the
+// request are registered with this listener (none: it restarted), and
+// whether it has ended: an ended request never hands out an answer, so a
+// hook that resumes late learns it can decide nothing.
+func (l *Listener) takeApproval(id string) approvalAnswer {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	a := l.approvals[id]
 	if a == nil {
-		return "", "", nil, false, false
+		return approvalAnswer{}
 	}
 	a.polled = l.Now()
-	known = len(a.msgs) > 0
+	p := approvalAnswer{copies: len(a.msgs)}
 	if a.ended {
-		return "", "", nil, known, true
+		p.ended = true
+		return p
 	}
 	switch {
 	case a.decision == decisionTaken:
-		return "", "", nil, known, false
 	case a.decision != "":
-		decision, reason = a.decision, a.reason
+		p.decision, p.reason = a.decision, a.reason
 		a.decision = decisionTaken // keep the entry so later replies stay out of the session
-		return decision, reason, nil, known, false
 	case a.hint != nil:
-		hint, a.hint = a.hint, nil
-		return decisionHint, "", hint, known, false
+		p.decision, p.hintChannel, p.hintTS = decisionHint, a.hint.channel, a.hint.ts
+		a.hint = nil
 	}
-	return "", "", nil, known, false
+	return p
 }
 
 // EndApproval records that request id's hook finished. owed is the outcome

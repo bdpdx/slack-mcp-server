@@ -61,6 +61,9 @@ type ControlResponse struct {
 	// Unavailable marks a cohort-claim-check refusal for missing evidence
 	// (an unreadable lookup), as opposed to a definite no.
 	Unavailable bool `json:"unavailable,omitempty"`
+	// Copies counts an "approval" request's copies registered with the
+	// listener; a hook that posted more registers them again.
+	Copies int `json:"copies,omitempty"`
 	// Unknown marks an "approval" poll for a request this listener has no
 	// record of (it restarted): the hook registers its message again.
 	Unknown bool `json:"unknown,omitempty"`

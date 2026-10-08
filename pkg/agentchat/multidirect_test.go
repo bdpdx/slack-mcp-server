@@ -37,26 +37,32 @@ func TestApprovalAcrossDirectChannels(t *testing.T) {
 
 	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
 	watch(l, "a")
-	l.HandleInteraction(clickOn("UBR", decisionAllow, "a", "C2", "3000.1", "BCL"))
 	l.HandleInteraction(clickOn("UBR", decisionDeny, "a", "C1", "2000.1", "BCL"))
+	l.HandleInteraction(clickOn("UBR", decisionAllow, "a", "C2", "3000.1", "BCL"))
 	d, _ := takeApproval(t, l, "a")
-	assert.Equal(t, decisionAllow, d, "a click on the second copy counts; the first click wins")
+	assert.Equal(t, decisionDeny, d, "the first copy stays live after a second registers; the first click wins")
+
+	l = newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	watch(l, "b")
+	l.HandleInteraction(clickOn("UBR", decisionAllow, "b", "C2", "3000.1", "BCL"))
+	d, _ = takeApproval(t, l, "b")
+	assert.Equal(t, decisionAllow, d, "a click on the second copy counts")
 
 	api, del := newFakeSlack(), &fakeDeliverer{}
 	l = newTestListener(t, api, del)
 	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0))
 	watch(l, "t")
-	l.HandleMessage(ctx, Message{Channel: "C2", TS: "3000.2", ThreadTS: "3000.1", User: "UBR", Text: "no, wrong table"})
+	l.HandleMessage(ctx, Message{Channel: "C1", TS: "2000.2", ThreadTS: "2000.1", User: "UBR", Text: "no, wrong table"})
 	d, r := takeApproval(t, l, "t")
-	assert.Equal(t, decisionDeny, d, "a thread reply on the second copy answers")
+	assert.Equal(t, decisionDeny, d, "a thread reply on the first copy answers")
 	assert.Equal(t, "wrong table", r)
 	assert.Empty(t, del.got)
 
 	l = newTestListener(t, newFakeSlack(), &fakeDeliverer{})
 	watch(l, "c")
-	assert.True(t, l.approvalReply(Message{Channel: "C2", TS: "3000.3", User: "UBR", Text: "terminal"}))
+	assert.True(t, l.approvalReply(Message{Channel: "C1", TS: "2000.3", User: "UBR", Text: "terminal"}))
 	d, _ = takeApproval(t, l, "c")
-	assert.Equal(t, decisionTerminal, d, "a channel reply beside the second copy answers")
+	assert.Equal(t, decisionTerminal, d, "a channel reply beside the first copy answers")
 }
 
 // A click can reach the listener before the hook registers that copy; it
@@ -122,4 +128,18 @@ func TestAskHookReasonSeveralChannels(t *testing.T) {
 	assert.True(t, strings.HasPrefix(got, "Question sent to Slack: #alpha__brian_claude, #beta__brian_claude. Answer it there.\n"), got)
 	assert.Contains(t, got, "#alpha__brian_claude (ts 1.2)")
 	assert.Contains(t, got, "#beta__brian_claude (ts 3.4)")
+}
+
+// The poll reports how many copies are registered, so a hook whose
+// registration of one copy failed registers it again.
+func TestApprovalPollCountsCopies(t *testing.T) {
+	ctx := context.Background()
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "p", Channel: "C1", TS: "2000.1"}).OK)
+	resp := l.Control(ctx, ControlRequest{Op: "approval", Approval: "p"})
+	assert.False(t, resp.Unknown)
+	assert.Equal(t, 1, resp.Copies)
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "p", Channel: "C2", TS: "3000.1"}).OK)
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "p", Channel: "C2", TS: "3000.1"}).OK)
+	assert.Equal(t, 2, l.Control(ctx, ControlRequest{Op: "approval", Approval: "p"}).Copies, "registering a copy again adds nothing")
 }

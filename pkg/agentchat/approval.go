@@ -259,14 +259,18 @@ func (c *cli) waitForApproval(ctx context.Context, posted []postedMsg, id, text,
 		case <-tick.C:
 		}
 		resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval", Approval: id})
+		if err == nil && !resp.Ended && (resp.Unknown || (resp.Copies > 0 && resp.Copies < len(posted))) {
+			// The listener restarted, or registering a copy failed: register
+			// every copy again (one it has already adds nothing). A listener
+			// too old to count copies reports none and is left alone.
+			for _, p := range posted {
+				_, _ = SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval-watch", Approval: id, Channel: p.channel, TS: p.ts, Text: text})
+			}
+		}
 		switch {
 		case err != nil:
 		case resp.Ended:
 			return decisionEnded, ""
-		case resp.Unknown:
-			for _, p := range posted {
-				_, _ = SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval-watch", Approval: id, Channel: p.channel, TS: p.ts, Text: text})
-			}
 		case resp.Decision == "":
 		case resp.Decision == decisionHint:
 			channel, ts := posted[0].channel, posted[0].ts
