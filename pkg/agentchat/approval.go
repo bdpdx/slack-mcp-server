@@ -91,9 +91,7 @@ func classifyApprovalReply(text string) (decision, reason string, explicit bool)
 // approvalButton is a button answering request id with decision. Rule
 // confirm buttons carry the rule's hash in their value ("id|hash").
 func approvalButton(id, decision, label, style string) *slack.ButtonBlockElement {
-	if len(label) > 75 {
-		label = label[:72] + "…"
-	}
+	label = buttonLabel(label)
 	b := slack.NewButtonBlockElement(approvalActionPrefix+decision, id, slack.NewTextBlockObject(slack.PlainTextType, label, false, false))
 	if style != "" {
 		b.Style = slack.Style(style)
@@ -119,7 +117,7 @@ func approvalBlocks(text, unsafe, id string, wait time.Duration, opt approvalOpt
 	if unsafe == "" {
 		buttons = append(buttons, approvalButton(id, decisionAllow, "Allow", "primary"))
 		if len(opt.similar) > 0 {
-			buttons = append(buttons, approvalButton(id, decisionAllowSimilar, "Allow similar", ""))
+			buttons = append(buttons, approvalButton(id, decisionAllowSimilar, similarLabel, ""))
 			note = "_Allow similar_ also adds " + opt.similarLabel + ". " + note
 		}
 		if opt.rules {
@@ -145,16 +143,17 @@ func approvalBlocks(text, unsafe, id string, wait time.Duration, opt approvalOpt
 func ruleConfirmBlocks(text, id string, rule allowRule, wait time.Duration) []slack.Block {
 	v := id + "|" + rule.hash()
 	r := rule.String()
-	prefix := "Allow + add"
 	warn := ""
 	if rule.broad() {
-		prefix = "Yes, allow + add BROAD"
 		warn = " *This is broad:* it allows every use of " + slackEscaper.Replace(rule.Tool) + "."
 	}
+	// Allow once stays the default (green) choice: anyone holding the
+	// owner's token can propose a rule, so a rule must be chosen on purpose.
 	buttons := []slack.BlockElement{
-		approvalButton(v, decisionRuleSession, prefix+" "+r+" this session", "primary"),
-		approvalButton(v, decisionRuleLocal, prefix+" "+r+" this project", ""),
-		approvalButton(v, decisionRuleUser, prefix+" "+r+" all projects", ""),
+		approvalButton(id, decisionAllow, "Allow once", "primary"),
+		approvalButton(v, decisionRuleSession, ruleButtonLabel(rule, decisionRuleSession), ""),
+		approvalButton(v, decisionRuleLocal, ruleButtonLabel(rule, decisionRuleLocal), ""),
+		approvalButton(v, decisionRuleUser, ruleButtonLabel(rule, decisionRuleUser), ""),
 		approvalButton(id, decisionDeny, "Deny", "danger"),
 		approvalButton(id, decisionTerminal, "Answer in terminal", ""),
 	}

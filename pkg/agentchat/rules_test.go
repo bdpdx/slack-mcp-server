@@ -126,15 +126,19 @@ func TestListenerRuleFlow(t *testing.T) {
 	rule, _ := parseAllowRule("git push")
 
 	old, _ := parseAllowRule("git status")
-	l.HandleInteraction(clickOn("UBR", decisionRuleLocal, "r1|"+old.hash(), "C1", "2000.1", "BCL"))
+	l.HandleInteraction(clickLabeled("UBR", decisionRuleLocal, "r1|"+old.hash(), "C1", "2000.1", ruleButtonLabel(old, decisionRuleLocal)))
 	d, _ := takeApproval(t, l, "r1")
 	assert.Equal(t, "", d, "a button drawn for another rule grants nothing")
 
-	l.HandleInteraction(clickOn("UMI", decisionRuleLocal, "r1|"+rule.hash(), "C1", "2000.1", "BCL"))
+	l.HandleInteraction(clickLabeled("UMI", decisionRuleLocal, "r1|"+rule.hash(), "C1", "2000.1", ruleButtonLabel(rule, decisionRuleLocal)))
 	d, _ = takeApproval(t, l, "r1")
 	assert.Equal(t, "", d, "only the owner")
 
-	l.HandleInteraction(clickOn("UBR", decisionRuleLocal, "r1|"+rule.hash(), "C1", "2000.1", "BCL"))
+	l.HandleInteraction(clickLabeled("UBR", decisionRuleLocal, "r1|"+rule.hash(), "C1", "2000.1", "Allow"))
+	d, _ = takeApproval(t, l, "r1")
+	assert.Equal(t, "", d, "a rule button relabelled to look like something else grants nothing")
+
+	l.HandleInteraction(clickLabeled("UBR", decisionRuleLocal, "r1|"+rule.hash(), "C1", "2000.1", ruleButtonLabel(rule, decisionRuleLocal)))
 	d, reason := takeApproval(t, l, "r1")
 	assert.Equal(t, decisionRuleLocal, d)
 	assert.Equal(t, "Bash(git push *)", reason)
@@ -145,9 +149,74 @@ func TestListenerAllowSimilarClick(t *testing.T) {
 	ctx := context.Background()
 	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
 	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "s1", Channel: "C1", TS: "2000.1"}).OK)
-	l.HandleInteraction(clickOn("UBR", decisionAllowSimilar, "s1", "C1", "2000.1", "BCL"))
+	l.HandleInteraction(clickLabeled("UBR", decisionAllowSimilar, "s1", "C1", "2000.1", "Allow + add Bash(*) all projects"))
 	d, _ := takeApproval(t, l, "s1")
+	assert.Equal(t, "", d, "relabelled: grants only what its label said")
+	l.HandleInteraction(clickLabeled("UBR", decisionAllowSimilar, "s1", "C1", "2000.1", similarLabel))
+	d, _ = takeApproval(t, l, "s1")
 	assert.Equal(t, decisionAllowSimilar, d)
+}
+
+// clickLabeled is a click on a button whose text is label.
+func clickLabeled(user, decision, value, channel, ts, label string) []byte {
+	return []byte(`{"type":"block_actions","user":{"id":"` + user + `"},` +
+		`"container":{"type":"message","channel_id":"` + channel + `","message_ts":"` + ts + `"},` +
+		`"message":{"bot_id":"BCL"},` +
+		`"actions":[{"action_id":"` + approvalActionPrefix + decision + `","value":"` + value + `","text":{"type":"plain_text","text":"` + label + `"}}]}`)
+}
+
+// Slack escapes & < > and wraps links in posted text; rules are read as typed.
+func TestRuleProposalUndoesSlackEscaping(t *testing.T) {
+	rest, _ := ruleProposal("allow Bash(cat a &amp;&amp; b)")
+	r, ok := parseAllowRule(rest)
+	require.True(t, ok)
+	assert.Equal(t, "Bash(cat a && b)", r.String())
+	rest, _ = ruleProposal("allow WebFetch(domain:<http://example.com|example.com>)")
+	r, ok = parseAllowRule(rest)
+	require.True(t, ok)
+	assert.Equal(t, "WebFetch(domain:example.com)", r.String())
+	r, _ = parseAllowRule("git push **")
+	assert.Equal(t, "Bash(git push *)", r.String())
+}
+
+// A rule click waiting for its copy is applied only if it is still for the
+// rule proposed when the copy registers.
+func TestPendingRuleClickChecksTheProposal(t *testing.T) {
+	ctx := context.Background()
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "p1", Channel: "C1", TS: "2000.1"}).OK)
+	l.HandleMessage(ctx, Message{Channel: "C1", TS: "2000.2", ThreadTS: "2000.1", User: "UBR", Text: "allow git push"})
+	takeApproval(t, l, "p1")
+	rule, _ := parseAllowRule("git push")
+	// clicked on a copy that isn't registered yet
+	l.HandleInteraction(clickLabeled("UBR", decisionRuleUser, "p1|"+rule.hash(), "C2", "3000.1", ruleButtonLabel(rule, decisionRuleUser)))
+	// the owner then proposes a different rule
+	l.HandleMessage(ctx, Message{Channel: "C1", TS: "2000.3", ThreadTS: "2000.1", User: "UBR", Text: "allow git status"})
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "p1", Channel: "C2", TS: "3000.1"}).OK)
+	d, _ := takeApproval(t, l, "p1")
+	assert.Equal(t, decisionPropose, d, "the earlier click is dropped; the new proposal is handed on")
+}
+
+// The confirm view keeps a one-time Allow as its default choice.
+func TestConfirmKeepsAllowOnce(t *testing.T) {
+	broad, _ := parseAllowRule("Bash(*)")
+	data, _ := json.Marshal(ruleConfirmBlocks("req", "abc", broad, defaultApprovalWait))
+	s := string(data)
+	assert.Contains(t, s, `"action_id":"`+approvalActionPrefix+decisionAllow+`","value":"abc"`)
+	assert.Contains(t, s, "Allow once")
+	assert.Equal(t, 1, strings.Count(s, `"style":"primary"`), "only Allow once is primary")
+}
+
+// A rule proposed but not yet handed to the hook holds the shutdown drain.
+func TestProposalHoldsDrain(t *testing.T) {
+	ctx := context.Background()
+	l := newTestListener(t, newFakeSlack(), &fakeDeliverer{})
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "q1", Channel: "C1", TS: "2000.1"}).OK)
+	l.HandleMessage(ctx, Message{Channel: "C1", TS: "2000.2", ThreadTS: "2000.1", User: "UBR", Text: "allow git push"})
+	l.mu.Lock()
+	waiting := l.answersWaitingLocked()
+	l.mu.Unlock()
+	assert.True(t, waiting)
 }
 
 func TestRuleHelpListsFormats(t *testing.T) {

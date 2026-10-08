@@ -1332,8 +1332,11 @@ func (a *approval) applyClicks(now time.Time) {
 		case a.decision != "":
 		case now.Sub(c.at) >= clickCopyWait:
 			// waited too long for its copy: dropped, never applied late
-		case ruleClick(c.decision) && !a.ruleMatches(c.rule):
-			// drawn for an earlier rule than the one now proposed: dropped
+		case ruleClick(c.decision) && !a.ruleMatches(c.rule, c.label, c.decision):
+			// drawn for an earlier rule than the one now proposed, or its
+			// label does not say the rule it grants: dropped
+		case c.decision == decisionAllowSimilar && c.label != similarLabel:
+			// a button relabelled after it was drawn: grants only what it said
 		case a.copyAt(c.channel, c.ts) != nil:
 			a.decision = c.decision
 			if ruleClick(c.decision) {
@@ -1349,13 +1352,15 @@ func (a *approval) applyClicks(now time.Time) {
 	}
 }
 
-// ruleMatches reports whether hash is the hash of the rule now proposed.
-func (a *approval) ruleMatches(hash string) bool {
+// ruleMatches reports whether a rule click is for the rule now proposed:
+// its hash matches, and its button text is the label drawn for that rule
+// and decision, so a click grants only what its label said.
+func (a *approval) ruleMatches(hash, label, decision string) bool {
 	if a.proposed == "" || hash == "" {
 		return false
 	}
 	r, ok := parseAllowRule(a.proposed)
-	return ok && r.hash() == hash
+	return ok && r.hash() == hash && label == ruleButtonLabel(r, decision)
 }
 
 // Owed redraws are retried with backoff from approvalRetry to approvalRetryMax,
@@ -1377,6 +1382,7 @@ type click struct {
 	channel, ts, decision string
 	at                    time.Time
 	rule                  string // a rule confirm button's rule hash (from its value)
+	label                 string // the clicked button's text
 }
 
 // ruleClick reports whether decision confirms a typed rule.
@@ -1461,6 +1467,9 @@ func (l *Listener) HandleInteraction(payload []byte) {
 		Actions []struct {
 			ActionID string `json:"action_id"`
 			Value    string `json:"value"`
+			Text     struct {
+				Text string `json:"text"`
+			} `json:"text"`
 		} `json:"actions"`
 	}
 	if json.Unmarshal(payload, &in) != nil || in.Type != "block_actions" {
@@ -1484,7 +1493,7 @@ func (l *Listener) HandleInteraction(payload []byte) {
 			continue
 		}
 		id, ruleHash, _ := strings.Cut(act.Value, "|")
-		c := click{in.Container.ChannelID, in.Container.MessageTS, decision, l.Now(), ruleHash}
+		c := click{in.Container.ChannelID, in.Container.MessageTS, decision, l.Now(), ruleHash, act.Text.Text}
 		l.mu.Lock()
 		if l.closing {
 			l.mu.Unlock()
@@ -1781,7 +1790,7 @@ func (l *Listener) answersWaitingLocked() bool {
 		if len(a.msgs) == 0 && l.Now().Sub(a.clicked) >= copyRegisterWait {
 			continue // a click on a request no hook registered: nothing can collect it
 		}
-		if (a.decision != "" && a.decision != decisionTaken) || len(a.clicks) > 0 {
+		if (a.decision != "" && a.decision != decisionTaken) || len(a.clicks) > 0 || a.propose != nil || a.ruleHelp != nil {
 			return true
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"regexp"
 	"strings"
 )
@@ -54,6 +55,8 @@ var (
 	knownTools = map[string]bool{"Bash": true, "Read": true, "Edit": true, "Write": true, "MultiEdit": true, "NotebookEdit": true,
 		"WebFetch": true, "WebSearch": true, "Glob": true, "Grep": true, "Task": true, "Agent": true, "Skill": true}
 	// vagueWords open phrases, not command prefixes ("allow all git push").
+	// slackLink is a link Slack wrapped in posted text: <url|label> or <url>.
+	slackLink  = regexp.MustCompile(`<([^<>|]+)(?:\|([^<>]*))?>`)
 	vagueWords = map[string]bool{"all": true, "any": true, "every": true, "everything": true, "anything": true,
 		"the": true, "this": true, "these": true, "that": true, "those": true, "similar": true, "it": true, "them": true}
 )
@@ -96,7 +99,7 @@ func parseAllowRule(text string) (allowRule, bool) {
 	if vagueWords[first] {
 		return allowRule{}, false
 	}
-	prefix := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), "*"))
+	prefix := strings.TrimRight(strings.TrimSpace(s), "* ")
 	if prefix == "" {
 		return allowRule{}, false
 	}
@@ -111,8 +114,22 @@ func ruleProposal(text string) (rest string, isRule bool) {
 	if m == nil || strings.ToLower(strings.Trim(m[1], ".,!:;-—*_~`")) != "allow" {
 		return "", false
 	}
-	rest = strings.TrimSpace(text[len(m[0]):])
+	rest = strings.TrimSpace(unslack(text[len(m[0]):]))
 	return rest, rest != ""
+}
+
+// unslack undoes what Slack does to posted text: HTML-escaped &, < and >,
+// and links (URLs, bare domains) wrapped as <url|label> or <url>, which
+// become their label (or URL without a mailto: scheme).
+func unslack(text string) string {
+	text = slackLink.ReplaceAllStringFunc(text, func(m string) string {
+		p := slackLink.FindStringSubmatch(m)
+		if p[2] != "" {
+			return p[2]
+		}
+		return strings.TrimPrefix(p[1], "mailto:")
+	})
+	return html.UnescapeString(text)
 }
 
 // suggestion is one entry of Claude Code's permission_suggestions.
@@ -168,6 +185,29 @@ func destinationLabel(d string) string {
 		return "all projects"
 	}
 	return d
+}
+
+// similarLabel is the Allow similar button's text.
+const similarLabel = "Allow similar"
+
+// ruleButtonLabel is the confirm button's text for rule and decision (one of
+// the rule decisions). The listener requires a click's button text to equal
+// it, so a click grants only what its label said.
+func ruleButtonLabel(rule allowRule, decision string) string {
+	prefix := "Allow + add"
+	if rule.broad() {
+		prefix = "Yes, allow + add BROAD"
+	}
+	where := map[string]string{decisionRuleSession: "this session", decisionRuleLocal: "this project", decisionRuleUser: "all projects"}[decision]
+	return buttonLabel(prefix + " " + rule.String() + " " + where)
+}
+
+// buttonLabel fits text to Slack's button text limit.
+func buttonLabel(text string) string {
+	if r := []rune(text); len(r) > 75 {
+		return string(r[:72]) + "…"
+	}
+	return text
 }
 
 // ruleDestinations maps the rule confirm decisions to Claude Code
