@@ -3,8 +3,10 @@ package agentchat
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -232,4 +234,84 @@ func TestShutdownWaitsForAnswers(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("never stopped after the answer was collected")
 	}
+}
+
+// A listener that accepts the shutdown but never exits is signalled after
+// the wait; one that exits just before the signal is not a failure.
+func TestAcceptedShutdownButStillRunning(t *testing.T) {
+	defer func(w time.Duration) { stopWait = w }(stopWait)
+	stopWait = 300 * time.Millisecond
+	h := testHome(t)
+	stop := fakeListener(t, h, func(ctx context.Context, req ControlRequest) ControlResponse {
+		return ControlResponse{OK: true, Version: "v1"}
+	})
+	killed := 0
+	c := &cli{home: h, kill: func() error { killed++; stop(); return nil }}
+	require.NoError(t, c.stopListener(context.Background()))
+	assert.Equal(t, 1, killed)
+
+	h = testHome(t)
+	stop = fakeListener(t, h, func(ctx context.Context, req ControlRequest) ControlResponse {
+		if req.Op == "shutdown" {
+			time.AfterFunc(stopWait+50*time.Millisecond, stop) // exits right at the boundary
+		}
+		return ControlResponse{OK: true, Version: "v1"}
+	})
+	c = &cli{home: h, kill: func() error { return errors.New("no listener process found") }}
+	require.NoError(t, c.stopListener(context.Background()))
+}
+
+// A stale socket file with nothing listening reads as no listener.
+func TestStaleSocketIsNoListener(t *testing.T) {
+	h := testHome(t)
+	ln, err := net.Listen("unix", h.ControlSocket)
+	require.NoError(t, err)
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	ln.Close()
+	_, statErr := os.Stat(h.ControlSocket)
+	require.NoError(t, statErr, "the socket file stays behind")
+	c := &cli{home: h}
+	_, up := c.listenerState(context.Background())
+	assert.False(t, up)
+	assert.True(t, c.waitStopped(context.Background()))
+}
+
+// An answer given during the shutdown's reply delay is accepted and then
+// collected before the listener stops; once fenced, a click is not
+// recorded and the owner is asked to click again.
+func TestShutdownFencesLateAnswers(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	l := newTestListener(t, api, &fakeDeliverer{})
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "a", Channel: "C1", TS: "2000.1"}).OK)
+	stopped := make(chan struct{})
+	l.Stop = func() { close(stopped) }
+	require.True(t, l.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
+	time.Sleep(shutdownDelay / 2)
+	l.HandleInteraction(clickOn("UBR", decisionDeny, "a", "C1", "2000.1", "BCL"))
+	select {
+	case <-stopped:
+		t.Fatal("stopped with an accepted denial its hook has not collected")
+	case <-time.After(shutdownDelay + 300*time.Millisecond):
+	}
+	d, _ := takeApproval(t, l, "a")
+	assert.Equal(t, decisionDeny, d)
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("never stopped")
+	}
+
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "b", Channel: "C1", TS: "2000.5"}).OK)
+	l.HandleInteraction(clickOn("UBR", decisionAllow, "b", "C1", "2000.5", "BCL"))
+	d, _ = takeApproval(t, l, "b")
+	assert.Equal(t, "", d, "after the fence a click is not recorded")
+	assert.Eventually(t, func() bool {
+		for _, p := range api.posts() {
+			if strings.Contains(p, "Click again") {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 20*time.Millisecond, "the owner is told to click again")
 }

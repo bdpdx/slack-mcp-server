@@ -67,7 +67,9 @@ func (c *cli) listenerCmd(ctx context.Context, args []string) error {
 	case !running && *ifRunning:
 		c.printJSON(out)
 		return nil
-	case running && before == version.Version && !*force:
+	case running && before == version.Version && !strings.HasSuffix(before, "-dirty") && !*force:
+		// (A -dirty build names a commit plus uncommitted changes, so two
+		// different builds can share it: never treat one as current.)
 		out["running"], out["version"], out["already_current"] = true, before, true
 		c.printJSON(out)
 		return nil
@@ -177,7 +179,10 @@ func (c *cli) stopListener(ctx context.Context) error {
 		return nil
 	}
 	if !signaled {
-		if serr := c.terminate(); serr == nil && c.waitStopped(ctx) {
+		// It accepted the shutdown but is still there. If it exits just
+		// before the signal, terminate finds nothing; wait once more either way.
+		_ = c.terminate()
+		if c.waitStopped(ctx) {
 			return nil
 		}
 	}

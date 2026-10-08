@@ -74,6 +74,7 @@ type Listener struct {
 	sessLock      map[string]*sync.Mutex    // serializes deliveries per session
 	queues        map[string]chan []pending // per-session delivery queues (Async)
 	approvals     map[string]*approval      // approval-hook requests by approval ID
+	closing       bool                      // shutting down: records no new message or answer (set under mu)
 	views         cohortViews               // project views for cohort tracking
 	approvalWaits map[string]*approvalWait  // Codex registrations seen waiting on an approval, by session|project
 	unobservable  map[string]bool           // Codex sessions whose daemon hides approval waits (warned once)
@@ -181,6 +182,12 @@ func (l *Listener) notice(ctx context.Context, m Message) Notice {
 
 // HandleMessage routes one live message to every subscribed session.
 func (l *Listener) HandleMessage(ctx context.Context, m Message) {
+	l.mu.Lock()
+	closing := l.closing
+	l.mu.Unlock()
+	if closing {
+		return // left unmarked: the next listener's recovery delivers it
+	}
 	if m.SubType == "channel_archive" || m.SubType == "group_archive" {
 		l.dropChannel(m.Channel)
 		return
@@ -722,10 +729,8 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 		// saved as it changes, so nothing else needs flushing.
 		l.Log.Info("shutting down on request")
 		go func() {
-			for deadline := l.Now().Add(answerDrain); l.answersWaiting() && l.Now().Before(deadline); {
-				time.Sleep(100 * time.Millisecond)
-			}
 			time.Sleep(shutdownDelay)
+			l.closeForShutdown(time.Now().Add(answerDrain))
 			l.Stop()
 		}()
 		return ControlResponse{OK: true, Version: version.Version}
@@ -918,6 +923,12 @@ func (l *Listener) HandleInteraction(payload []byte) {
 		}
 		c := click{in.Container.ChannelID, in.Container.MessageTS, decision, l.Now()}
 		l.mu.Lock()
+		if l.closing {
+			l.mu.Unlock()
+			l.Log.Info("approval click during shutdown; asking the owner to click again", zap.String("approval", act.Value))
+			go l.clickAgain(c)
+			continue
+		}
 		a := l.approvalEntry(act.Value)
 		switch {
 		case a.ended:
@@ -1085,11 +1096,37 @@ func (l *Listener) EndApproval(id, owed string) {
 	}
 }
 
-// answersWaiting reports whether any live request holds an answer, or an
-// Allow click, its hook has not collected yet.
-func (l *Listener) answersWaiting() bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+// closeForShutdown waits, until deadline, for hooks to collect every answer
+// the owner already gave, then fences: in the same critical section that
+// finds nothing waiting, it stops recording messages and answers, so none
+// can be accepted and then lost with the listener's memory.
+func (l *Listener) closeForShutdown(deadline time.Time) {
+	for {
+		l.mu.Lock()
+		if !l.answersWaitingLocked() || !time.Now().Before(deadline) {
+			l.closing = true
+			l.mu.Unlock()
+			return
+		}
+		l.mu.Unlock()
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// clickAgain tells the owner, in the request's thread, that a click made
+// while the listener was shutting down was not recorded.
+func (l *Listener) clickAgain(c click) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, _, err := l.API.PostMessageContext(ctx, c.channel, slack.MsgOptionTS(c.ts),
+		slack.MsgOptionText("That click arrived while the listener was restarting and was not recorded. Click again in a few seconds.", false)); err != nil {
+		l.Log.Warn("posting the click-again note failed", zap.Error(err))
+	}
+}
+
+// answersWaitingLocked reports whether any live request holds an answer, or
+// an Allow click, its hook has not collected yet. Call with l.mu held.
+func (l *Listener) answersWaitingLocked() bool {
 	for _, a := range l.approvals {
 		if a.ended {
 			continue
