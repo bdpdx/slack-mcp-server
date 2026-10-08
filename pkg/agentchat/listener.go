@@ -706,10 +706,10 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 	case "approval-watch":
 		l.WatchApproval(req.Approval, req.Channel, req.TS, req.Text)
 	case "approval":
-		decision, reason, known := l.takeApproval(req.Approval)
-		return ControlResponse{OK: true, Decision: decision, Text: reason, Unknown: !known}
+		decision, reason, known, ended := l.takeApproval(req.Approval)
+		return ControlResponse{OK: true, Decision: decision, Text: reason, Unknown: !known, Ended: ended}
 	case "approval-end":
-		l.EndApproval(req.Approval)
+		l.EndApproval(req.Approval, req.Text)
 	case "cohort-register", "cohort-leave", "cohort-duty", "cohort-checkpoint", "cohort-status":
 		return l.cohortControl(ctx, req)
 	case "cohort-claim-check":
@@ -741,8 +741,19 @@ type approval struct {
 	at               time.Time
 	text             string    // the request as posted, to redraw it once it ends
 	polled           time.Time // the hook's last poll; a hook that stops polling is gone
-	closed           bool      // redrawn as no longer waiting
+	ended            bool      // takes no more answers: the hook finished, or was given up on
+	owed             string    // a redraw still owed (its outcome line) until one succeeds
+	retryAt          time.Time // when to try an owed redraw again
+	tries            int       // failed redraw attempts
 }
+
+// Owed redraws are retried with backoff from approvalRetry to approvalRetryMax,
+// and given up after approvalRetries failures.
+const (
+	approvalRetry    = 5 * time.Second
+	approvalRetryMax = 5 * time.Minute
+	approvalRetries  = 10
+)
 
 // approvalAbandoned is how long a registered hook may go without polling
 // (it polls every second) before its request counts as ended: the host
@@ -778,6 +789,9 @@ func (l *Listener) WatchApproval(id, channel, ts, text string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	a := l.approvalEntry(id)
+	if a.ended {
+		return // an ended request stays ended; a hook that re-registers it is told so
+	}
 	a.channel, a.ts, a.text, a.polled = channel, ts, text, l.Now()
 	if c := a.early; c != nil && a.decision == "" && c.channel == channel && c.ts == ts {
 		a.decision = c.decision
@@ -831,6 +845,8 @@ func (l *Listener) HandleInteraction(payload []byte) {
 		l.mu.Lock()
 		a := l.approvalEntry(act.Value)
 		switch {
+		case a.ended:
+			l.Log.Info("ignoring a click on an ended approval request", zap.String("approval", act.Value))
 		case a.decision != "":
 		case a.channel == "":
 			if a.early == nil {
@@ -889,7 +905,7 @@ func (l *Listener) approvalReply(m Message) bool {
 			return false
 		}
 	}
-	if m.User == l.OwnerID && target.decision == "" && explicit {
+	if m.User == l.OwnerID && target.decision == "" && !target.ended && explicit {
 		if decision == decisionAllow {
 			target.hint = true
 		} else {
@@ -928,77 +944,102 @@ func (l *Listener) markConsumed(m Message) {
 // with its reason, decisionHint once after the owner typed an allow word, or
 // "" while unanswered.
 func (l *Listener) TakeApproval(id string) (decision, reason string) {
-	decision, reason, _ = l.takeApproval(id)
+	decision, reason, _, _ = l.takeApproval(id)
 	return decision, reason
 }
 
 // takeApproval is TakeApproval that also reports whether the request is
-// known (registered or clicked) to this listener.
-func (l *Listener) takeApproval(id string) (decision, reason string, known bool) {
+// known (registered) to this listener, and whether it has ended: an ended
+// request never hands out an answer, so a hook that resumes late learns it
+// can decide nothing.
+func (l *Listener) takeApproval(id string) (decision, reason string, known, ended bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	a := l.approvals[id]
 	if a == nil {
-		return "", "", false
+		return "", "", false, false
 	}
 	a.polled = l.Now()
 	known = a.channel != ""
+	if a.ended {
+		return "", "", known, true
+	}
 	switch {
 	case a.decision == decisionTaken:
-		return "", "", known
+		return "", "", known, false
 	case a.decision != "":
 		decision, reason = a.decision, a.reason
 		a.decision = decisionTaken // keep the entry so later replies stay out of the session
-		return decision, reason, known
+		return decision, reason, known, false
 	case a.hint:
 		a.hint = false
-		return decisionHint, "", known
+		return decisionHint, "", known, false
 	}
-	return "", "", known
+	return "", "", known, false
 }
 
-// EndApproval records that request id's hook finished and redrew its own
-// message, so the sweep leaves it alone.
-func (l *Listener) EndApproval(id string) {
+// EndApproval records that request id's hook finished. owed is the outcome
+// line when the hook's own redraw failed, for the sweep to retry; "" when it
+// succeeded.
+func (l *Listener) EndApproval(id, owed string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if a := l.approvals[id]; a != nil {
-		a.closed = true
+		a.ended, a.owed, a.retryAt, a.tries = true, owed, l.Now(), 0
 	}
 }
 
-// SweepApprovals redraws each registered request whose hook stopped polling
-// without saying it finished (approval-end), so Slack never shows live
-// buttons for a prompt that ended elsewhere: the terminal answered it, or the
-// hook was killed outright.
+// SweepApprovals ends each registered request whose hook stopped polling
+// without saying it finished (approval-end), and redraws it, so Slack never
+// shows live buttons for a prompt that ended elsewhere: the terminal answered
+// it, or the hook was killed outright. It also retries redraws still owed
+// after a failure, with backoff.
 func (l *Listener) SweepApprovals(ctx context.Context) {
-	type ended struct{ channel, ts, text, line string }
-	var gone []ended
+	type redraw struct{ id, channel, ts, text, line string }
+	var todo []redraw
 	l.mu.Lock()
-	for _, a := range l.approvals {
-		if a.channel == "" || a.closed || l.Now().Sub(a.polled) < approvalAbandoned {
+	now := l.Now()
+	for id, a := range l.approvals {
+		if a.channel == "" {
 			continue
 		}
-		a.closed = true
-		line := "↩️ No longer waiting: it was answered in the terminal, or the request ended. Nothing was decided here."
-		switch a.decision {
-		case decisionTaken: // the hook took the answer but never finished redrawing
-			line = "↩️ The request ended; its outcome is in the session."
-		case "":
-		default:
-			line = "↩️ Your answer arrived after the request had ended, so it changed nothing."
+		if !a.ended && now.Sub(a.polled) >= approvalAbandoned {
+			a.ended, a.retryAt, a.tries = true, now, 0
+			a.owed = "↩️ No longer waiting: it was answered in the terminal, or the request ended. Nothing was decided here."
+			switch a.decision {
+			case decisionTaken: // the hook took the answer but never finished redrawing
+				a.owed = "↩️ The request ended; its outcome is in the session."
+			case "":
+			default:
+				a.owed = "↩️ Your answer arrived after the request had ended, so it changed nothing."
+			}
 		}
-		gone = append(gone, ended{a.channel, a.ts, a.text, line})
+		if a.owed != "" && !now.Before(a.retryAt) {
+			todo = append(todo, redraw{id, a.channel, a.ts, a.text, a.owed})
+		}
 	}
 	l.mu.Unlock()
-	for _, g := range gone {
-		blocks := []slack.Block{slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, g.line, false, false))}
-		if g.text != "" {
-			blocks = append([]slack.Block{slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, g.text, false, false), nil, nil)}, blocks...)
+	for _, r := range todo {
+		blocks := []slack.Block{slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, r.line, false, false))}
+		if r.text != "" {
+			blocks = append([]slack.Block{slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, r.text, false, false), nil, nil)}, blocks...)
 		}
-		if _, _, _, err := l.API.UpdateMessageContext(ctx, g.channel, g.ts, slack.MsgOptionText(g.line, false), slack.MsgOptionBlocks(blocks...)); err != nil {
-			l.Log.Warn("redrawing an ended approval request failed", zap.String("channel", g.channel), zap.String("ts", g.ts), zap.Error(err))
+		_, _, _, err := l.API.UpdateMessageContext(ctx, r.channel, r.ts, slack.MsgOptionText(r.line, false), slack.MsgOptionBlocks(blocks...))
+		l.mu.Lock()
+		if a := l.approvals[r.id]; a != nil && a.owed == r.line {
+			switch {
+			case err == nil:
+				a.owed = ""
+			case a.tries+1 >= approvalRetries:
+				a.owed = ""
+				l.Log.Error("giving up redrawing an ended approval request", zap.String("channel", r.channel), zap.String("ts", r.ts), zap.Error(err))
+			default:
+				a.tries++
+				a.retryAt = l.Now().Add(min(approvalRetry<<a.tries, approvalRetryMax))
+				l.Log.Warn("redrawing an ended approval request failed; will retry", zap.String("channel", r.channel), zap.String("ts", r.ts), zap.Error(err))
+			}
 		}
+		l.mu.Unlock()
 	}
 }
 

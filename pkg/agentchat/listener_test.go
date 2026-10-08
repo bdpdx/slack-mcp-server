@@ -28,6 +28,7 @@ type fakeSlack struct {
 	failPosts bool                       // PostMessageContext fails (after "accepting")
 	posted    []string                   // channel|text
 	updated   []string                   // channel|ts|text
+	failUpd   int                        // the next failUpd UpdateMessageContext calls fail
 }
 
 func newFakeSlack() *fakeSlack {
@@ -115,6 +116,10 @@ func (f *fakeSlack) UpdateMessageContext(_ context.Context, channel, ts string, 
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failUpd > 0 {
+		f.failUpd--
+		return "", "", "", errors.New("timeout")
+	}
 	f.updated = append(f.updated, channel+"|"+ts+"|"+values.Get("text"))
 	return channel, ts, "", nil
 }

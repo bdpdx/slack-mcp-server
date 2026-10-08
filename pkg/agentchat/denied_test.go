@@ -48,6 +48,15 @@ func TestFormatDeniedWithholdsExfiltrationInput(t *testing.T) {
 	assert.Contains(t, unsafe, "withheld", "and it cannot be approved unseen")
 }
 
+// A verdict naming no rule ("Blocked by classifier") is still asked about,
+// but its input is withheld and it cannot be approved unseen.
+func TestFormatDeniedWithholdsInputWithoutARule(t *testing.T) {
+	msg, unsafe := FormatDenied("UBR", "claude-b", "Bash", []byte(`{"command":"cat ~/.ssh/id_rsa"}`), "Blocked by classifier")
+	assert.NotContains(t, msg, "id_rsa")
+	assert.Contains(t, msg, "names no rule")
+	assert.Contains(t, unsafe, "withheld")
+}
+
 func TestDeniedOutcomeAndRetryOutput(t *testing.T) {
 	assert.Equal(t, "❌ Not approved: it couldn't be shown in full here, so the block stands.", deniedOutcome(decisionUnshown, "", time.Minute))
 	assert.Equal(t, "❌ Declined; the block stands.", deniedOutcome(decisionTerminal, "", time.Minute), "no terminal to hand it to")
@@ -58,17 +67,14 @@ func TestDeniedOutcomeAndRetryOutput(t *testing.T) {
 	assert.JSONEq(t, `{"hookSpecificOutput":{"hookEventName":"PermissionDenied","retry":true}}`, string(data))
 }
 
-// Claude Code ignores retry for denials without a classifier verdict (a
-// bracketed rule), so the hook asks nothing and touches neither Slack nor
-// the listener.
+// Claude Code ignores retry for its documented no-verdict denials, so the
+// hook asks nothing and touches neither Slack nor the listener.
 func TestDeniedHookSkipsDenialsWithoutAVerdict(t *testing.T) {
 	out := &bytes.Buffer{}
 	c := &cli{stdout: out, stderr: &bytes.Buffer{}}
 	for _, reason := range []string{
 		"Auto mode could not evaluate this action and is blocking it for safety.",
 		"Classifier unavailable",
-		"",
-		"some future wording without a rule",
 	} {
 		assert.Equal(t, 0, c.deniedHook(context.Background(), hookEvent{ToolName: "Bash", Reason: reason}, time.Minute))
 	}
@@ -127,6 +133,61 @@ func TestEndedApprovalIsLeftToItsHook(t *testing.T) {
 	now = now.Add(time.Minute)
 	l.SweepApprovals(ctx)
 	assert.Empty(t, api.updates())
+}
+
+// An ended request takes no more answers: a late click is ignored, and a
+// hook that resumes and polls (or re-registers) learns it has ended.
+func TestEndedApprovalTakesNoAnswers(t *testing.T) {
+	api := newFakeSlack()
+	l := newTestListener(t, api, &fakeDeliverer{})
+	now := time.Unix(2000, 0)
+	l.Now = func() time.Time { return now }
+	ctx := context.Background()
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "e", Channel: "C1", TS: "ts-e", Text: "request"}).OK)
+	now = now.Add(31 * time.Second)
+	l.SweepApprovals(ctx)
+	require.Len(t, api.updates(), 1)
+
+	l.HandleInteraction(clickOn("UBR", decisionAllow, "e", "C1", "ts-e", "BCL"))
+	resp := l.Control(ctx, ControlRequest{Op: "approval", Approval: "e"})
+	assert.True(t, resp.Ended)
+	assert.Equal(t, "", resp.Decision, "a click after the end decides nothing")
+
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "e", Channel: "C1", TS: "ts-e", Text: "request"}).OK)
+	resp = l.Control(ctx, ControlRequest{Op: "approval", Approval: "e"})
+	assert.True(t, resp.Ended, "re-registering does not reopen it")
+	assert.Equal(t, "", resp.Decision)
+}
+
+// A failed redraw stays owed and is retried with backoff until it succeeds,
+// whether the sweep ended the request or its hook's own redraw failed.
+func TestOwedRedrawsAreRetried(t *testing.T) {
+	api := newFakeSlack()
+	l := newTestListener(t, api, &fakeDeliverer{})
+	now := time.Unix(2000, 0)
+	l.Now = func() time.Time { return now }
+	ctx := context.Background()
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "s", Channel: "C1", TS: "ts-s", Text: "request"}).OK)
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "h", Channel: "C1", TS: "ts-h", Text: "request"}).OK)
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-end", Approval: "h", Text: "✅ Allowed."}).OK) // the hook's redraw failed
+
+	api.failUpd = 2
+	now = now.Add(31 * time.Second)
+	l.SweepApprovals(ctx) // both attempts fail
+	assert.Empty(t, api.updates())
+	l.SweepApprovals(ctx) // backing off: not yet
+	assert.Empty(t, api.updates())
+
+	now = now.Add(11 * time.Second)
+	l.SweepApprovals(ctx)
+	got := api.updates()
+	require.Len(t, got, 2)
+	assert.Contains(t, got, "C1|ts-h|✅ Allowed.", "the hook's own outcome, not a generic line")
+	assert.Contains(t, got, "C1|ts-s|↩️ No longer waiting: it was answered in the terminal, or the request ended. Nothing was decided here.")
+
+	now = now.Add(time.Hour / 2)
+	l.SweepApprovals(ctx)
+	assert.Len(t, api.updates(), 2, "redrawn once each")
 }
 
 // A listener that lost a request (it restarted) tells the polling hook, which

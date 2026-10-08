@@ -89,8 +89,9 @@ trust new hooks in the next session.
   a denial without a classifier verdict (for which Claude ignores `retry`)
   leaves the block standing; a reply of `terminal` declines, since there is
   no terminal prompt. Only the button can approve. For an exfiltration
-  verdict the input is not relayed to Slack and the request cannot be
-  approved there.
+  verdict, or one naming no rule (for example "Blocked by classifier"), the
+  input is not relayed to Slack and the request cannot be approved there. A
+  request the listener has ended takes no late answer.
 - `Stop` → `stop-hook` (both hosts): when a turn you started by typing at the terminal ends, the
   agent's bot DMs you its final response. Turns started by Slack messages, background work or
   subagents send nothing. This replaces a Codex `notify` push notification.

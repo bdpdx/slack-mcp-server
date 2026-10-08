@@ -22,10 +22,15 @@ import (
 // Approval works as for approval-hook: only a click can approve, replies can
 // decline, and the listener redraws a request whose hook went away.
 
+// noVerdictPrefixes open the documented reasons of denials without a
+// classifier verdict (it could not evaluate the action, or was unavailable),
+// for which Claude Code ignores retry: nothing to ask about.
+var noVerdictPrefixes = []string{"Auto mode could not evaluate", "Classifier unavailable"}
+
 // classifierRule finds the rule a classifier verdict names in brackets, such
-// as "[Data Exfiltration]". Claude Code honors retry only after a verdict, so
-// a reason without one (the classifier could not evaluate the action, or was
-// unavailable) asks nothing.
+// as "[Data Exfiltration]". A verdict without one (Claude Code also reports
+// "Blocked by classifier") is still asked about, but its input is withheld:
+// nothing says what the classifier objected to.
 var classifierRule = regexp.MustCompile(`\[[^\[\]]+\]`)
 
 // exfiltrationRule marks verdicts whose tool input must not be relayed: the
@@ -34,14 +39,18 @@ var exfiltrationRule = regexp.MustCompile(`(?i)\[[^\]]*exfiltration[^\]]*\]`)
 
 // FormatDenied renders a blocked action for the owner, as FormatApproval
 // does for a prompt, with the classifier's reason. For an exfiltration
-// verdict the input is withheld, and the request cannot be approved from
-// Slack (never approve what was not shown).
+// verdict, or one naming no rule, the input is withheld, and the request
+// cannot be approved from Slack (never approve what was not shown).
 func FormatDenied(ownerID, agent, tool string, input []byte, reason string) (msg, unsafe string) {
 	msg = fmt.Sprintf("<@%s> Auto mode blocked %s: %s", ownerID, slackEscaper.Replace(agent), slackEscaper.Replace(tool))
-	if exfiltrationRule.MatchString(reason) {
+	switch {
+	case exfiltrationRule.MatchString(reason):
 		msg += "\n_The input is withheld: the classifier judged it should not leave this machine. Review it in the session._"
 		unsafe = "its input is withheld (an exfiltration verdict)"
-	} else {
+	case !classifierRule.MatchString(reason):
+		msg += "\n_The input is withheld: the block names no rule, so it may be sensitive. Review it in the session._"
+		unsafe = "its input is withheld (the block names no rule)"
+	default:
 		var detail string
 		detail, unsafe = toolDetail(input)
 		msg += detail
@@ -102,11 +111,13 @@ func retryDecision() map[string]any {
 
 // deniedHook asks the owner in Slack whether a blocked action may be retried.
 // It prints nothing (the block stands) when the session watches no project,
-// the denial names no classifier rule, anything fails, the owner declines,
+// the denial had no classifier verdict, anything fails, the owner declines,
 // the wait runs out or the host stops the hook.
 func (c *cli) deniedHook(ctx context.Context, ev hookEvent, wait time.Duration) int {
-	if !classifierRule.MatchString(ev.Reason) {
-		return 0
+	for _, p := range noVerdictPrefixes {
+		if strings.HasPrefix(strings.TrimSpace(ev.Reason), p) {
+			return 0
+		}
 	}
 	setup, cancel := context.WithTimeout(ctx, relayTimeout)
 	defer cancel()
@@ -137,18 +148,10 @@ func (c *cli) deniedHook(ctx context.Context, ev hookEvent, wait time.Duration) 
 	finish, cancelFinish := context.WithTimeout(context.WithoutCancel(ctx), relayTimeout)
 	defer cancelFinish()
 	outcome := deniedOutcome(decision, reason, wait)
-	if decision == "" && ctx.Err() != nil {
+	if decision == decisionEnded || (decision == "" && ctx.Err() != nil) {
 		outcome = endedOutcome
 	}
-	if _, _, _, err := c.bot.UpdateMessageContext(finish, channel, ts,
-		slack.MsgOptionText(outcome, false),
-		slack.MsgOptionBlocks(
-			slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, text, false, false), nil, nil),
-			slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, outcome, false, false)),
-		)); err != nil {
-		fmt.Fprintf(c.stderr, "slack-agent-chat: updating blocked-action request: %v\n", err)
-	}
-	c.endApproval(finish, id)
+	c.finishRequest(finish, channel, ts, id, text, outcome)
 	if decision == decisionAllow {
 		c.printJSON(retryDecision())
 	}

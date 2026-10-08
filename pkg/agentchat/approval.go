@@ -34,6 +34,7 @@ const (
 	decisionTerminal     = "terminal"
 	decisionHint         = "hint"  // the owner typed an allow word; explain the button
 	decisionTaken        = "taken" // answered and handed to the hook
+	decisionEnded        = "ended" // the listener ended the request; nothing is decided
 	defaultApprovalWait  = 10 * time.Minute
 	approvalPoll         = time.Second
 )
@@ -197,18 +198,10 @@ func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration
 	finish, cancelFinish := context.WithTimeout(context.WithoutCancel(ctx), relayTimeout)
 	defer cancelFinish()
 	outcome := approvalOutcome(decision, reason, wait)
-	if decision == "" && ctx.Err() != nil {
+	if decision == decisionEnded || (decision == "" && ctx.Err() != nil) {
 		outcome = endedOutcome
 	}
-	if _, _, _, err := c.bot.UpdateMessageContext(finish, channel, ts,
-		slack.MsgOptionText(outcome, false),
-		slack.MsgOptionBlocks(
-			slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, text, false, false), nil, nil),
-			slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, outcome, false, false)),
-		)); err != nil {
-		fmt.Fprintf(c.stderr, "slack-agent-chat: updating approval request: %v\n", err)
-	}
-	c.endApproval(finish, id)
+	c.finishRequest(finish, channel, ts, id, text, outcome)
 	if decision == "" && ctx.Err() == nil {
 		c.postBlocked(finish, c.hookSession(ev), me.agentName, ev.ToolName, wait)
 	}
@@ -242,7 +235,8 @@ const (
 const hintTimeout = 5 * time.Second
 
 // waitForApproval polls the listener for the owner's answer until one
-// arrives or ctx ends ("" decision). When the owner types an allow word, it
+// arrives, ctx ends ("" decision) or the listener ended the request
+// (decisionEnded). When the owner types an allow word, it
 // posts hint in the thread and keeps waiting. A listener that lost the
 // request (it restarted) gets the message (text) registered again.
 func (c *cli) waitForApproval(ctx context.Context, channel, ts, id, text, hint string) (string, string) {
@@ -257,6 +251,8 @@ func (c *cli) waitForApproval(ctx context.Context, channel, ts, id, text, hint s
 		resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval", Approval: id})
 		switch {
 		case err != nil:
+		case resp.Ended:
+			return decisionEnded, ""
 		case resp.Unknown:
 			_, _ = SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval-watch", Approval: id, Channel: channel, TS: ts, Text: text})
 		case resp.Decision == "":
@@ -272,11 +268,22 @@ func (c *cli) waitForApproval(ctx context.Context, channel, ts, id, text, hint s
 	}
 }
 
-// endApproval tells the listener the hook finished and redrew its request,
-// so the listener's sweep (for hooks killed outright) leaves it alone.
-func (c *cli) endApproval(ctx context.Context, id string) {
-	// A budget of its own: the redraw before it may have used up ctx's.
+// finishRequest redraws a settled request with its outcome and tells the
+// listener the hook finished. If the redraw failed, the listener is given
+// the outcome and retries it, so stale buttons never outlive the hook.
+func (c *cli) finishRequest(ctx context.Context, channel, ts, id, text, outcome string) {
+	owed := ""
+	if _, _, _, err := c.bot.UpdateMessageContext(ctx, channel, ts,
+		slack.MsgOptionText(outcome, false),
+		slack.MsgOptionBlocks(
+			slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, text, false, false), nil, nil),
+			slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, outcome, false, false)),
+		)); err != nil {
+		fmt.Fprintf(c.stderr, "slack-agent-chat: updating request: %v\n", err)
+		owed = outcome
+	}
+	// A budget of its own: the redraw may have used up ctx's.
 	end, cancel := context.WithTimeout(context.WithoutCancel(ctx), hintTimeout)
 	defer cancel()
-	_, _ = SendControl(end, c.home.ControlSocket, ControlRequest{Op: "approval-end", Approval: id})
+	_, _ = SendControl(end, c.home.ControlSocket, ControlRequest{Op: "approval-end", Approval: id, Text: owed})
 }
