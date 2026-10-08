@@ -20,9 +20,10 @@ const (
 	// cohortFetchInterval is how often the listener fetches a project-state
 	// checkout so it sees GM claims and holds published from other machines.
 	cohortFetchInterval = 2 * time.Minute
-	// cohortRecheckInterval is the shortest gap between fetches forced by a
-	// message that may name a GM the cached view has not seen yet.
-	cohortRecheckInterval = 10 * time.Second
+	// recheckWindow is how long a possible GM signal is kept to be
+	// classified again, and maxRechecks bounds how many are kept.
+	recheckWindow = time.Hour
+	maxRechecks   = 500
 	// cohortFetchTimeout bounds a project-state fetch so a hung network can
 	// never stall the listener.
 	cohortFetchTimeout = 20 * time.Second
@@ -80,12 +81,6 @@ type cohortView struct {
 // anyone pulls; or from the working tree when root is not such a checkout.
 // fresh skips the cache.
 func (l *Listener) projectView(ctx context.Context, root, project string, fresh bool) (*CohortProject, error) {
-	return l.projectViewEvery(ctx, root, project, fresh, cohortFetchInterval)
-}
-
-// projectViewEvery is projectView fetching when the last fetch of root is at
-// least every old (a recheck uses a shorter interval than the routine one).
-func (l *Listener) projectViewEvery(ctx context.Context, root, project string, fresh bool, every time.Duration) (*CohortProject, error) {
 	l.views.mu.Lock()
 	if l.views.views == nil {
 		l.views.views, l.views.fetched = map[string]cohortView{}, map[string]time.Time{}
@@ -95,7 +90,7 @@ func (l *Listener) projectViewEvery(ctx context.Context, root, project string, f
 		l.views.mu.Unlock()
 		return v.p, nil
 	}
-	needFetch := l.Now().Sub(l.views.fetched[root]) >= every
+	needFetch := l.Now().Sub(l.views.fetched[root]) >= cohortFetchInterval
 	if needFetch {
 		l.views.fetched[root] = l.Now() // claimed before fetching, so concurrent callers don't fetch too
 	}
@@ -270,13 +265,18 @@ func (l *Listener) trackCohort(ctx context.Context, m Message) {
 	if err != nil {
 		return
 	}
-	// A message is classified once, on arrival. One that mentions, or is a
-	// BLOCKED notice from, a roster agent the cached view does not name as GM
-	// may follow an authority change the cache has not seen: re-read (and
-	// fetch) before classifying, or that single mention is lost for good.
+	// A message that mentions, or is a BLOCKED notice from, a roster agent
+	// the cached view does not name as GM may follow an authority change the
+	// cache has not seen. Re-read the local checkout first (no network on
+	// this path); if it still names another GM, keep the message so each
+	// tick classifies it again after its fetch. Otherwise that single
+	// mention would be lost for good.
 	if l.mayNameUncachedGM(ctx, m, p) {
-		if fresh, err := l.projectViewEvery(ctx, reg.Root, reg.Project, true, cohortRecheckInterval); err == nil {
+		if fresh, err := l.projectView(ctx, reg.Root, reg.Project, true); err == nil {
 			p = fresh
+		}
+		if l.mayNameUncachedGM(ctx, m, p) {
+			l.rememberRecheck(m)
 		}
 	}
 	gm := p.GM.GM
@@ -342,7 +342,7 @@ func (l *Listener) trackCohort(ctx context.Context, m Message) {
 func (l *Listener) mayNameUncachedGM(ctx context.Context, m Message, p *CohortProject) bool {
 	other := func(userID string) (string, bool) {
 		name := l.name(ctx, userID)
-		return name, name != "" && name != p.GM.GM && p.InRoster(name)
+		return name, name != "" && name != p.GM.GM && p.InRoster(name) && l.isAgent(ctx, userID)
 	}
 	if name, ok := other(m.User); ok && strings.HasPrefix(m.Text, blockedPrefix(name)) {
 		return true
@@ -356,6 +356,101 @@ func (l *Listener) mayNameUncachedGM(ctx context.Context, m Message, p *CohortPr
 		}
 	}
 	return false
+}
+
+// recheck is a possible GM signal kept until it can be classified against a
+// view that names its agent as GM, or until it expires.
+type recheck struct {
+	m     Message
+	until time.Time
+}
+
+// rememberRecheck keeps m to be classified again (bounded; the oldest is
+// dropped first).
+func (l *Listener) rememberRecheck(m Message) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.rechecks == nil {
+		l.rechecks = map[string]recheck{}
+	}
+	if len(l.rechecks) >= maxRechecks {
+		var oldest string
+		for k, r := range l.rechecks {
+			if oldest == "" || TSLess(r.m.TS, l.rechecks[oldest].m.TS) {
+				oldest = k
+			}
+		}
+		delete(l.rechecks, oldest)
+	}
+	l.rechecks[watchKey(m.Channel, m.TS)] = recheck{m: m, until: tsTime(m.TS).Add(recheckWindow)}
+}
+
+// replayRechecks classifies each kept message again once the (just
+// refreshed) view names its agent as GM. A watch it creates is dropped at
+// once if Slack shows the GM already answered, since the answer arrived
+// before the watch existed. The watch keeps the message's own timestamp.
+func (l *Listener) replayRechecks(ctx context.Context) {
+	now := l.Now()
+	l.mu.Lock()
+	var due []Message
+	for k, r := range l.rechecks {
+		if now.After(r.until) {
+			delete(l.rechecks, k)
+			continue
+		}
+		due = append(due, r.m)
+	}
+	var regs []CohortReg
+	for _, r := range l.state.Cohort {
+		regs = append(regs, *r)
+	}
+	l.mu.Unlock()
+	for _, m := range due {
+		var reg *CohortReg
+		for i := range regs {
+			if regs[i].Channel == m.Channel {
+				reg = &regs[i]
+				break
+			}
+		}
+		key := watchKey(m.Channel, m.TS)
+		if reg == nil {
+			l.mu.Lock()
+			delete(l.rechecks, key)
+			l.mu.Unlock()
+			continue
+		}
+		p, err := l.projectView(ctx, reg.Root, reg.Project, false)
+		if err != nil || l.mayNameUncachedGM(ctx, m, p) {
+			continue // still not the GM in the view; try again next tick
+		}
+		l.mu.Lock()
+		delete(l.rechecks, key)
+		_, existed := l.state.GMWatches[key]
+		l.mu.Unlock()
+		l.trackCohort(ctx, m)
+		if existed {
+			continue
+		}
+		l.mu.Lock()
+		var w *GMWatch
+		if cur := l.state.GMWatches[key]; cur != nil {
+			c := *cur
+			w = &c
+		}
+		l.mu.Unlock()
+		if w == nil {
+			continue
+		}
+		if answered, err := l.answeredInSlackErr(ctx, w); err == nil && answered {
+			l.mu.Lock()
+			delete(l.state.GMWatches, key)
+			if err := l.state.Save(l.StateFile); err != nil {
+				l.Log.Error("saving state failed", zap.Error(err))
+			}
+			l.mu.Unlock()
+		}
+	}
 }
 
 func blockedPrefix(agent string) string { return "BLOCKED: " + slackEscaper.Replace(agent) + " " }
@@ -435,6 +530,14 @@ func (l *Listener) answeredInSlackErr(ctx context.Context, w *GMWatch) (bool, er
 // 2-hourly checkpoints notify each registered agent. The daemon calls it
 // periodically.
 func (l *Listener) CohortTick(ctx context.Context) {
+	// First classify kept possible GM signals again, against views refreshed
+	// as due (and fetched on the routine interval), so a watch they create is
+	// handled by this same tick.
+	l.replayRechecks(ctx)
+	l.cohortTick(ctx)
+}
+
+func (l *Listener) cohortTick(ctx context.Context) {
 	now := l.Now()
 	l.mu.Lock()
 	regs := l.cohortRegs(func(*CohortReg) bool { return true })

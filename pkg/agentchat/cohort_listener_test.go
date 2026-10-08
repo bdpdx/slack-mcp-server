@@ -641,3 +641,74 @@ func TestCohortRecheckOnlyForPossibleGMSignals(t *testing.T) {
 	assert.True(t, f.l.mayNameUncachedGM(context.Background(), Message{User: "UCR", Text: "BLOCKED: codex-r has waited"}, p))
 	assert.False(t, f.l.mayNameUncachedGM(context.Background(), Message{User: "UCR", Text: "<@UCR> self"}, p), "a self-mention")
 }
+
+// When the new authority is not yet visible on arrival (a push still
+// landing, or from another machine before the next fetch), the mention is
+// kept and classified on a later tick, still counting from its own time.
+func TestCohortNewGMMentionReplayedAfterAuthorityLands(t *testing.T) {
+	f := newCohortFixture(t)
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100",
+		User: "UBR", Text: "<@UCR> please decide"})
+	assert.Equal(t, 0, f.watchCount(), "codex-r is not GM in any view yet")
+	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "gm.json"),
+		[]byte(`{"term":1,"gm":"codex-r","claim_id":"changed-authority"}`), 0o600))
+	f.at(2 * time.Minute)
+	f.tick() // the refreshed view now names codex-r; the kept mention is classified
+	require.Equal(t, 2, f.watchCount(), "one watch per home")
+	f.at(26 * time.Minute)
+	f.tick()
+	f.tick()
+	require.Len(t, f.notices("s2"), 1, "deadlines count from the mention, not the replay")
+}
+
+// A kept mention the new GM already answered before its authority became
+// visible must not raise a false outage when it is replayed.
+func TestCohortReplayedMentionAlreadyAnsweredIsDropped(t *testing.T) {
+	f := newCohortFixture(t)
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000000.000100",
+		User: "UBR", Text: "<@UCR> please decide"})
+	reply := slack.Message{Msg: slack.Msg{User: "UCR", Timestamp: "1800000010.000100", ThreadTimestamp: "1800000000.000100", Text: "on it"}}
+	parent := slack.Message{Msg: slack.Msg{User: "UBR", Timestamp: "1800000000.000100", Text: "<@UCR> please decide"}}
+	f.api.mu.Lock()
+	f.api.replies["C1|1800000000.000100"] = []slack.Message{parent, reply}
+	f.api.mu.Unlock()
+	f.handle(context.Background(), Message{Channel: "C1", TS: "1800000010.000100", ThreadTS: "1800000000.000100", User: "UCR", Text: "on it"})
+	require.NoError(t, os.WriteFile(filepath.Join(f.root, "proj", "gm.json"),
+		[]byte(`{"term":1,"gm":"codex-r","claim_id":"changed-authority"}`), 0o600))
+	f.at(2 * time.Minute)
+	f.tick()
+	assert.Equal(t, 0, f.watchCount(), "the answer predates the replay")
+	f.at(26 * time.Minute)
+	f.tick()
+	f.tick()
+	assert.Empty(t, f.notices("s2"))
+}
+
+// With a real remote: a claim published from another clone one second after
+// this home's fetch is invisible to its local re-read, so the sole mention of
+// the new GM is kept and classified once the routine fetch sees the claim.
+func TestCohortNewGMMentionAfterRemoteClaimWithinFetchInterval(t *testing.T) {
+	_, clones := gmRepo(t, 2)
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListenerAs(t, api, d, Identity{UserID: "UCB", BotID: "BCB"})
+	now := time.Unix(1_800_000_000, 0)
+	l.Now = func() time.Time { return now }
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s2"), 0))
+	resp := l.Control(context.Background(), ControlRequest{Op: "cohort-register", SessionID: "s2",
+		Cohort: &CohortReg{Project: "proj", Agent: "codex-b", Root: clones[0], Channel: "C1"}})
+	require.True(t, resp.OK, resp.Error)
+	r, err := newClaimer(clones[1], "codex-r").Claim(context.Background(), 0, "claude", "elsewhere")
+	require.NoError(t, err)
+	require.Equal(t, ClaimWon, r.Outcome)
+	now = now.Add(time.Second)
+	l.HandleMessage(context.Background(), Message{Channel: "C1", TS: "1800000001.000100", User: "UBR", Text: "<@UCR> please decide"})
+	now = now.Add(26 * time.Minute)
+	l.CohortTick(context.Background())
+	n := 0
+	for _, g := range d.got {
+		if strings.Contains(g.text, "[cohort]") {
+			n++
+		}
+	}
+	require.Equal(t, 1, n, "the mention survives the fetch interval")
+}
