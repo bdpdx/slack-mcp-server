@@ -707,8 +707,12 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 	case "approval-watch":
 		l.WatchApproval(req.Approval, req.Channel, req.TS, req.Text)
 	case "approval":
-		decision, reason, known, ended := l.takeApproval(req.Approval)
-		return ControlResponse{OK: true, Decision: decision, Text: reason, Unknown: !known, Ended: ended}
+		decision, reason, hint, known, ended := l.takeApproval(req.Approval)
+		resp := ControlResponse{OK: true, Decision: decision, Text: reason, Unknown: !known, Ended: ended}
+		if hint != nil {
+			resp.Channel, resp.TS = hint.channel, hint.ts
+		}
+		return resp
 	case "approval-end":
 		l.EndApproval(req.Approval, req.Text)
 	case "cohort-register", "cohort-leave", "cohort-duty", "cohort-checkpoint", "cohort-status":
@@ -733,19 +737,40 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 	return ControlResponse{OK: true, Sessions: l.Status()}
 }
 
-// approval is one approval-hook request the listener answers for.
+// approval is one approval-hook request the listener answers for. The hook
+// posts it in every direct channel the session watches (one per project), so
+// it may have several copies; an answer on any copy counts.
 type approval struct {
-	channel, ts      string // the request message, once the hook registers it
-	decision, reason string // "" until answered
-	hint             bool   // the owner typed an allow word, which cannot approve
-	early            *click // a click that arrived before the hook registered
+	msgs             []approvalMsg // the request's copies, as the hook registers them
+	decision, reason string        // "" until answered
+	hint             *approvalMsg  // the copy where the owner typed an allow word, which cannot approve
+	early            []click       // clicks on copies not registered yet
 	at               time.Time
 	text             string    // the request as posted, to redraw it once it ends
 	polled           time.Time // the hook's last poll; a hook that stops polling is gone
 	ended            bool      // takes no more answers: the hook finished, or was given up on
-	owed             string    // a redraw still owed (its outcome line) until one succeeds
+	owed             string    // a redraw still owed (its outcome line) until every copy has it
 	retryAt          time.Time // when to try an owed redraw again
-	tries            int       // failed redraw attempts
+	tries            int       // failed redraw rounds
+}
+
+// approvalMsg is one posted copy of a request.
+type approvalMsg struct {
+	channel, ts string
+	drawn       bool // shows the owed outcome
+}
+
+// maxEarlyClicks bounds the clicks kept for copies not registered yet.
+const maxEarlyClicks = 8
+
+// copyAt returns the request's copy at channel and ts, or nil.
+func (a *approval) copyAt(channel, ts string) *approvalMsg {
+	for i := range a.msgs {
+		if a.msgs[i].channel == channel && a.msgs[i].ts == ts {
+			return &a.msgs[i]
+		}
+	}
+	return nil
 }
 
 // Owed redraws are retried with backoff from approvalRetry to approvalRetryMax,
@@ -793,11 +818,20 @@ func (l *Listener) WatchApproval(id, channel, ts, text string) {
 	if a.ended {
 		return // an ended request stays ended; a hook that re-registers it is told so
 	}
-	a.channel, a.ts, a.text, a.polled = channel, ts, text, l.Now()
-	if c := a.early; c != nil && a.decision == "" && c.channel == channel && c.ts == ts {
-		a.decision = c.decision
+	if a.copyAt(channel, ts) == nil {
+		a.msgs = append(a.msgs, approvalMsg{channel: channel, ts: ts})
 	}
-	a.early = nil
+	a.text, a.polled = text, l.Now()
+	kept := a.early[:0]
+	for _, c := range a.early {
+		switch {
+		case c.channel != channel || c.ts != ts:
+			kept = append(kept, c)
+		case a.decision == "":
+			a.decision = c.decision
+		}
+	}
+	a.early = kept
 }
 
 // HandleInteraction records a click on an approval button. Slack vouches
@@ -849,14 +883,12 @@ func (l *Listener) HandleInteraction(payload []byte) {
 		case a.ended:
 			l.Log.Info("ignoring a click on an ended approval request", zap.String("approval", act.Value))
 		case a.decision != "":
-		case a.channel == "":
-			if a.early == nil {
-				a.early = &c // checked when the hook registers its message
-			}
-		case a.channel == c.channel && a.ts == c.ts:
+		case a.copyAt(c.channel, c.ts) != nil:
 			a.decision = decision
+		case len(a.early) < maxEarlyClicks:
+			a.early = append(a.early, c) // checked when the hook registers that copy
 		default:
-			l.Log.Warn("ignoring approval click on a different message", zap.String("approval", act.Value), zap.String("channel", c.channel), zap.String("ts", c.ts))
+			l.Log.Warn("ignoring approval click on an unregistered message", zap.String("approval", act.Value), zap.String("channel", c.channel), zap.String("ts", c.ts))
 		}
 		l.mu.Unlock()
 		l.Log.Info("approval clicked", zap.String("approval", act.Value), zap.String("decision", decision))
@@ -877,12 +909,13 @@ func (l *Listener) approvalReply(m Message) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var target *approval
+	var at *approvalMsg // the copy answered
 	explicit := true
 	decision, reason := "", ""
 	if m.ThreadTS != "" {
 		for _, a := range l.approvals {
-			if a.channel == m.Channel && a.ts == m.ThreadTS {
-				target = a
+			if c := a.copyAt(m.Channel, m.ThreadTS); c != nil {
+				target, at = a, c
 				break
 			}
 		}
@@ -895,8 +928,14 @@ func (l *Listener) approvalReply(m Message) bool {
 			return false
 		}
 		for _, a := range l.approvals {
-			if a.channel == m.Channel && a.decision == "" && !a.ended && (target == nil || TSLess(target.ts, a.ts)) {
-				target = a
+			if a.decision != "" || a.ended {
+				continue
+			}
+			for i := range a.msgs {
+				c := &a.msgs[i]
+				if c.channel == m.Channel && (at == nil || TSLess(at.ts, c.ts)) {
+					target, at = a, c
+				}
 			}
 		}
 		if target == nil {
@@ -908,7 +947,7 @@ func (l *Listener) approvalReply(m Message) bool {
 	}
 	if m.User == l.OwnerID && target.decision == "" && !target.ended && explicit {
 		if decision == decisionAllow {
-			target.hint = true
+			target.hint = at
 		} else {
 			target.decision, target.reason = decision, reason
 		}
@@ -945,38 +984,38 @@ func (l *Listener) markConsumed(m Message) {
 // with its reason, decisionHint once after the owner typed an allow word, or
 // "" while unanswered.
 func (l *Listener) TakeApproval(id string) (decision, reason string) {
-	decision, reason, _, _ = l.takeApproval(id)
+	decision, reason, _, _, _ = l.takeApproval(id)
 	return decision, reason
 }
 
 // takeApproval is TakeApproval that also reports whether the request is
 // known (registered) to this listener, and whether it has ended: an ended
 // request never hands out an answer, so a hook that resumes late learns it
-// can decide nothing.
-func (l *Listener) takeApproval(id string) (decision, reason string, known, ended bool) {
+// can decide nothing. With decisionHint, hint is the copy to answer in.
+func (l *Listener) takeApproval(id string) (decision, reason string, hint *approvalMsg, known, ended bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	a := l.approvals[id]
 	if a == nil {
-		return "", "", false, false
+		return "", "", nil, false, false
 	}
 	a.polled = l.Now()
-	known = a.channel != ""
+	known = len(a.msgs) > 0
 	if a.ended {
-		return "", "", known, true
+		return "", "", nil, known, true
 	}
 	switch {
 	case a.decision == decisionTaken:
-		return "", "", known, false
+		return "", "", nil, known, false
 	case a.decision != "":
 		decision, reason = a.decision, a.reason
 		a.decision = decisionTaken // keep the entry so later replies stay out of the session
-		return decision, reason, known, false
-	case a.hint:
-		a.hint = false
-		return decisionHint, "", known, false
+		return decision, reason, nil, known, false
+	case a.hint != nil:
+		hint, a.hint = a.hint, nil
+		return decisionHint, "", hint, known, false
 	}
-	return "", "", known, false
+	return "", "", nil, known, false
 }
 
 // EndApproval records that request id's hook finished. owed is the outcome
@@ -986,7 +1025,16 @@ func (l *Listener) EndApproval(id, owed string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if a := l.approvals[id]; a != nil {
-		a.ended, a.owed, a.retryAt, a.tries = true, owed, l.Now(), 0
+		a.ended, a.retryAt, a.tries = true, l.Now(), 0
+		a.setOwed(owed)
+	}
+}
+
+// setOwed makes line the outcome every copy still has to show.
+func (a *approval) setOwed(line string) {
+	a.owed = line
+	for i := range a.msgs {
+		a.msgs[i].drawn = line == ""
 	}
 }
 
@@ -996,28 +1044,39 @@ func (l *Listener) EndApproval(id, owed string) {
 // it, or the hook was killed outright. It also retries redraws still owed
 // after a failure, with backoff.
 func (l *Listener) SweepApprovals(ctx context.Context) {
-	type redraw struct{ id, channel, ts, text, line string }
+	type redraw struct {
+		id, text, line string
+		copies         []approvalMsg
+	}
 	var todo []redraw
 	l.mu.Lock()
 	now := l.Now()
 	for id, a := range l.approvals {
-		if a.channel == "" {
+		if len(a.msgs) == 0 {
 			continue
 		}
 		if !a.ended && now.Sub(a.polled) >= approvalAbandoned {
 			a.ended, a.retryAt, a.tries = true, now, 0
-			a.owed = "↩️ No longer waiting: it was answered in the terminal, or the request ended. Nothing was decided here."
+			line := "↩️ No longer waiting: it was answered in the terminal, or the request ended. Nothing was decided here."
 			switch a.decision {
 			case decisionTaken: // the hook took the answer but never finished redrawing
-				a.owed = "↩️ The request ended; its outcome is in the session."
+				line = "↩️ The request ended; its outcome is in the session."
 			case "":
 			default:
-				a.owed = "↩️ Your answer arrived after the request had ended, so it changed nothing."
+				line = "↩️ Your answer arrived after the request had ended, so it changed nothing."
+			}
+			a.setOwed(line)
+		}
+		if a.owed == "" || now.Before(a.retryAt) {
+			continue
+		}
+		r := redraw{id: id, text: a.text, line: a.owed}
+		for _, c := range a.msgs {
+			if !c.drawn {
+				r.copies = append(r.copies, c)
 			}
 		}
-		if a.owed != "" && !now.Before(a.retryAt) {
-			todo = append(todo, redraw{id, a.channel, a.ts, a.text, a.owed})
-		}
+		todo = append(todo, r)
 	}
 	l.mu.Unlock()
 	for _, r := range todo {
@@ -1025,19 +1084,32 @@ func (l *Listener) SweepApprovals(ctx context.Context) {
 		if r.text != "" {
 			blocks = append([]slack.Block{slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, r.text, false, false), nil, nil)}, blocks...)
 		}
-		_, _, _, err := l.API.UpdateMessageContext(ctx, r.channel, r.ts, slack.MsgOptionText(r.line, false), slack.MsgOptionBlocks(blocks...))
+		var drawn []approvalMsg
+		var failed error
+		for _, c := range r.copies {
+			if _, _, _, err := l.API.UpdateMessageContext(ctx, c.channel, c.ts, slack.MsgOptionText(r.line, false), slack.MsgOptionBlocks(blocks...)); err != nil {
+				failed = err
+				l.Log.Warn("redrawing an ended approval request failed", zap.String("channel", c.channel), zap.String("ts", c.ts), zap.Error(err))
+				continue
+			}
+			drawn = append(drawn, c)
+		}
 		l.mu.Lock()
 		if a := l.approvals[r.id]; a != nil && a.owed == r.line {
+			for _, c := range drawn {
+				if m := a.copyAt(c.channel, c.ts); m != nil {
+					m.drawn = true
+				}
+			}
 			switch {
-			case err == nil:
+			case failed == nil:
 				a.owed = ""
 			case a.tries+1 >= approvalRetries:
 				a.owed = ""
-				l.Log.Error("giving up redrawing an ended approval request", zap.String("channel", r.channel), zap.String("ts", r.ts), zap.Error(err))
+				l.Log.Error("giving up redrawing an ended approval request", zap.String("approval", r.id), zap.Error(failed))
 			default:
 				a.tries++
 				a.retryAt = l.Now().Add(min(approvalRetry<<a.tries, approvalRetryMax))
-				l.Log.Warn("redrawing an ended approval request failed; will retry", zap.String("channel", r.channel), zap.String("ts", r.ts), zap.Error(err))
 			}
 		}
 		l.mu.Unlock()

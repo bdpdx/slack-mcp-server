@@ -115,7 +115,7 @@ func (c *cli) deniedHook(ctx context.Context, ev hookEvent, wait time.Duration) 
 	}
 	setup, cancel := context.WithTimeout(ctx, relayTimeout)
 	defer cancel()
-	channel, name, me, err := c.directChannel(setup, c.hookSession(ev))
+	targets, me, err := c.directChannels(setup, c.hookSession(ev))
 	if err != nil {
 		return 0
 	}
@@ -124,30 +124,25 @@ func (c *cli) deniedHook(ctx context.Context, ev hookEvent, wait time.Duration) 
 		// Nothing here could approve it, so the agent does not wait: the
 		// owner is told, and the block stands.
 		line := fmt.Sprintf("The block stands: it can't be approved from Slack because %s.", slackEscaper.Replace(unsafe))
-		if _, _, err := c.bot.PostMessageContext(setup, channel,
+		c.postEach(setup, targets, "blocked-action notice",
 			slack.MsgOptionText(fmt.Sprintf("Auto mode blocked %s: %s", me.agentName, ev.ToolName), false),
 			slack.MsgOptionBlocks(
 				slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, text, false, false), nil, nil),
 				slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, line, false, false)),
-			)); err != nil {
-			fmt.Fprintf(c.stderr, "slack-agent-chat: posting blocked-action notice to #%s: %v\n", name, err)
-		}
+			))
 		return 0
 	}
 	id := newApprovalID()
-	_, ts, err := c.bot.PostMessageContext(setup, channel,
+	posted := c.postEach(setup, targets, "blocked-action request",
 		slack.MsgOptionText(fmt.Sprintf("Auto mode blocked %s: %s", me.agentName, ev.ToolName), false),
 		slack.MsgOptionBlocks(deniedBlocks(text, unsafe, id, wait)...))
-	if err != nil {
-		fmt.Fprintf(c.stderr, "slack-agent-chat: posting blocked-action request to #%s: %v\n", name, err)
+	if len(posted) == 0 {
 		return 0
 	}
-	if _, err := SendControl(setup, c.home.ControlSocket, ControlRequest{Op: "approval-watch", Approval: id, Channel: channel, TS: ts, Text: text}); err != nil {
-		fmt.Fprintf(c.stderr, "slack-agent-chat: registering blocked-action request with the listener: %v\n", err)
-	}
+	c.watchCopies(setup, id, text, posted)
 
 	waitCtx, cancelWait := context.WithTimeout(ctx, wait)
-	decision, reason := c.waitForApproval(waitCtx, channel, ts, id, text, deniedHint)
+	decision, reason := c.waitForApproval(waitCtx, posted, id, text, deniedHint)
 	cancelWait()
 
 	finish, cancelFinish := context.WithTimeout(context.WithoutCancel(ctx), relayTimeout)
@@ -156,7 +151,7 @@ func (c *cli) deniedHook(ctx context.Context, ev hookEvent, wait time.Duration) 
 	if decision == decisionEnded || (decision == "" && ctx.Err() != nil) {
 		outcome = endedOutcome
 	}
-	c.finishRequest(finish, channel, ts, id, text, outcome)
+	c.finishRequest(finish, posted, id, text, outcome)
 	if decision == decisionAllow {
 		c.printJSON(retryDecision())
 	}

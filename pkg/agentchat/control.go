@@ -52,8 +52,12 @@ type ControlResponse struct {
 	Sessions []SessionStatus `json:"sessions,omitempty"`
 	Decision string          `json:"decision,omitempty"` // for op "approval"
 	Text     string          `json:"text,omitempty"`     // for op "approval": the reason
-	Cohort   []CohortReg     `json:"cohort,omitempty"`   // for cohort-* ops
-	Watches  []GMWatch       `json:"watches,omitempty"`  // for cohort-status: pending deadlines
+	// Channel and TS name the copy of an "approval" request to post the hint
+	// in (decision hint): the one where the owner typed an allow word.
+	Channel string      `json:"channel,omitempty"`
+	TS      string      `json:"ts,omitempty"`
+	Cohort  []CohortReg `json:"cohort,omitempty"`  // for cohort-* ops
+	Watches []GMWatch   `json:"watches,omitempty"` // for cohort-status: pending deadlines
 	// Unavailable marks a cohort-claim-check refusal for missing evidence
 	// (an unreadable lookup), as opposed to a definite no.
 	Unavailable bool `json:"unavailable,omitempty"`

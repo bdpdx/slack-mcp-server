@@ -61,7 +61,7 @@ Slack's API cannot delete channels, so this archives them: they leave the sideba
 
 While you watch a project, ask the user questions in your direct channel (`<project>__<user>_<you>`), never with a terminal question tool: a terminal question blocks this session, so an answer the user gives in Slack could not reach you. Post the question and @mention the user, then keep working on anything that does not depend on the answer; end your turn only when nothing is left. The answer arrives as a notice, even mid-turn. If you do call `AskUserQuestion`, a hook posts it to that channel for you and tells you so; carry on the same way.
 
-When an action needs the user's approval, a hook asks them in that channel and answers the prompt; a denial reaches you with their reason. Do not ask for approval yourself, and never reply in an approval request's thread.
+When an action needs the user's approval, a hook asks them in that channel and answers the prompt; a denial reaches you with their reason. Do not ask for approval yourself, and never reply in an approval request's thread. A session watching several projects has a direct channel in each; hook questions and approval requests go to all of them, and the first answer wins.
 
 ## `%agents:`
 

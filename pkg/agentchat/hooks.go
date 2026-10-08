@@ -3,8 +3,10 @@ package agentchat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -149,11 +151,17 @@ func toolDetail(input json.RawMessage) (block, unsafe string) {
 // askHookReason is shown both to the owner in the terminal (Claude Code
 // labels it a hook error) and to Claude, so it opens with a line for the
 // owner and then tells Claude what to do.
-func askHookReason(channelName, ts string) string {
-	return fmt.Sprintf("Question sent to Slack: #%s. Answer it there.\n"+
-		"(For the agent: the questions were posted to #%s, ts %s, instead of the terminal. Do not ask again. "+
+func askHookReason(posted []postedMsg) string {
+	var names, where []string
+	for _, p := range posted {
+		names = append(names, "#"+p.name)
+		where = append(where, fmt.Sprintf("#%s (ts %s)", p.name, p.ts))
+	}
+	return fmt.Sprintf("Question sent to Slack: %s. Answer it there.\n"+
+		"(For the agent: the questions were posted to %s instead of the terminal. Do not ask again. "+
 		"Keep working on anything that does not depend on the answers; if nothing is left, end your turn. "+
-		"The answer will arrive as a [slack-agent-chat] notice from that channel, even mid-turn.)", channelName, channelName, ts)
+		"The answer will arrive as a [slack-agent-chat] notice from one of those channels, even mid-turn.)",
+		strings.Join(names, ", "), strings.Join(where, ", "))
 }
 
 // askHook (Claude PreToolUse on AskUserQuestion) posts the questions to the
@@ -162,7 +170,7 @@ func askHookReason(channelName, ts string) string {
 // session watching no project, or any failure, leaves the question to the
 // terminal.
 func (c *cli) askHook(ctx context.Context, ev hookEvent) int {
-	id, name, me, err := c.directChannel(ctx, c.hookSession(ev))
+	targets, me, err := c.directChannels(ctx, c.hookSession(ev))
 	if err != nil {
 		return 0
 	}
@@ -170,15 +178,14 @@ func (c *cli) askHook(ctx context.Context, ev hookEvent) int {
 	if !ok {
 		return 0
 	}
-	_, ts, err := c.bot.PostMessageContext(ctx, id, slack.MsgOptionText(text, false))
-	if err != nil {
-		fmt.Fprintf(c.stderr, "slack-agent-chat: posting question to #%s: %v\n", name, err)
+	posted := c.postEach(ctx, targets, "question", slack.MsgOptionText(text, false))
+	if len(posted) == 0 {
 		return 0
 	}
 	c.printJSON(map[string]any{"hookSpecificOutput": map[string]string{
 		"hookEventName":            "PreToolUse",
 		"permissionDecision":       "deny",
-		"permissionDecisionReason": askHookReason(name, ts),
+		"permissionDecisionReason": askHookReason(posted),
 	}})
 	return 0
 }
@@ -195,35 +202,66 @@ func sessionOf(id string) string {
 	return os.Getenv("CODEX_THREAD_ID")
 }
 
-// directChannel returns the #PROJECT__OWNER_AGENT channel that session
-// watches for its one project.
-func (c *cli) directChannel(ctx context.Context, session string) (string, string, identity, error) {
+// namedChannel is a channel ID with its name.
+type namedChannel struct{ id, name string }
+
+// postedMsg is a message a hook posted: its channel, the channel's name and
+// its ts.
+type postedMsg struct{ channel, name, ts string }
+
+// directChannels returns the #PROJECT__OWNER_AGENT channels session watches,
+// one per watched project, in name order. A session watching no project
+// gets an error.
+func (c *cli) directChannels(ctx context.Context, session string) ([]namedChannel, identity, error) {
 	ids, names, err := c.sessionChannels(ctx, session)
 	if err != nil {
-		return "", "", identity{}, err
+		return nil, identity{}, err
 	}
 	me, err := c.identity(ctx)
 	if err != nil {
-		return "", "", identity{}, err
+		return nil, identity{}, err
 	}
-	var found []string // IDs of watched direct channels
+	found := directChannelsOf(ids, names, me.ownerName, me.agentName)
+	if len(found) == 0 {
+		return nil, identity{}, errors.New("this session watches no direct channel")
+	}
+	return found, me, nil
+}
+
+// directChannelsOf picks, from the watched channels ids (named by names),
+// the direct channel of each watched project, in name order.
+func directChannelsOf(ids []string, names map[string]string, owner, agent string) []namedChannel {
+	var found []namedChannel
 	for _, id := range ids {
 		project, derived := ProjectOf(names[id])
 		if derived {
 			continue
 		}
-		name, err := DirectChannelName(project, me.ownerName, me.agentName)
+		name, err := DirectChannelName(project, owner, agent)
 		if err != nil {
 			continue
 		}
 		for _, d := range ids {
 			if names[d] == name {
-				found = append(found, d)
+				found = append(found, namedChannel{d, name})
 			}
 		}
 	}
-	if len(found) != 1 {
-		return "", "", identity{}, fmt.Errorf("this session watches %d direct channels", len(found))
+	sort.Slice(found, func(i, j int) bool { return found[i].name < found[j].name })
+	return found
+}
+
+// postEach posts the same message (what names it in errors) to every target,
+// returning the copies that were posted.
+func (c *cli) postEach(ctx context.Context, targets []namedChannel, what string, opts ...slack.MsgOption) []postedMsg {
+	var posted []postedMsg
+	for _, t := range targets {
+		_, ts, err := c.bot.PostMessageContext(ctx, t.id, opts...)
+		if err != nil {
+			fmt.Fprintf(c.stderr, "slack-agent-chat: posting %s to #%s: %v\n", what, t.name, err)
+			continue
+		}
+		posted = append(posted, postedMsg{t.id, t.name, ts})
 	}
-	return found[0], names[found[0]], me, nil
+	return posted
 }
