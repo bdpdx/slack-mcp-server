@@ -650,8 +650,10 @@ func TestKeptBacklogIncludesTheGap(t *testing.T) {
 	require.NoError(t, err)
 	l1.Now = func() time.Time { return time.Unix(2000, 0) }
 	l1.Stop = func() {}
+	api.history["C1"] = []slack.Message{msg("1999.5", "UBR", "before")}
 	require.True(t, l1.Control(ctx, ControlRequest{Op: "shutdown"}).OK)
-	require.NoError(t, l1.Subscribe(ctx, claudeSub("s2"), 1))
+	require.NoError(t, l1.Subscribe(ctx, claudeSub("s2"), 2))
+	require.Equal(t, 2, l1.state.Backlogs["s2|C1"], "refused, so kept")
 
 	api.history["C1"] = []slack.Message{msg("2000.6", "UBR", "gap two"), msg("2000.5", "UBR", "gap one"), msg("1999.5", "UBR", "before")}
 	d2 := &fakeDeliverer{}
@@ -660,7 +662,8 @@ func TestKeptBacklogIncludesTheGap(t *testing.T) {
 	l2.RecoverAll(ctx)
 	require.Len(t, d2.got, 1)
 	assert.Equal(t, 1, strings.Count(d2.got[0].text, "gap two"), "the backlog and the gap overlap: sent once")
-	assert.Contains(t, d2.got[0].text, "gap one", "a gap message older than the backlog window is not held back")
+	assert.Equal(t, 1, strings.Count(d2.got[0].text, "gap one"), "a gap message older than the backlog window is not held back")
+	assert.NotContains(t, d2.got[0].text, "before", "the backlog window (2) is the two newest; the rest of the gap comes from the join")
 	assert.Empty(t, l2.state.Backlogs, "cleared once delivered")
 
 	d3 := &fakeDeliverer{}
@@ -668,4 +671,26 @@ func TestKeptBacklogIncludesTheGap(t *testing.T) {
 	l3.state.Backlogs = nil
 	require.NoError(t, l3.Subscribe(ctx, claudeSub("s3"), 2))
 	assert.Empty(t, l3.state.Backlogs, "a normal watch keeps nothing once its backlog is settled")
+}
+
+// A backlog whose delivery fails is kept and sent by a later retry, once.
+func TestFailedBacklogIsRetried(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeSlack()
+	api.history["C1"] = []slack.Message{msg("1999.5", "UBR", "context")}
+	d := &fakeDeliverer{errs: map[string]error{"s4": errors.New("socket busy")}}
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s4"), 3))
+	assert.Empty(t, d.got)
+	assert.Equal(t, 3, l.state.Backlogs["s4|C1"], "kept after the failure")
+
+	d.mu.Lock()
+	d.errs = nil
+	d.mu.Unlock()
+	l.RetryBacklogs(ctx)
+	require.Len(t, d.got, 1)
+	assert.Contains(t, d.got[0].text, "context")
+	assert.Empty(t, l.state.Backlogs, "cleared once delivered")
+	l.RetryBacklogs(ctx)
+	assert.Len(t, d.got, 1, "not sent again")
 }

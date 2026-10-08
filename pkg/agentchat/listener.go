@@ -425,9 +425,20 @@ func (l *Listener) sessionLock(sessionID string) *sync.Mutex {
 
 // deliverTo pushes the items sub hasn't had yet as one notice, records them
 // and marks each one delivered with a reaction.
-// It reports refused when the listener is shutting down and delivered
-// nothing, so the caller can keep what it cannot redo from history.
-func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pending) (refused bool) {
+// deliverOutcome is what deliverTo did.
+type deliverOutcome int
+
+const (
+	deliverNone    deliverOutcome = iota // nothing new to deliver
+	deliverDone                          // delivered and marked
+	deliverRefused                       // shutting down; delivered nothing
+	deliverFailed                        // the delivery failed; nothing marked
+	deliverGone                          // the session is gone; its subscription was dropped
+)
+
+// It reports what happened, so a caller can keep what it cannot redo from
+// history.
+func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pending) deliverOutcome {
 	// One delivery per session at a time, so live events and recovery cannot
 	// both push the same message.
 	sl := l.sessionLock(sub.SessionID)
@@ -442,7 +453,7 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 	}
 	l.mu.Unlock()
 	if len(fresh) == 0 {
-		return
+		return deliverNone
 	}
 	text := fresh[0].notice.Format()
 	if len(fresh) > 1 {
@@ -454,7 +465,7 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 	}
 	last := fresh[len(fresh)-1].msg
 	if !l.beginDelivery() {
-		return true // shutting down: left unmarked for the next listener
+		return deliverRefused // shutting down: left unmarked for the next listener
 	}
 	defer l.endDelivery() // after the delivery is marked below
 	method, err := l.Deliverer.Deliver(ctx, sub, clientMessageID(sub.SessionID, last.Channel, last.TS), text)
@@ -462,10 +473,10 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 		if errors.Is(err, ErrSessionGone) {
 			l.Log.Info("session gone; dropping its subscription", zap.String("session", sub.SessionID), zap.String("kind", sub.Kind), zap.Error(err))
 			l.Unsubscribe(sub.SessionID, "")
-			return
+			return deliverGone
 		}
 		l.Log.Warn("delivery failed", zap.String("session", sub.SessionID), zap.String("kind", sub.Kind), zap.Error(err))
-		return
+		return deliverFailed
 	}
 	l.Log.Info("delivered", zap.String("session", sub.SessionID), zap.String("kind", sub.Kind), zap.String("method", method), zap.Int("messages", len(fresh)))
 	l.mu.Lock()
@@ -481,7 +492,7 @@ func (l *Listener) deliverTo(ctx context.Context, sub *Subscription, items []pen
 	for _, it := range fresh {
 		l.react(ctx, it.msg, reactionDelivered)
 	}
-	return false
+	return deliverDone
 }
 
 func (l *Listener) react(ctx context.Context, m Message, name string) {
@@ -559,9 +570,12 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 				backlogs = append(backlogs, ch)
 			}
 		}
-		l.setBacklogs(sub.SessionID, backlogs, backlog)
+		if len(backlogs) > 0 {
+			l.setBacklogs(sub.SessionID, backlogs, backlog)
+		}
 	}
 	var items []pending
+	readFailed := false // a backlog's history read failed: keep it to retry
 	seen := map[string]bool{}
 	add := func(p pending) {
 		if k := p.msg.Channel + "|" + p.msg.TS; !seen[k] {
@@ -575,6 +589,7 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 				found, err := l.routedBacklog(ctx, ch, backlog)
 				if err != nil {
 					l.Log.Warn("reading history failed", zap.String("channel", ch), zap.Error(err))
+					readFailed = true
 				}
 				for _, p := range found {
 					add(p)
@@ -603,11 +618,36 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 	if len(items) > maxRecovery {
 		items = items[len(items)-maxRecovery:]
 	}
-	if len(items) > 0 && l.deliverTo(ctx, sub, items) {
-		return // shutting down: the kept backlogs stay for the next listener
+	outcome := deliverNone
+	if len(items) > 0 {
+		outcome = l.deliverTo(ctx, sub, items)
 	}
-	if len(backlogs) > 0 {
+	switch {
+	case outcome == deliverRefused, outcome == deliverFailed, readFailed:
+		// Kept: the next listener, or the next sweep (RetryBacklogs), tries
+		// again until it is delivered or the watch ends.
+	case len(backlogs) > 0:
 		l.setBacklogs(sub.SessionID, backlogs, 0) // settled
+	}
+}
+
+// RetryBacklogs sends the kept first-join backlogs of watching sessions
+// whose earlier delivery or history read failed.
+func (l *Listener) RetryBacklogs(ctx context.Context) {
+	l.mu.Lock()
+	var subs []*Subscription
+	for _, sub := range l.state.Subscriptions {
+		for _, ch := range sub.Channels {
+			if l.state.Backlogs[sub.SessionID+"|"+ch] > 0 {
+				subs = append(subs, sub)
+				break
+			}
+		}
+	}
+	l.mu.Unlock()
+	for _, sub := range subs {
+		first, backlog := l.keptBacklogs(sub)
+		l.recoverKept(ctx, sub, sub.Channels, first, backlog, true)
 	}
 }
 
@@ -1452,11 +1492,16 @@ func (l *Listener) RecoverAll(ctx context.Context) {
 	for _, sub := range l.state.Subscriptions {
 		subs = append(subs, sub)
 	}
+	stale := false
 	for k := range l.state.Backlogs {
 		s, ch, _ := strings.Cut(k, "|")
 		if sub := l.state.Subscriptions[s]; sub == nil || !slices.Contains(sub.Channels, ch) {
 			delete(l.state.Backlogs, k) // its watch ended before this listener started
+			stale = true
 		}
+	}
+	if stale {
+		l.saveStateLocked()
 	}
 	l.mu.Unlock()
 	for _, sub := range subs {

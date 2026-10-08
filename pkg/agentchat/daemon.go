@@ -178,6 +178,7 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 			case now := <-tick.C:
 				if now.Sub(lastSweep) >= sweepInterval {
 					l.Sweep(ctx)
+					l.RetryBacklogs(ctx)
 					lastSweep = now
 				}
 				l.SweepApprovals(ctx)
