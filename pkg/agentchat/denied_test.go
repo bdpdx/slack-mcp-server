@@ -87,7 +87,7 @@ func TestSweepApprovalsRedrawsEndedRequests(t *testing.T) {
 		require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: id, Channel: "C1", TS: "ts-" + id, Text: "request " + id}).OK)
 	}
 	l.HandleInteraction(clickOn("UBR", decisionDeny, "done", "C1", "ts-done", "BCL"))
-	d, _ := takeApproval(t, l, "done") // the hook took its answer and finished
+	d, _ := takeApproval(t, l, "done") // the hook took its answer, then was killed before ending
 	require.Equal(t, decisionDeny, d)
 
 	now = now.Add(20 * time.Second)
@@ -99,14 +99,16 @@ func TestSweepApprovalsRedrawsEndedRequests(t *testing.T) {
 	l.HandleInteraction(clickOn("UBR", decisionAllow, "late", "C1", "ts-late", "BCL"))
 	l.SweepApprovals(ctx)
 	got := api.updates()
-	require.Len(t, got, 2)
+	require.Len(t, got, 3)
 	assert.Contains(t, got, "C1|ts-gone|↩️ No longer waiting: it was answered in the terminal, or the request ended. Nothing was decided here.")
 	assert.Contains(t, got, "C1|ts-late|↩️ Your answer arrived after the request had ended, so it changed nothing.")
+	assert.Contains(t, got, "C1|ts-done|↩️ The request ended; its outcome is in the session.",
+		"a hook killed after taking its answer, before ending, is caught too")
 
 	now = now.Add(time.Minute)
 	takeApproval(t, l, "live")
 	l.SweepApprovals(ctx)
-	assert.Len(t, api.updates(), 2, "each ended request is redrawn once; a live or taken one never")
+	assert.Len(t, api.updates(), 3, "each ended request is redrawn once; a live one never")
 }
 
 // A hook that finishes on its own (answered, waited out, or stopped) redraws

@@ -275,5 +275,8 @@ func (c *cli) waitForApproval(ctx context.Context, channel, ts, id, text, hint s
 // endApproval tells the listener the hook finished and redrew its request,
 // so the listener's sweep (for hooks killed outright) leaves it alone.
 func (c *cli) endApproval(ctx context.Context, id string) {
-	_, _ = SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval-end", Approval: id})
+	// A budget of its own: the redraw before it may have used up ctx's.
+	end, cancel := context.WithTimeout(context.WithoutCancel(ctx), hintTimeout)
+	defer cancel()
+	_, _ = SendControl(end, c.home.ControlSocket, ControlRequest{Op: "approval-end", Approval: id})
 }

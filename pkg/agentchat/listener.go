@@ -968,19 +968,24 @@ func (l *Listener) EndApproval(id string) {
 }
 
 // SweepApprovals redraws each registered request whose hook stopped polling
-// without taking an answer, so Slack never shows live buttons for a prompt
-// that ended elsewhere (the terminal answered it, or the session moved on).
+// without saying it finished (approval-end), so Slack never shows live
+// buttons for a prompt that ended elsewhere: the terminal answered it, or the
+// hook was killed outright.
 func (l *Listener) SweepApprovals(ctx context.Context) {
 	type ended struct{ channel, ts, text, line string }
 	var gone []ended
 	l.mu.Lock()
 	for _, a := range l.approvals {
-		if a.channel == "" || a.closed || a.decision == decisionTaken || l.Now().Sub(a.polled) < approvalAbandoned {
+		if a.channel == "" || a.closed || l.Now().Sub(a.polled) < approvalAbandoned {
 			continue
 		}
 		a.closed = true
 		line := "↩️ No longer waiting: it was answered in the terminal, or the request ended. Nothing was decided here."
-		if a.decision != "" {
+		switch a.decision {
+		case decisionTaken: // the hook took the answer but never finished redrawing
+			line = "↩️ The request ended; its outcome is in the session."
+		case "":
+		default:
 			line = "↩️ Your answer arrived after the request had ended, so it changed nothing."
 		}
 		gone = append(gone, ended{a.channel, a.ts, a.text, line})
