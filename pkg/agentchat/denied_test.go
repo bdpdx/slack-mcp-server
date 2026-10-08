@@ -19,7 +19,7 @@ func TestFormatDenied(t *testing.T) {
 	assert.True(t, strings.HasSuffix(msg, "\nReason: [Modify Shared Resources]"), msg)
 	assert.NotContains(t, msg, "needs your approval")
 
-	_, unsafe = FormatDenied("UBR", "claude-b", "Bash", []byte(`{"command":"ls"}`), "fine‮reversed")
+	_, unsafe = FormatDenied("UBR", "claude-b", "Bash", []byte(`{"command":"ls"}`), "[X] fine\u202ereversed")
 	assert.Contains(t, unsafe, "its reason contains invisible")
 	_, unsafe = FormatDenied("UBR", "claude-b", "Bash", []byte(`{"command":"ls​"}`), "[X]")
 	assert.Contains(t, unsafe, "invisible", "the command's own hidden characters still count")
