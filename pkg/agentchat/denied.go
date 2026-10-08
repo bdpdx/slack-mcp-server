@@ -94,15 +94,9 @@ func deniedOutcome(decision, reason string, wait time.Duration) string {
 			return "❌ Declined: " + slackEscaper.Replace(reason)
 		}
 		return "❌ Declined; the block stands."
-	case decisionUnshown:
-		return "❌ Not approved: it couldn't be shown in full here, so the block stands."
 	}
 	return fmt.Sprintf("⏱ No answer after %s; the block stands.", wait)
 }
-
-// decisionUnshown is an approval of a request whose Approve button was never
-// offered (a stale or forged click): it never approves.
-const decisionUnshown = "unshown"
 
 // retryDecision is the hook output letting the model retry.
 func retryDecision() map[string]any {
@@ -126,6 +120,20 @@ func (c *cli) deniedHook(ctx context.Context, ev hookEvent, wait time.Duration) 
 		return 0
 	}
 	text, unsafe := FormatDenied(me.ownerID, me.agentName, ev.ToolName, ev.ToolInput, ev.Reason)
+	if unsafe != "" {
+		// Nothing here could approve it, so the agent does not wait: the
+		// owner is told, and the block stands.
+		line := fmt.Sprintf("The block stands: it can't be approved from Slack because %s.", slackEscaper.Replace(unsafe))
+		if _, _, err := c.bot.PostMessageContext(setup, channel,
+			slack.MsgOptionText(fmt.Sprintf("Auto mode blocked %s: %s", me.agentName, ev.ToolName), false),
+			slack.MsgOptionBlocks(
+				slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, text, false, false), nil, nil),
+				slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, line, false, false)),
+			)); err != nil {
+			fmt.Fprintf(c.stderr, "slack-agent-chat: posting blocked-action notice to #%s: %v\n", name, err)
+		}
+		return 0
+	}
 	id := newApprovalID()
 	_, ts, err := c.bot.PostMessageContext(setup, channel,
 		slack.MsgOptionText(fmt.Sprintf("Auto mode blocked %s: %s", me.agentName, ev.ToolName), false),
@@ -141,9 +149,6 @@ func (c *cli) deniedHook(ctx context.Context, ev hookEvent, wait time.Duration) 
 	waitCtx, cancelWait := context.WithTimeout(ctx, wait)
 	decision, reason := c.waitForApproval(waitCtx, channel, ts, id, text, deniedHint)
 	cancelWait()
-	if decision == decisionAllow && unsafe != "" {
-		decision = decisionUnshown // there was no Approve button; never approve what was not shown
-	}
 
 	finish, cancelFinish := context.WithTimeout(context.WithoutCancel(ctx), relayTimeout)
 	defer cancelFinish()

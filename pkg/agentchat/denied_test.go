@@ -58,7 +58,6 @@ func TestFormatDeniedWithholdsInputWithoutARule(t *testing.T) {
 }
 
 func TestDeniedOutcomeAndRetryOutput(t *testing.T) {
-	assert.Equal(t, "❌ Not approved: it couldn't be shown in full here, so the block stands.", deniedOutcome(decisionUnshown, "", time.Minute))
 	assert.Equal(t, "❌ Declined; the block stands.", deniedOutcome(decisionTerminal, "", time.Minute), "no terminal to hand it to")
 	assert.Equal(t, "✅ Approved; the agent may retry.", deniedOutcome(decisionAllow, "", time.Minute))
 	assert.Equal(t, "❌ Declined: use a PR", deniedOutcome(decisionDeny, "use a PR", time.Minute))
@@ -208,4 +207,21 @@ func TestApprovalPollReportsUnknownRequests(t *testing.T) {
 	resp = l.Control(ctx, ControlRequest{Op: "approval", Approval: "lost"})
 	assert.False(t, resp.Unknown)
 	assert.Equal(t, decisionAllow, resp.Decision, "the click on the re-registered message counts")
+}
+
+// A bare reply in the direct channel answers the newest live request, never
+// an ended one that happens to be newer.
+func TestChannelReplySkipsEndedRequests(t *testing.T) {
+	api := newFakeSlack()
+	l := newTestListener(t, api, &fakeDeliverer{})
+	now := time.Unix(2000, 0)
+	l.Now = func() time.Time { return now }
+	ctx := context.Background()
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "old", Channel: "C1", TS: "2000.1", Text: "older"}).OK)
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-watch", Approval: "new", Channel: "C1", TS: "2000.2", Text: "newer"}).OK)
+	require.True(t, l.Control(ctx, ControlRequest{Op: "approval-end", Approval: "new"}).OK)
+	assert.True(t, l.approvalReply(Message{Channel: "C1", User: "UBR", Text: "no, wrong branch", TS: "2000.3"}))
+	d, r := takeApproval(t, l, "old")
+	assert.Equal(t, decisionDeny, d)
+	assert.Equal(t, "wrong branch", r)
 }

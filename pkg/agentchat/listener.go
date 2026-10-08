@@ -894,7 +894,7 @@ func (l *Listener) approvalReply(m Message) bool {
 			return false
 		}
 		for _, a := range l.approvals {
-			if a.channel == m.Channel && a.decision == "" && (target == nil || TSLess(target.ts, a.ts)) {
+			if a.channel == m.Channel && a.decision == "" && !a.ended && (target == nil || TSLess(target.ts, a.ts)) {
 				target = a
 			}
 		}
