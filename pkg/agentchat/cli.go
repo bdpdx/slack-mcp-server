@@ -284,7 +284,7 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			if fs.Parse(rest[1:]) != nil {
 				return 0
 			}
-			// The host stops the hook when the terminal answers first (or the
+			// The host may stop the hook when the terminal answers first (or the
 			// session moves on); the hook then marks its Slack request ended.
 			sig, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 			defer stop()
