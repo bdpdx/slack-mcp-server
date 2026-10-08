@@ -133,13 +133,12 @@ func (c *cli) deniedHook(ctx context.Context, ev hookEvent, wait time.Duration) 
 		return 0
 	}
 	id := newApprovalID()
-	posted := c.postEach(setup, targets, "blocked-action request",
+	posted := c.postRequest(setup, targets, "blocked-action request", id, text,
 		slack.MsgOptionText(fmt.Sprintf("Auto mode blocked %s: %s", me.agentName, ev.ToolName), false),
 		slack.MsgOptionBlocks(deniedBlocks(text, unsafe, id, wait)...))
 	if len(posted) == 0 {
 		return 0
 	}
-	c.watchCopies(setup, id, text, posted)
 
 	waitCtx, cancelWait := context.WithTimeout(ctx, wait)
 	decision, reason := c.waitForApproval(waitCtx, posted, id, text, deniedHint)

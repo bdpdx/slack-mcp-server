@@ -174,13 +174,12 @@ func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration
 	}
 	text, unsafe := FormatApproval(me.ownerID, me.agentName, ev.ToolName, ev.ToolInput)
 	id := newApprovalID()
-	posted := c.postEach(setup, targets, "approval request",
+	posted := c.postRequest(setup, targets, "approval request", id, text,
 		slack.MsgOptionText(fmt.Sprintf("%s needs your approval: %s", me.agentName, ev.ToolName), false),
 		slack.MsgOptionBlocks(approvalBlocks(text, unsafe, id, wait)...))
 	if len(posted) == 0 {
 		return 0
 	}
-	c.watchCopies(setup, id, text, posted)
 
 	waitCtx, cancelWait := context.WithTimeout(ctx, wait)
 	decision, reason := c.waitForApproval(waitCtx, posted, id, text, approvalHint)
@@ -225,13 +224,46 @@ func (c *cli) postBlocked(ctx context.Context, session, agent, tool string, wait
 	}
 }
 
-// watchCopies registers each posted copy of request id with the listener.
-func (c *cli) watchCopies(ctx context.Context, id, text string, posted []postedMsg) {
-	for _, p := range posted {
-		if _, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval-watch", Approval: id, Channel: p.channel, TS: p.ts, Text: text}); err != nil {
-			fmt.Fprintf(c.stderr, "slack-agent-chat: registering request with the listener: %v\n", err)
+// postRequest posts request id (text is its body) in each target and
+// registers every copy with the listener, returning the copies posted.
+func (c *cli) postRequest(ctx context.Context, targets []namedChannel, what, id, text string, opts ...slack.MsgOption) []postedMsg {
+	return postCopies(targets,
+		func(t namedChannel) (string, error) {
+			_, ts, err := c.bot.PostMessageContext(ctx, t.id, opts...)
+			if err != nil {
+				fmt.Fprintf(c.stderr, "slack-agent-chat: posting %s to #%s: %v\n", what, t.name, err)
+			}
+			return ts, err
+		},
+		func(p postedMsg) (int, error) {
+			resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "approval-watch", Approval: id, Channel: p.channel, TS: p.ts, Text: text})
+			if err != nil {
+				fmt.Fprintf(c.stderr, "slack-agent-chat: registering %s with the listener: %v\n", what, err)
+			}
+			return resp.Copies, err
+		})
+}
+
+// postCopies posts a request in each target and registers each copy (watch
+// returns how many copies the listener holds). A listener that answers the
+// first registration without a count predates multi-copy requests and keeps
+// only the last copy registered, so it gets that one copy and no more: a
+// denial on an earlier copy could otherwise be lost.
+func postCopies(targets []namedChannel, post func(namedChannel) (string, error), watch func(postedMsg) (int, error)) []postedMsg {
+	var posted []postedMsg
+	for _, t := range targets {
+		ts, err := post(t)
+		if err != nil {
+			continue
+		}
+		p := postedMsg{t.id, t.name, ts}
+		posted = append(posted, p)
+		n, err := watch(p)
+		if err == nil && n == 0 && len(posted) == 1 {
+			return posted // an older listener: one copy only
 		}
 	}
+	return posted
 }
 
 // approvalHint and deniedHint answer an owner who typed an allow word.

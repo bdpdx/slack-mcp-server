@@ -705,7 +705,7 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 	case "expect":
 		l.ExpectRelay(req.SessionID, req.Channel, req.Text)
 	case "approval-watch":
-		l.WatchApproval(req.Approval, req.Channel, req.TS, req.Text)
+		return ControlResponse{OK: true, Copies: l.WatchApproval(req.Approval, req.Channel, req.TS, req.Text)}
 	case "approval":
 		p := l.takeApproval(req.Approval)
 		return ControlResponse{OK: true, Decision: p.decision, Text: p.reason, Unknown: p.copies == 0, Ended: p.ended,
@@ -741,7 +741,7 @@ type approval struct {
 	msgs             []approvalMsg // the request's copies, as the hook registers them
 	decision, reason string        // "" until answered
 	hint             *approvalMsg  // the copy where the owner typed an allow word, which cannot approve; read only under l.mu
-	early            []click       // clicks on copies not registered yet
+	clicks           []click       // owner clicks not yet applied, oldest first: one waits for its copy to register
 	at               time.Time
 	text             string    // the request as posted, to redraw it once it ends
 	polled           time.Time // the hook's last poll; a hook that stops polling is gone
@@ -757,8 +757,14 @@ type approvalMsg struct {
 	drawn       bool // shows the owed outcome
 }
 
-// maxEarlyClicks bounds the clicks kept for copies not registered yet.
-const maxEarlyClicks = 8
+// maxPendingClicks bounds the clicks kept waiting for their copies, and
+// clickCopyWait is how long a click waits for its copy to register before it
+// is dropped (a hook registers each copy right after posting it), so a click
+// on a copy that never registers holds up later clicks only briefly.
+const (
+	maxPendingClicks = 8
+	clickCopyWait    = 10 * time.Second
+)
 
 // copyAt returns the request's copy at channel and ts, or nil.
 func (a *approval) copyAt(channel, ts string) *approvalMsg {
@@ -768,6 +774,25 @@ func (a *approval) copyAt(channel, ts string) *approvalMsg {
 		}
 	}
 	return nil
+}
+
+// applyClicks decides the request by its oldest pending click once that
+// click's copy is registered. Clicks apply strictly in the order they were
+// made: a later click never overtakes an earlier one still waiting for its
+// copy, so an approval can't win over a denial clicked before it. Call with
+// l.mu held.
+func (a *approval) applyClicks(now time.Time) {
+	for a.decision == "" && len(a.clicks) > 0 {
+		first := a.clicks[0]
+		switch {
+		case a.copyAt(first.channel, first.ts) != nil:
+			a.decision, a.clicks = first.decision, nil
+		case now.Sub(first.at) < clickCopyWait:
+			return // wait for the hook to register that copy
+		default:
+			a.clicks = a.clicks[1:] // its copy never registered
+		}
+	}
 }
 
 // Owed redraws are retried with backoff from approvalRetry to approvalRetryMax,
@@ -787,6 +812,7 @@ const approvalAbandoned = 30 * time.Second
 // click is an owner's button click on a message posted by this bot.
 type click struct {
 	channel, ts, decision string
+	at                    time.Time
 }
 
 // approvalEntry returns the request with id, creating it, and forgets
@@ -805,30 +831,24 @@ func (l *Listener) approvalEntry(id string) *approval {
 	return a
 }
 
-// WatchApproval registers the message a hook posted for request id (text is
-// its body), so replies in its thread are read as answers instead of
-// delivered, and the message is redrawn if the hook goes away unanswered.
-func (l *Listener) WatchApproval(id, channel, ts, text string) {
+// WatchApproval registers a copy (message) a hook posted for request id
+// (text is its body), so replies in its thread are read as answers instead
+// of delivered, and the copy is redrawn if the hook goes away unanswered. It
+// returns how many copies the request has, which tells the hook this
+// listener holds several (an older one kept only the last).
+func (l *Listener) WatchApproval(id, channel, ts, text string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	a := l.approvalEntry(id)
 	if a.ended {
-		return // an ended request stays ended; a hook that re-registers it is told so
+		return len(a.msgs) // an ended request stays ended; a hook that re-registers it is told so
 	}
 	if a.copyAt(channel, ts) == nil {
 		a.msgs = append(a.msgs, approvalMsg{channel: channel, ts: ts})
 	}
 	a.text, a.polled = text, l.Now()
-	kept := a.early[:0]
-	for _, c := range a.early {
-		switch {
-		case c.channel != channel || c.ts != ts:
-			kept = append(kept, c)
-		case a.decision == "":
-			a.decision = c.decision
-		}
-	}
-	a.early = kept
+	a.applyClicks(l.Now())
+	return len(a.msgs)
 }
 
 // HandleInteraction records a click on an approval button. Slack vouches
@@ -873,19 +893,18 @@ func (l *Listener) HandleInteraction(payload []byte) {
 			l.Log.Warn("ignoring approval click with an unknown decision", zap.String("decision", decision))
 			continue
 		}
-		c := click{in.Container.ChannelID, in.Container.MessageTS, decision}
+		c := click{in.Container.ChannelID, in.Container.MessageTS, decision, l.Now()}
 		l.mu.Lock()
 		a := l.approvalEntry(act.Value)
 		switch {
 		case a.ended:
 			l.Log.Info("ignoring a click on an ended approval request", zap.String("approval", act.Value))
 		case a.decision != "":
-		case a.copyAt(c.channel, c.ts) != nil:
-			a.decision = decision
-		case len(a.early) < maxEarlyClicks:
-			a.early = append(a.early, c) // checked when the hook registers that copy
+		case len(a.clicks) < maxPendingClicks:
+			a.clicks = append(a.clicks, c)
+			a.applyClicks(c.at)
 		default:
-			l.Log.Warn("ignoring approval click on an unregistered message", zap.String("approval", act.Value), zap.String("channel", c.channel), zap.String("ts", c.ts))
+			l.Log.Warn("ignoring approval click: too many waiting for their copies", zap.String("approval", act.Value), zap.String("channel", c.channel), zap.String("ts", c.ts))
 		}
 		l.mu.Unlock()
 		l.Log.Info("approval clicked", zap.String("approval", act.Value), zap.String("decision", decision))
@@ -1005,6 +1024,9 @@ func (l *Listener) takeApproval(id string) approvalAnswer {
 		return approvalAnswer{}
 	}
 	a.polled = l.Now()
+	if !a.ended {
+		a.applyClicks(a.polled)
+	}
 	p := approvalAnswer{copies: len(a.msgs)}
 	if a.ended {
 		p.ended = true
