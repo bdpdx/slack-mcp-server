@@ -164,6 +164,36 @@ func TestClaimEligibleSeparatesRefusalFromUnavailable(t *testing.T) {
 	c.home.ControlSocket = filepath.Join(t.TempDir(), "absent.sock")
 	err = c.claimEligible(context.Background(), "p", "codex-b", 1, "claude-b", false)
 	assert.True(t, errors.Is(err, ErrAdmitUnavailable))
+
+	// A running listener older than this binary does not know the op: that
+	// is missing evidence (retry), not a definite refusal.
+	old := serveListener(t, func(_ context.Context, req ControlRequest) ControlResponse {
+		return ControlResponse{Error: "unknown op " + req.Op}
+	})
+	c.home.ControlSocket = old
+	err = c.claimEligible(context.Background(), "p", "codex-b", 1, "claude-b", false)
+	assert.True(t, errors.Is(err, ErrAdmitUnavailable))
+	assert.ErrorContains(t, err, "unknown op cohort-claim-check")
+}
+
+func TestWhoamiCountsARefusingListenerAsRunning(t *testing.T) {
+	srv := fakeSlackIdentity(t, "T1", "T1")
+	socket := serveListener(t, func(_ context.Context, req ControlRequest) ControlResponse {
+		return ControlResponse{Error: "unknown op " + req.Op}
+	})
+	c, out := whoamiCLI(t, srv, socket)
+	require.NoError(t, c.whoami(context.Background()))
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+	assert.Equal(t, true, got["listener_running"])
+	assert.Equal(t, "unknown", got["listener_version"])
+}
+
+func TestWhoamiRefusesAMissingWorkspace(t *testing.T) {
+	srv := fakeSlackIdentity(t, "", "")
+	c, out := whoamiCLI(t, srv, filepath.Join(t.TempDir(), "absent.sock"))
+	assert.ErrorContains(t, c.whoami(context.Background()), "bot auth.test returned no workspace")
+	assert.Empty(t, out.String())
 }
 
 func TestRegisterAgentDefaultsToTheHomesBot(t *testing.T) {

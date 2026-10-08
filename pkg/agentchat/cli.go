@@ -520,6 +520,9 @@ func (c *cli) identity(ctx context.Context) (identity, error) {
 	if err != nil {
 		return identity{}, fmt.Errorf("bot auth.test: %w", err)
 	}
+	if bot.TeamID == "" {
+		return identity{}, errors.New("bot auth.test returned no workspace")
+	}
 	if owner.TeamID != bot.TeamID {
 		return identity{}, fmt.Errorf("the user and bot tokens belong to different workspaces (%s, %s)", owner.TeamID, bot.TeamID)
 	}
@@ -550,7 +553,7 @@ func (c *cli) whoami(ctx context.Context) error {
 	running := false
 	statusCtx, statusCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer statusCancel()
-	if resp, err := SendControl(statusCtx, c.home.ControlSocket, ControlRequest{Op: "status"}); err == nil {
+	if resp, err := SendControl(statusCtx, c.home.ControlSocket, ControlRequest{Op: "status"}); !listenerDown(err) {
 		running = true
 		if resp.Version != "" {
 			listener = resp.Version
