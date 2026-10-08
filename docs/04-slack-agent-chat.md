@@ -100,10 +100,18 @@ For agents working in a `projects/` cohort (rezilient-project-state), the
 listener can watch for an unavailable GM and for 2-hourly checkpoints.
 Nothing here applies to a session that does not register.
 
-- `chat cohort register --project P --agent NAME` (after `watch start`)
+- `chat whoami` prints this home's agent (its Slack name, the name to
+  register and post under), bot user ID, owner, workspace ID, home, and the
+  binary's and running listener's versions (`unknown` when the listener is
+  down or older). It is read-only and needs no watch, so a session can find
+  its own name instead of being told it.
+- `chat cohort register --project P [--agent NAME]` (after `watch start`)
   validates `projects/P/PROJECT.md` and joins the session to P's cohort. The
-  project-state checkout is found through the `projects/` symlink, or given
-  with `--project-root`.
+  agent is this home's bot; `--agent`, if given, must match it. A listener
+  refusal (for example, an agent missing from the succession order) is
+  printed as its reason, with exit 2 (or 3 when the session does not watch
+  the project channel). The project-state checkout is found through the
+  `projects/` symlink, or given with `--project-root`.
 - **GM availability.** The listener tracks each @mention of the GM (read
   from `projects/P/gm.json`, or the first agent in PROJECT.md's succession
   order). An answer is the GM's reply in that thread, a post @mentioning the

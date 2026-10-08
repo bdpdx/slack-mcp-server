@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bdpdx/slack-mcp-server/pkg/version"
 	"github.com/slack-go/slack"
 	"go.uber.org/zap"
 )
@@ -721,7 +722,7 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 				}
 			}
 		}
-		return ControlResponse{OK: true, Sessions: sessions}
+		return ControlResponse{OK: true, Sessions: sessions, Version: version.Version}
 	default:
 		return ControlResponse{Error: "unknown op " + req.Op}
 	}

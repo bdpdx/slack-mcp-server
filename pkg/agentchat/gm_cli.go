@@ -150,7 +150,7 @@ func (c *cli) claimEligible(ctx context.Context, project, agent string, term int
 	}
 	resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "cohort-claim-check", SessionID: sub.SessionID,
 		Cohort: &CohortReg{Project: project, Agent: agent}, Expect: &GMState{Term: term, GM: gm}, UserDirected: userDirected})
-	if err != nil {
+	if listenerDown(err) {
 		return fmt.Errorf("%w: no slack-agent-chat listener is running", ErrAdmitUnavailable)
 	}
 	if !resp.OK {

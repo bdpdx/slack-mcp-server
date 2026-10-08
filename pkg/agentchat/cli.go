@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bdpdx/slack-mcp-server/pkg/version"
 	"github.com/slack-go/slack"
 	"go.uber.org/zap"
 )
@@ -134,12 +135,14 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
   post --channel CHANNEL --text TEXT [--thread TS]
                     post as the user (agents reply with conversations_add_message)
   ack CHANNEL TS    mark a message processed (adds a check-mark reaction)
-  cohort register --project P --agent NAME [--project-root DIR]
+  cohort register --project P [--agent NAME] [--project-root DIR]
                     join this session to projects/P's cohort: the listener
                     then tells it when the GM looks unavailable (it is next
                     in the succession order) and when its 2-hour checkpoint
-                    is due. Validates P's PROJECT.md (exit 2) and that this
-                    session watches #P (exit 3)
+                    is due. The agent is this home's bot (see whoami);
+                    --agent, if given, must match it. Validates P's
+                    PROJECT.md and that the agent is in its succession order
+                    (exit 2), and that this session watches #P (exit 3)
   cohort leave|duty on|off|checkpoint --drift LINE [--context NOTE] --project P
                     leave; go off or on duty (never lifts a user's hold);
                     record a checkpoint and post the drift line (--context
@@ -159,6 +162,10 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
                     --claim-id ID before each GM-file write (exit 4: stop);
                     release --term T --claim-id ID --to AGENT hands GM back
   capabilities      print this build's cohort capabilities as JSON
+  whoami            print this home's agent as JSON: its Slack name (the name
+                    to register and post under), bot user ID, owner,
+                    workspace ID, home, and the binary's and the running
+                    listener's versions (listener "unknown" if down or older)
   relay-hook        UserPromptSubmit hook for %agents prompts (reads stdin)
   ask-hook          Claude PreToolUse hook for AskUserQuestion: ask in Slack
                     instead of the terminal while watching a project
@@ -252,6 +259,8 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = c.gm(ctx, rest[1:])
 	case "capabilities":
 		err = c.capabilities()
+	case "whoami":
+		err = c.whoami(ctx)
 	case "relay-hook":
 		ctx, cancel := context.WithTimeout(ctx, relayTimeout)
 		defer cancel()
@@ -499,6 +508,7 @@ func userIDs(users []slack.User) []string {
 type identity struct {
 	ownerID, ownerName string // the owner's username, used in channel names
 	agentID, agentName string // the name Slack shows for the bot
+	teamID             string // the workspace both tokens belong to
 }
 
 func (c *cli) identity(ctx context.Context) (identity, error) {
@@ -510,11 +520,46 @@ func (c *cli) identity(ctx context.Context) (identity, error) {
 	if err != nil {
 		return identity{}, fmt.Errorf("bot auth.test: %w", err)
 	}
+	if owner.TeamID != bot.TeamID {
+		return identity{}, fmt.Errorf("the user and bot tokens belong to different workspaces (%s, %s)", owner.TeamID, bot.TeamID)
+	}
 	u, err := c.bot.GetUserInfoContext(ctx, bot.UserID)
 	if err != nil {
 		return identity{}, fmt.Errorf("users.info %s: %w", bot.UserID, err)
 	}
-	return identity{ownerID: owner.UserID, ownerName: owner.User, agentID: bot.UserID, agentName: shownName(u)}, nil
+	return identity{ownerID: owner.UserID, ownerName: owner.User, agentID: bot.UserID, agentName: shownName(u),
+		teamID: bot.TeamID}, nil
+}
+
+// whoamiTimeout bounds whoami's Slack lookups and its listener query.
+var whoamiTimeout = 20 * time.Second
+
+// whoami prints who this home's agent is, from its own tokens: the name an
+// agent registers and posts under, so a session need not be told it. It is
+// read-only and needs no watch or registration. The binary and the running
+// listener can differ after an install, so both versions are reported; a
+// listener that is down or too old to say has version "unknown".
+func (c *cli) whoami(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, whoamiTimeout)
+	defer cancel()
+	me, err := c.identity(ctx)
+	if err != nil {
+		return err
+	}
+	listener := "unknown"
+	running := false
+	statusCtx, statusCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer statusCancel()
+	if resp, err := SendControl(statusCtx, c.home.ControlSocket, ControlRequest{Op: "status"}); err == nil {
+		running = true
+		if resp.Version != "" {
+			listener = resp.Version
+		}
+	}
+	c.printJSON(map[string]any{"agent": me.agentName, "agent_id": me.agentID, "owner": me.ownerName,
+		"owner_id": me.ownerID, "workspace_id": me.teamID, "home": c.home.Dir,
+		"binary_version": version.Version, "listener_running": running, "listener_version": listener})
+	return nil
 }
 
 // ensureDirect makes sure #PROJECT__OWNER_AGENT exists with the owner in it
