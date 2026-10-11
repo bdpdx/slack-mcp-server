@@ -78,7 +78,7 @@ func TestHelpListsCommandsAndSucceeds(t *testing.T) {
 		code := RunCLI(args, strings.NewReader(""), &out, &errOut)
 		assert.Equal(t, 0, code, "%v", args)
 		help := out.String() + errOut.String()
-		for _, want := range []string{"watch start", "watch stop", "watch status", "channel create", "channel invite", "project create", "project join", "project archive", "post", "ack CHANNEL TS", "relay-hook", "--env-file"} {
+		for _, want := range []string{"watch start", "watch stop", "watch status", "channel create", "channel invite", "project create", "project join", "project archive", "post", "ack CHANNEL TS", "seen CHANNEL TS", "relay-hook", "--env-file"} {
 			assert.Contains(t, help, want, "%v", args)
 		}
 	}

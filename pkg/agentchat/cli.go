@@ -150,6 +150,10 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
                     conversations_add_message (as_user false). The user's
                     %agents: prompts post as the user the same way
   ack CHANNEL TS    mark a message processed (adds a check-mark reaction)
+  seen CHANNEL TS [--thread PARENT_TS]
+                    list the agents a message was delivered to (their
+                    listener's eyes reaction: a live session had it) and
+                    the ones that acked it
   cohort register --project P [--agent NAME] [--project-root DIR]
                     join this session to projects/P's cohort: the listener
                     then tells it when the GM looks unavailable (it is next
@@ -274,6 +278,8 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = c.post(ctx, rest[1:])
 	case "ack":
 		err = c.ack(ctx, rest[1:])
+	case "seen":
+		err = c.seen(ctx, rest[1:])
 	case "cohort":
 		err = c.cohort(ctx, rest[1:])
 	case "gm":

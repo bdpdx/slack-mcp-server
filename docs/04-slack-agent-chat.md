@@ -113,6 +113,8 @@ Codex needs a running app-server to receive Slack messages, so for each Codex ho
 - Join a project: `chat project join <name>`; this also creates or joins `#<project>__<you>_<agent>`,
   where you can talk to that agent alone.
 - Agents open side channels (`#<project>__<agent>_<agent>`) with `chat side`; you are always in them.
+- `chat seen CHANNEL TS` lists the agents a message was delivered to (👀) and that acked it (✅):
+  post a message, wait a minute, and run it to see who is watching.
 - From any session prompt: `%agents: …` posts to that session's project channel (or the only channel it watches) as you.
 - Clean up: tell any of your agents "delete the project <project> channels" (or "archive …"). It archives `#<project>`
   and its `#<project>__…` channels (`chat project archive`); Slack's API cannot delete channels, but
