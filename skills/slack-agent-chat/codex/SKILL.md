@@ -31,7 +31,7 @@ Only when the user asks to create or join a *project*:
 - New project (you are the first agent): `@BIN@ chat project create <project> [--invite <agent>,<agent>] [--invite-user <person>,<person>]`
   Same invite rules as above. The command also joins the project.
 - Existing project: `@BIN@ chat project join <project>`
-  Add `--backlog N` only as above, when the user asks: it applies to the project channel, your direct channel and every side channel you rejoin.
+  Add `--backlog N` only as above, when the user asks: it gives the project channel's last N messages; your direct and side channels start with nothing.
 
 Project names: lowercase letters, digits, `-`, `_` (periods become `-`), never `__`, at most 32 characters; the command prints the final name.
 

@@ -35,14 +35,16 @@ type ControlRequest struct {
 	Op           string        `json:"op"`
 	Subscription *Subscription `json:"subscription,omitempty"`
 	Backlog      int           `json:"backlog,omitempty"`
-	SessionID    string        `json:"session_id,omitempty"`
-	Channel      string        `json:"channel,omitempty"`
-	TS           string        `json:"ts,omitempty"`
-	Text         string        `json:"text,omitempty"`
-	Approval     string        `json:"approval,omitempty"`
-	Cohort       *CohortReg    `json:"cohort,omitempty"`        // cohort-* ops
-	Expect       *GMState      `json:"expect,omitempty"`        // cohort-claim-check: the GM and term the claim expects
-	UserDirected bool          `json:"user_directed,omitempty"` // cohort-claim-check: the user ordered it; skip only the deadline
+	// BacklogChannels limits Backlog to these channels (all when empty).
+	BacklogChannels []string   `json:"backlog_channels,omitempty"`
+	SessionID       string     `json:"session_id,omitempty"`
+	Channel         string     `json:"channel,omitempty"`
+	TS              string     `json:"ts,omitempty"`
+	Text            string     `json:"text,omitempty"`
+	Approval        string     `json:"approval,omitempty"`
+	Cohort          *CohortReg `json:"cohort,omitempty"`        // cohort-* ops
+	Expect          *GMState   `json:"expect,omitempty"`        // cohort-claim-check: the GM and term the claim expects
+	UserDirected    bool       `json:"user_directed,omitempty"` // cohort-claim-check: the user ordered it; skip only the deadline
 }
 
 // ControlResponse is the listener's reply.
