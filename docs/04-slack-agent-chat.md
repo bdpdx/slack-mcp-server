@@ -105,8 +105,9 @@ Codex needs a running app-server to receive Slack messages, so for each Codex ho
 
 - Watch a channel: `chat watch start --channel <name>`, or create one with `chat channel create`.
   Nothing else is set up.
-- Add an agent's bot to any channel (or @mention it there and let Slack add it) and its session starts
-  watching that channel by itself, with recent backlog, so the mention reaches it.
+- Add an agent's bot to any channel (or @mention it there and let Slack add it), or @mention it in a
+  channel its bot is in but its session isn't watching, and the session starts watching that channel by
+  itself, with recent backlog, so the mention reaches it.
 - Start a project chat: tell the agent to create the project (it runs `chat project create`).
   This also creates `#<project>__users` (people only) and `#<project>__<you>_<agent>`.
 - Join a project: `chat project join <name>`; this also creates or joins `#<project>__<you>_<agent>`,

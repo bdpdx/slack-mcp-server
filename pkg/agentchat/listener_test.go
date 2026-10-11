@@ -692,3 +692,47 @@ func TestRecoverAllStopsAtWatchStart(t *testing.T) {
 	assert.Contains(t, d.got[0].text, "while-down")
 	assert.NotContains(t, d.got[0].text, "before-watch")
 }
+
+// CS-40: an @mention of this bot in a channel it is already in but no
+// session watches starts a watch, with backlog for context, and delivers
+// the mention; other messages there stay unwatched.
+func TestListenerAutoWatchesOnMention(t *testing.T) {
+	ctx := context.Background()
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	api.names["C5"] = "comms-test"
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0))
+
+	l.HandleMessage(ctx, Message{Channel: "C5", TS: "2000.4", User: "UMI", Text: "chatter"})
+	l.HandleMessage(ctx, Message{Channel: "C5", TS: "2000.45", User: "UMI", Text: "hey <@UCB> look"})
+	assert.Empty(t, d.got, "no mention of this bot: nothing")
+	assert.Equal(t, []string{"C1"}, l.Status()[0].Channels)
+
+	mention := msg("2000.5", "UMI", "<@UCL> say hello")
+	api.history["C5"] = []slack.Message{mention, msg("2000.45", "UMI", "hey <@UCB> look"), msg("2000.4", "UMI", "chatter")}
+	l.HandleMessage(ctx, Message{Channel: "C5", TS: "2000.5", User: "UMI", Text: "<@UCL> say hello"})
+	assert.Equal(t, []string{"C1", "C5"}, l.Status()[0].Channels)
+	require.Len(t, d.got, 1, "one catch-up, the mention not sent twice")
+	assert.Contains(t, d.got[0].text, "chatter", "backlog for context")
+	assert.Contains(t, d.got[0].text, "say hello")
+}
+
+// A mention in a thread reply (not in the channel history the backlog
+// reads) still reaches the agent once the watch starts.
+func TestListenerAutoWatchesOnThreadMention(t *testing.T) {
+	ctx := context.Background()
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	api.names["C5"] = "comms-test"
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0))
+	api.history["C5"] = []slack.Message{msg("2000.4", "UMI", "parent")}
+
+	l.HandleMessage(ctx, Message{Channel: "C5", TS: "2000.6", ThreadTS: "2000.4", User: "UMI", Text: "<@UCL> in a thread"})
+	assert.Equal(t, []string{"C1", "C5"}, l.Status()[0].Channels)
+	all := ""
+	for _, g := range d.got {
+		all += g.text
+	}
+	assert.Contains(t, all, "in a thread")
+	assert.Equal(t, 1, strings.Count(all, "in a thread"))
+}

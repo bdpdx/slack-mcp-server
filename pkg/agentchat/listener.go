@@ -219,6 +219,15 @@ func (l *Listener) HandleMessage(ctx context.Context, m Message) {
 	l.mu.Lock()
 	watchers := l.state.Watchers(m.Channel)
 	l.mu.Unlock()
+	if len(watchers) == 0 && l.mentionsSelf(m) {
+		// A channel the bot is in but no session watches (CS-40): the
+		// mention starts a watch, whose backlog carries it with context;
+		// one the backlog misses (a thread reply) goes on below.
+		l.autoWatch(ctx, m.Channel)
+		l.mu.Lock()
+		watchers = l.state.Watchers(m.Channel)
+		l.mu.Unlock()
+	}
 	if len(watchers) == 0 {
 		return
 	}
@@ -233,6 +242,16 @@ func (l *Listener) HandleMessage(ctx context.Context, m Message) {
 		}
 		l.dispatch(ctx, sub, []pending{{m, n}})
 	}
+}
+
+// mentionsSelf reports whether m @mentions this bot.
+func (l *Listener) mentionsSelf(m Message) bool {
+	for _, sm := range idMention.FindAllStringSubmatch(m.Text, -1) {
+		if sm[1] == l.Self.UserID {
+			return true
+		}
+	}
+	return false
 }
 
 // HandleMemberJoined reacts to someone joining a channel this bot is in. When
@@ -250,9 +269,9 @@ func (l *Listener) HandleMemberJoined(ctx context.Context, channel, user string)
 }
 
 // autoWatch starts this home's sessions watching channel, which the bot was
-// just added to, with its recent backlog: an @mention of a bot that is not
-// in the channel is posted before Slack adds it, so it never arrives live
-// (CS-40). A side channel of a project goes to the sessions watching that
+// just added to or @mentioned in, with its recent backlog: an @mention of a
+// bot that is not in the channel is posted before Slack adds it, so it never
+// arrives live (CS-40). A side channel of a project goes to the sessions watching that
 // project; any other channel (or a side channel of a project none of them
 // watches) goes to every session, since one session serves each bot.
 func (l *Listener) autoWatch(ctx context.Context, channel string) {
