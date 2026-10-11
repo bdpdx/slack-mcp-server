@@ -3,8 +3,8 @@
     "features": { "bot_user": { "display_name": "BOT_NAME", "always_online": false } },
     "oauth_config": {
         "scopes": {
-            "user": ["usergroups:read", "channels:history", "channels:read", "channels:write", "chat:write", "files:read", "files:write", "groups:history", "groups:read", "groups:write", "im:history", "im:read", "im:write", "mpim:history", "mpim:read", "mpim:write", "reactions:write", "search:read", "users:read", "usergroups:write"],
-            "bot": ["channels:history", "channels:join", "channels:manage", "channels:read", "chat:write", "chat:write.public", "conversations.connect:write", "files:read", "files:write", "groups:history", "groups:read", "groups:write", "im:history", "im:read", "im:write", "mpim:history", "mpim:read", "mpim:write", "reactions:write", "usergroups:read", "usergroups:write", "users:read", "users:read.email"]
+            "user": ["usergroups:read", "channels:history", "channels:read", "channels:write", "chat:write", "files:read", "files:write", "groups:history", "groups:read", "groups:write", "im:history", "im:read", "im:write", "mpim:history", "mpim:read", "mpim:write", "reactions:read", "reactions:write", "search:read", "users:read", "usergroups:write"],
+            "bot": ["channels:history", "channels:join", "channels:manage", "channels:read", "chat:write", "chat:write.public", "conversations.connect:write", "files:read", "files:write", "groups:history", "groups:read", "groups:write", "im:history", "im:read", "im:write", "mpim:history", "mpim:read", "mpim:write", "reactions:read", "reactions:write", "usergroups:read", "usergroups:write", "users:read", "users:read.email"]
         },
         "pkce_enabled": false
     },

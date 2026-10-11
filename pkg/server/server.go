@@ -35,6 +35,7 @@ const (
 	ToolFilesUpload                 = "files_upload"
 	ToolReactionsAdd                = "reactions_add"
 	ToolReactionsRemove             = "reactions_remove"
+	ToolReactionsGet                = "reactions_get"
 	ToolAttachmentGetData           = "attachment_get_data"
 	ToolConversationsSearchMessages = "conversations_search_messages"
 	ToolConversationsUnreads        = "conversations_unreads"
@@ -65,6 +66,7 @@ var ValidToolNames = []string{
 	ToolFilesUpload,
 	ToolReactionsAdd,
 	ToolReactionsRemove,
+	ToolReactionsGet,
 	ToolAttachmentGetData,
 	ToolConversationsSearchMessages,
 	ToolConversationsUnreads,
@@ -163,6 +165,22 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, cfg *toolc
 				mcp.Description("Limit of messages to fetch in format of maximum ranges of time (e.g. 1d - 1 day, 30d - 30 days, 90d - 90 days which is a default limit for free tier history) or number of messages (e.g. 50). Must be empty when 'cursor' is provided."),
 			),
 		), conversationsHandler.ConversationsRepliesHandler)
+	}
+
+	if cfg.ToolEnabled(ToolReactionsGet) {
+		s.AddTool(mcp.NewTool(ToolReactionsGet,
+			mcp.WithDescription("List who reacted to a message, and with which emoji, one row per emoji and user (needs the reactions:read scope). conversations_history only gives counts. Works for thread replies too."),
+			mcp.WithTitleAnnotation("Get Reactions"),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithString("channel_id",
+				mcp.Required(),
+				mcp.Description("ID of the channel in format Cxxxxxxxxxx or its name starting with #... or @... aka #general or @username_dm."),
+			),
+			mcp.WithString("timestamp",
+				mcp.Required(),
+				mcp.Description("Timestamp of the message, in format 1234567890.123456."),
+			),
+		), conversationsHandler.ReactionsGetHandler)
 	}
 
 	if cfg.ToolEnabled(ToolConversationsAddMessage) {

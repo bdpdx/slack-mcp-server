@@ -35,6 +35,19 @@ func TestSeen(t *testing.T) {
 	assert.Equal(t, []string{"codex-r"}, got.Delivered)
 	assert.Empty(t, got.Acked)
 
+	got, err = seenOn(ctx, api, "C1", "2000.8", "")
+	require.NoError(t, err, "reactions.get finds a thread reply without its parent")
+	assert.Equal(t, []string{"codex-r"}, got.Delivered)
+
+	// Without reactions:read (an app set up before it was added), seen
+	// reads history, where a thread reply needs its parent.
+	api.noReactionsRead = true
+	got, err = seenOn(ctx, api, "C1", "2000.5", "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"codex-b", "codex-r"}, got.Delivered)
 	_, err = seenOn(ctx, api, "C1", "2000.8", "")
 	assert.ErrorContains(t, err, "--thread")
+	got, err = seenOn(ctx, api, "C1", "2000.8", "2000.4")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"codex-r"}, got.Delivered)
 }
