@@ -563,7 +563,6 @@ func TestListenerAutoWatchesDerivedChannels(t *testing.T) {
 	require.NoError(t, l.Subscribe(context.Background(), other, 0))
 
 	l.HandleMemberJoined(context.Background(), "C2", "UCL")
-	l.HandleMemberJoined(context.Background(), "C3", "UCL")
 	l.HandleMemberJoined(context.Background(), "C2", "UCB") // another agent joining is not this bot
 
 	got := map[string][]string{}
@@ -571,9 +570,42 @@ func TestListenerAutoWatchesDerivedChannels(t *testing.T) {
 		got[s.SessionID] = s.Channels
 	}
 	assert.Equal(t, []string{"C1", "C2"}, got["s1"])
-	assert.Equal(t, []string{"C9"}, got["s2"])
+	assert.Equal(t, []string{"C9"}, got["s2"], "only the sessions watching the project")
 	require.Len(t, d.got, 1)
 	assert.Contains(t, d.got[0].text, "side hello")
+
+	// CS-40: a side channel of a project no session watches is still a
+	// channel someone added this bot to: every session watches it.
+	l.HandleMemberJoined(context.Background(), "C3", "UCL")
+	got = map[string][]string{}
+	for _, s := range l.Status() {
+		got[s.SessionID] = s.Channels
+	}
+	assert.Equal(t, []string{"C1", "C2", "C3"}, got["s1"])
+	assert.Equal(t, []string{"C9", "C3"}, got["s2"])
+}
+
+// CS-40: when anyone adds this bot to a channel, the session watches it and
+// gets its backlog, so the @mention that brought the bot in (posted before
+// the bot was a member, so never sent to it live) reaches the agent.
+func TestListenerAutoWatchesAnyChannelItIsAddedTo(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	api.names["C5"] = "comms-test"
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+	api.history["C5"] = []slack.Message{msg("2000.5", "UMI", "<@UCL> say hello")}
+
+	l.HandleMemberJoined(context.Background(), "C5", "UCL")
+	st := l.Status()
+	require.Len(t, st, 1)
+	assert.Equal(t, []string{"C1", "C5"}, st[0].Channels)
+	require.Len(t, d.got, 1)
+	assert.Contains(t, d.got[0].text, "say hello")
+
+	l.HandleMemberJoined(context.Background(), "C5", "UCL") // a repeated event changes nothing
+	assert.Len(t, d.got, 1)
+	l.HandleMessage(context.Background(), Message{Channel: "C5", TS: "2001.1", User: "UMI", Text: "and then?"})
+	require.Len(t, d.got, 2, "later messages arrive live")
 }
 
 // A person joining a watched project channel is added to <project>__users
@@ -659,4 +691,48 @@ func TestRecoverAllStopsAtWatchStart(t *testing.T) {
 	require.Len(t, d.got, 1)
 	assert.Contains(t, d.got[0].text, "while-down")
 	assert.NotContains(t, d.got[0].text, "before-watch")
+}
+
+// CS-40: an @mention of this bot in a channel it is already in but no
+// session watches starts a watch, with backlog for context, and delivers
+// the mention; other messages there stay unwatched.
+func TestListenerAutoWatchesOnMention(t *testing.T) {
+	ctx := context.Background()
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	api.names["C5"] = "comms-test"
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0))
+
+	l.HandleMessage(ctx, Message{Channel: "C5", TS: "2000.4", User: "UMI", Text: "chatter"})
+	l.HandleMessage(ctx, Message{Channel: "C5", TS: "2000.45", User: "UMI", Text: "hey <@UCB> look"})
+	assert.Empty(t, d.got, "no mention of this bot: nothing")
+	assert.Equal(t, []string{"C1"}, l.Status()[0].Channels)
+
+	mention := msg("2000.5", "UMI", "<@UCL> say hello")
+	api.history["C5"] = []slack.Message{mention, msg("2000.45", "UMI", "hey <@UCB> look"), msg("2000.4", "UMI", "chatter")}
+	l.HandleMessage(ctx, Message{Channel: "C5", TS: "2000.5", User: "UMI", Text: "<@UCL> say hello"})
+	assert.Equal(t, []string{"C1", "C5"}, l.Status()[0].Channels)
+	require.Len(t, d.got, 1, "one catch-up, the mention not sent twice")
+	assert.Contains(t, d.got[0].text, "chatter", "backlog for context")
+	assert.Contains(t, d.got[0].text, "say hello")
+}
+
+// A mention in a thread reply (not in the channel history the backlog
+// reads) still reaches the agent once the watch starts.
+func TestListenerAutoWatchesOnThreadMention(t *testing.T) {
+	ctx := context.Background()
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	api.names["C5"] = "comms-test"
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0))
+	api.history["C5"] = []slack.Message{msg("2000.4", "UMI", "parent")}
+
+	l.HandleMessage(ctx, Message{Channel: "C5", TS: "2000.6", ThreadTS: "2000.4", User: "UMI", Text: "<@UCL> in a thread"})
+	assert.Equal(t, []string{"C1", "C5"}, l.Status()[0].Channels)
+	all := ""
+	for _, g := range d.got {
+		all += g.text
+	}
+	assert.Contains(t, all, "in a thread")
+	assert.Equal(t, 1, strings.Count(all, "in a thread"))
 }

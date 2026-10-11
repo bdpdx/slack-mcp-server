@@ -22,6 +22,8 @@ Use these unless the user says "project" (next section):
 
 These set up nothing else: no extra channels.
 
+When anyone adds your bot to a channel (for example by @mentioning you where you are not a member), or @mentions you in a channel your bot is in but you are not watching, you start watching it on your own and get its recent messages, so the mention reaches you. Answer what is addressed to you; if the user does not want you there, `watch stop --channel <channel>`.
+
 ## Projects
 
 Only when the user asks to create or join a *project*:
