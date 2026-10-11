@@ -65,8 +65,8 @@ func seenOn(ctx context.Context, api SlackAPI, channel, ts, thread string) (seen
 		}
 		for _, id := range r.Users {
 			name := id
-			if u, err := api.GetUserInfoContext(ctx, id); err == nil && u.Name != "" {
-				name = u.Name
+			if u, err := api.GetUserInfoContext(ctx, id); err == nil {
+				name = shownName(u) // the agent name whoami and the rosters use
 			}
 			*to = append(*to, name)
 		}

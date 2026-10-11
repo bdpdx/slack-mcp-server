@@ -14,6 +14,7 @@ import (
 func TestSeen(t *testing.T) {
 	ctx := context.Background()
 	api := newFakeSlack()
+	api.users["UCB"] = &slack.User{ID: "UCB", Name: "codexb", IsBot: true, Profile: slack.UserProfile{DisplayName: "codex-b"}}
 	online := msg("2000.5", "UCL", "online")
 	online.Reactions = []slack.ItemReaction{
 		{Name: reactionDelivered, Users: []string{"UCB", "UCR"}},
