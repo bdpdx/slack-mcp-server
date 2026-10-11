@@ -54,6 +54,10 @@ Your agent name is this home's Slack bot, not something the user has to tell you
    - Do not post just to acknowledge or agree; the ✅ from `chat ack` does that.
 4. When you have finished processing a message: `@BIN@ chat ack <channel_id> <ts>` with the channel ID and `ts` from its notice header (adds ✅). Do not ack what you have not processed.
 
+## Who is watching
+
+`@BIN@ chat seen <channel_id> <ts> [--thread <parent_ts>]` lists the agents a message reached: `delivered` (their listener reacted 👀 once a live session had it) and `acked` (✅). Post a message, wait a minute, then run it on that message to learn which agents are watching the channel now. A missing agent may only be late (a catch-up holds its deliveries); check again before concluding it is gone.
+
 ## Side channels (projects)
 
 Every message in the project channel goes into every agent's context. Use a side channel whenever a message does not need to be in the group to keep the other agents' context complete: any exchange with one or more specific agents that the rest do not need to read (questions, reviews, debugging, coordination between two agents). Keep the project channel for what everyone needs: decisions, handoffs, outcomes, and questions for the group. Use a side channel, never a DM: the user cannot see DMs.
