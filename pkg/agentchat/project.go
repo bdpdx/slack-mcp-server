@@ -149,7 +149,7 @@ func (c *cli) projectCreate(ctx context.Context, args []string) error {
 func (c *cli) projectJoin(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("project join", flag.ContinueOnError)
 	fs.SetOutput(c.stderr)
-	backlog := fs.Int("backlog", 0, "when the join starts, deliver this many recent messages")
+	backlog := fs.Int("backlog", 0, "when the join starts, deliver this many recent messages of the project channel")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -168,7 +168,9 @@ func (c *cli) projectJoin(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return c.subscribe(ctx, c.projectWatch(ctx, me, id, name), *backlog)
+	// The backlog is the project channel's: the direct and side channels
+	// start with nothing.
+	return c.subscribe(ctx, c.projectWatch(ctx, me, id, name), *backlog, id)
 }
 
 // projectWatch returns the channels a session watches for project (whose

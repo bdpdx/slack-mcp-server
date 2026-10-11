@@ -710,11 +710,17 @@ func (l *Listener) register(sub *Subscription) (*Subscription, map[string]bool, 
 // recover pushes what sub should already have: the last backlog messages on
 // a first join, or pending (unacknowledged) messages since the join point.
 func (l *Listener) recover(ctx context.Context, sub *Subscription, channels []string, first map[string]bool, backlog int) {
+	l.recoverOnly(ctx, sub, channels, first, backlog, nil)
+}
+
+// recoverOnly is recover with the backlog limited to the channels in only
+// (all of them when only is empty).
+func (l *Listener) recoverOnly(ctx context.Context, sub *Subscription, channels []string, first map[string]bool, backlog int, only []string) {
 	var sizes map[string]int
 	if backlog > 0 {
 		sizes = map[string]int{}
 		for _, ch := range channels {
-			if first[ch] {
+			if first[ch] && (len(only) == 0 || slices.Contains(only, ch)) {
 				sizes[ch] = backlog
 			}
 		}
@@ -1049,6 +1055,17 @@ func (l *Listener) Subscribe(ctx context.Context, sub *Subscription, backlog int
 	return nil
 }
 
+// SubscribeBacklog is Subscribe with the backlog limited to the channels in
+// only (all of them when only is empty).
+func (l *Listener) SubscribeBacklog(ctx context.Context, sub *Subscription, backlog int, only []string) error {
+	merged, first, err := l.register(sub)
+	if err != nil {
+		return err
+	}
+	l.recoverOnly(ctx, merged, sub.Channels, first, backlog, only)
+	return nil
+}
+
 // routedBacklog returns up to n of the channel's most recent messages that
 // this agent would have received, oldest first, paging back through at most
 // 1000 messages of history.
@@ -1244,7 +1261,7 @@ func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlRespo
 		if err != nil {
 			return ControlResponse{Error: err.Error()}
 		}
-		go l.recover(context.WithoutCancel(ctx), merged, req.Subscription.Channels, first, req.Backlog)
+		go l.recoverOnly(context.WithoutCancel(ctx), merged, req.Subscription.Channels, first, req.Backlog, req.BacklogChannels)
 	case "unsubscribe":
 		l.Unsubscribe(req.SessionID, req.Channel)
 	case "skip":

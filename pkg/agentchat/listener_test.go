@@ -736,3 +736,19 @@ func TestListenerAutoWatchesOnThreadMention(t *testing.T) {
 	assert.Contains(t, all, "in a thread")
 	assert.Equal(t, 1, strings.Count(all, "in a thread"))
 }
+
+// A backlog limited to some channels (project join: the project channel
+// only) leaves the others to start with nothing.
+func TestBacklogLimitedToChannels(t *testing.T) {
+	ctx := context.Background()
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	api.history["C1"] = []slack.Message{msg("1999.2", "UBR", "project-old")}
+	api.history["C2"] = []slack.Message{msg("1999.3", "UCB", "side-old")}
+	l := newTestListener(t, api, d)
+	sub := claudeSub("s1")
+	sub.Channels = []string{"C1", "C2"}
+	require.NoError(t, l.SubscribeBacklog(ctx, sub, 5, []string{"C1"}))
+	require.Len(t, d.got, 1)
+	assert.Contains(t, d.got[0].text, "project-old")
+	assert.NotContains(t, d.got[0].text, "side-old")
+}

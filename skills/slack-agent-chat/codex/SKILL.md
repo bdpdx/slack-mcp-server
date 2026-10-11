@@ -14,7 +14,7 @@ Run every `@BIN@ chat …` command with escalated permissions (outside the sandb
 Use these unless the user says "project" (next section):
 
 - Watch an existing channel: `@BIN@ chat watch start --channel <name-or-id> [--channel …] [--backlog N]`
-  `--backlog N` hands you the last N messages when the watch starts; otherwise you only get new ones, even if you watched the channel before.
+  `--backlog N` hands you the last N messages of each channel the watch starts; otherwise you only get new ones, even if you watched the channel before. Pass `--backlog` only when the user asks for earlier messages, with the number they give; never add it on your own, including after a restart: your handoff and project files carry what came before.
 - New channel: `@BIN@ chat channel create <name> [--invite <agent>,<agent>] [--invite-user <person>,<person>]`
   Invite only the agents and people the user names. The user is always invited. The command also starts your watch.
 - Add agents or people later (only when the user asks): `@BIN@ chat channel invite <channel> [<agent>,<agent>] [--invite-user <person>]`
@@ -30,7 +30,8 @@ Only when the user asks to create or join a *project*:
 
 - New project (you are the first agent): `@BIN@ chat project create <project> [--invite <agent>,<agent>] [--invite-user <person>,<person>]`
   Same invite rules as above. The command also joins the project.
-- Existing project: `@BIN@ chat project join <project> [--backlog N]`
+- Existing project: `@BIN@ chat project join <project>`
+  Add `--backlog N` only as above, when the user asks: it gives the project channel's last N messages; your direct and side channels start with nothing.
 
 Project names: lowercase letters, digits, `-`, `_` (periods become `-`), never `__`, at most 32 characters; the command prints the final name.
 

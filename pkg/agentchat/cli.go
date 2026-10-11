@@ -130,7 +130,8 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
   project join NAME [--backlog N]
                     watch the project channel #NAME, set up and watch the
                     direct channel #NAME__USER_AGENT, and re-watch the side
-                    channels this agent is in
+                    channels this agent is in; --backlog N gives the project
+                    channel's last N messages, the others none
   project archive NAME [--dry-run]
                     archive #NAME and every #NAME__* channel you are in; only
                     when Slack records you (or this agent) as #NAME's creator.
@@ -399,7 +400,9 @@ func (c *cli) resolveChannel(ctx context.Context, arg string) (string, string, e
 	return id, name, nil
 }
 
-func (c *cli) subscribe(ctx context.Context, channelIDs []string, backlog int) error {
+// subscribe watches channelIDs, giving the last backlog messages of each, or
+// of only the channels in only when given.
+func (c *cli) subscribe(ctx context.Context, channelIDs []string, backlog int, only ...string) error {
 	sub, err := detectSession(os.Getenv)
 	if err != nil {
 		return err
@@ -408,7 +411,7 @@ func (c *cli) subscribe(ctx context.Context, channelIDs []string, backlog int) e
 	if err := c.ensureListener(ctx); err != nil {
 		return err
 	}
-	resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "subscribe", Subscription: sub, Backlog: backlog})
+	resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "subscribe", Subscription: sub, Backlog: backlog, BacklogChannels: only})
 	if err != nil {
 		return err
 	}
