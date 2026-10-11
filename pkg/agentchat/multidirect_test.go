@@ -258,3 +258,19 @@ func TestUnregisteredAllowExpires(t *testing.T) {
 	d, _ := takeApproval(t, l, "y")
 	assert.Equal(t, "", d, "an approval that waited past clickCopyWait is dropped, never applied late")
 }
+
+// CS-39: a channel is a project only when it was joined as one, which brings
+// its direct channel; a plain watch of a channel with the same shape of name
+// is not a project.
+func TestProjectsOf(t *testing.T) {
+	names := map[string]string{
+		"CP1": "beta", "CD1": "beta__brian_claude", "CS1": "beta__claude_codex",
+		"CP2": "alpha", "CD2": "alpha__brian_claude",
+		"CX": "comms-test",
+	}
+	assert.Equal(t, []string{"CP1", "CP2"}, projectsOf([]string{"CP1", "CD1", "CS1", "CP2", "CD2", "CX"}, names, "brian", "claude"),
+		"joined projects only; side and plain channels never")
+	assert.Empty(t, projectsOf([]string{"CX"}, names, "brian", "claude"), "a plain watch is not a project")
+	assert.Empty(t, projectsOf([]string{"CP1"}, names, "brian", "claude"), "a project channel watched without its direct channel is a plain watch")
+	assert.Empty(t, projectsOf([]string{"CP1", "CD1"}, names, "brian", "codex"), "another agent's direct channel does not count")
+}

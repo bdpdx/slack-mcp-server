@@ -113,17 +113,24 @@ const chatUsage = `usage: slack-mcp-server chat [--env-file FILE] COMMAND
 
 Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
   watch start --channel CHANNEL [--channel CHANNEL] [--backlog N]
-                    push this session the channel's messages; for a project
-                    channel, also set up and watch #PROJECT__USER_AGENT
+                    push this session the channels' messages; nothing else is
+                    set up (for a project, use project join)
   watch stop [--channel CHANNEL]
                     stop pushing one channel, or all of them
   watch status      list the sessions this home's listener serves
   channel create NAME [--invite AGENT,AGENT] [--invite-user USER,USER]
-                    create a private project channel, invite the user and the
-                    named agents and people, create #NAME__users for the
-                    people, and watch it as with watch start
+                    create a private channel, invite the user and the named
+                    agents and people, and watch it as with watch start
   channel invite CHANNEL [AGENT,AGENT] [--invite-user USER,USER]
                     add agents or people to a channel
+  project create NAME [--invite AGENT,AGENT] [--invite-user USER,USER]
+                    create a private project channel, invite the user and the
+                    named agents and people, create #NAME__users for the
+                    people, and join it as with project join
+  project join NAME [--backlog N]
+                    watch the project channel #NAME, set up and watch the
+                    direct channel #NAME__USER_AGENT, and re-watch the side
+                    channels this agent is in
   project archive NAME [--dry-run]
                     archive #NAME and every #NAME__* channel you are in; only
                     when Slack records you (or this agent) as #NAME's creator.
@@ -430,32 +437,14 @@ func (c *cli) watch(ctx context.Context, args []string) error {
 		if len(channels) == 0 {
 			return errors.New("watch start needs --channel")
 		}
-		me, err := c.identity(ctx)
-		if err != nil {
-			return err
-		}
+		// A plain watch: no project channels are set up (see project join).
 		var ids []string
 		for _, ch := range channels {
-			id, name, err := c.resolveChannel(ctx, ch)
+			id, _, err := c.resolveChannel(ctx, ch)
 			if err != nil {
 				return err
 			}
 			ids = append(ids, id)
-			if _, derived := ProjectOf(name); !derived {
-				// The project watch must not depend on the direct channel.
-				if direct, err := c.ensureDirect(ctx, me, name); err != nil {
-					fmt.Fprintf(c.stderr, "slack-agent-chat: no direct channel for #%s: %v\n", name, err)
-				} else {
-					ids = append(ids, direct)
-				}
-				// Side channels this agent was added to earlier (a session
-				// that restarts would otherwise stop watching them).
-				derived, err := derivedChannels(ctx, c.bot, name)
-				if err != nil {
-					fmt.Fprintf(c.stderr, "slack-agent-chat: listing #%s's side channels: %v\n", name, err)
-				}
-				ids = append(ids, derived...)
-			}
 		}
 		return c.subscribe(ctx, uniq(ids), *backlog)
 	case "stop":
@@ -601,6 +590,38 @@ func (c *cli) ensureDirect(ctx context.Context, me identity, project string) (st
 	return id, err
 }
 
+// createdChannel is a channel createChannel made (or found), with who it
+// was made for.
+type createdChannel struct {
+	id     string
+	me     identity
+	people []slack.User
+}
+
+// createChannel creates the private channel name as the owner, so Slack
+// records them as its creator (only they, through any of their agents, may
+// archive a project), and invites this agent and the named agents and people.
+func (c *cli) createChannel(ctx context.Context, name, inviteAgents, invitePeople string) (createdChannel, error) {
+	agents, err := c.lookupUsers(ctx, inviteAgents, true)
+	if err != nil {
+		return createdChannel{}, err
+	}
+	people, err := c.lookupUsers(ctx, invitePeople, false)
+	if err != nil {
+		return createdChannel{}, err
+	}
+	me, err := c.identity(ctx)
+	if err != nil {
+		return createdChannel{}, err
+	}
+	members := append(append([]string{me.agentID}, userIDs(agents)...), userIDs(people)...)
+	id, _, err := ensureChannel(ctx, c.user, name, me.ownerID, members)
+	if err != nil {
+		return createdChannel{}, err
+	}
+	return createdChannel{id, me, people}, nil
+}
+
 func (c *cli) channel(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: channel create|invite")
@@ -622,42 +643,15 @@ func (c *cli) channel(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := ValidateProjectName(name); err != nil {
+		if err := ValidatePlainName(name); err != nil {
 			return err
 		}
-		agents, err := c.lookupUsers(ctx, *invite, true)
+		created, err := c.createChannel(ctx, name, *invite, *inviteUser)
 		if err != nil {
 			return err
 		}
-		people, err := c.lookupUsers(ctx, *inviteUser, false)
-		if err != nil {
-			return err
-		}
-		me, err := c.identity(ctx)
-		if err != nil {
-			return err
-		}
-		// Created as the owner, so Slack records them as its creator: only
-		// they (through any of their agents) may archive the project.
-		members := append(append([]string{me.agentID}, userIDs(agents)...), userIDs(people)...)
-		id, _, err := ensureChannel(ctx, c.user, name, me.ownerID, members)
-		if err != nil {
-			return err
-		}
-		// Created as the owner, so no bot is ever in it. Another person may
-		// own it already; the project does not depend on it.
-		usersID, _, err := ensureChannel(ctx, c.user, UsersChannelName(name), me.ownerID, userIDs(people))
-		if err != nil {
-			fmt.Fprintf(c.stderr, "slack-agent-chat: %v\n", err)
-		}
-		watch := []string{id}
-		if direct, err := c.ensureDirect(ctx, me, name); err != nil {
-			fmt.Fprintf(c.stderr, "slack-agent-chat: no direct channel for #%s: %v\n", name, err)
-		} else {
-			watch = append(watch, direct)
-		}
-		c.printJSON(map[string]any{"channel_id": id, "name": name, "users_channel_id": usersID})
-		return c.subscribe(ctx, watch, 0)
+		c.printJSON(map[string]any{"channel_id": created.id, "name": name})
+		return c.subscribe(ctx, []string{created.id}, 0)
 	case "invite":
 		if len(pos) < 1 || len(pos) > 2 {
 			return errors.New("usage: channel invite CHANNEL [AGENT,AGENT] [--invite-user u,v]")
@@ -861,13 +855,16 @@ func (c *cli) relayHook(ctx context.Context, event relayEvent) int {
 }
 
 // relayTarget picks the channel for a relay: the explicit target, or the
-// project channel this session watches.
+// project channel this session watches, or the only channel it watches.
 func (c *cli) relayTarget(ctx context.Context, session, target string) (string, string, error) {
 	if target != "" {
 		return c.resolveChannel(ctx, target)
 	}
 	id, name, err := c.watchedProject(ctx, session)
 	if err != nil {
+		if ids, names, chErr := c.sessionChannels(ctx, session); chErr == nil && len(ids) == 1 {
+			return ids[0], names[ids[0]], nil
+		}
 		return "", "", fmt.Errorf("%w; use %%agents@<channel>:", err)
 	}
 	return id, name, nil
@@ -899,19 +896,17 @@ func (c *cli) sessionChannels(ctx context.Context, session string) (ids []string
 	return nil, nil, errors.New("this session is not watching a channel")
 }
 
-// watchedProject returns the one project channel (not a derived __ channel)
-// that session watches.
+// watchedProject returns the one project channel that session watches.
 func (c *cli) watchedProject(ctx context.Context, session string) (string, string, error) {
 	ids, names, err := c.sessionChannels(ctx, session)
 	if err != nil {
 		return "", "", err
 	}
-	var projects []string
-	for _, id := range ids {
-		if _, derived := ProjectOf(names[id]); !derived {
-			projects = append(projects, id)
-		}
+	me, err := c.identity(ctx)
+	if err != nil {
+		return "", "", err
 	}
+	projects := projectsOf(ids, names, me.ownerName, me.agentName)
 	if len(projects) != 1 {
 		return "", "", fmt.Errorf("this session watches %d project channels", len(projects))
 	}

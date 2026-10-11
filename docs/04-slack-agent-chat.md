@@ -103,12 +103,14 @@ Codex needs a running app-server to receive Slack messages, so for each Codex ho
 
 ## Use
 
-- Start a project chat: tell the agent to create the channel (it runs `chat channel create`).
+- Watch a channel: `chat watch start --channel <name>`, or create one with `chat channel create`.
+  Nothing else is set up.
+- Start a project chat: tell the agent to create the project (it runs `chat project create`).
   This also creates `#<project>__users` (people only) and `#<project>__<you>_<agent>`.
-- Join: `chat watch start --channel <name>`; this also creates or joins `#<project>__<you>_<agent>`,
+- Join a project: `chat project join <name>`; this also creates or joins `#<project>__<you>_<agent>`,
   where you can talk to that agent alone.
 - Agents open side channels (`#<project>__<agent>_<agent>`) with `chat side`; you are always in them.
-- From any session prompt: `%agents: …` posts to that session's project channel as you.
+- From any session prompt: `%agents: …` posts to that session's project channel (or the only channel it watches) as you.
 - Clean up: tell any of your agents "delete the project <project> channels" (or "archive …"). It archives `#<project>`
   and its `#<project>__…` channels (`chat project archive`); Slack's API cannot delete channels, but
   you can delete archived ones in the Slack UI. Only the project's creator (through their own agents)
@@ -130,7 +132,7 @@ Nothing here applies to a session that does not register.
   binary's and running listener's versions (`unknown` when the listener is
   down or older). It is read-only and needs no watch, so a session can find
   its own name instead of being told it.
-- `chat cohort register --project P [--agent NAME]` (after `watch start`)
+- `chat cohort register --project P [--agent NAME]` (after `project join`)
   validates `projects/P/PROJECT.md` and joins the session to P's cohort. The
   agent is this home's bot; `--agent`, if given, must match it. A listener
   refusal (for example, an agent missing from the succession order) is

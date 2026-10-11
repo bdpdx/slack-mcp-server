@@ -1,6 +1,6 @@
 ---
 name: slack-agent-chat
-description: Coordinate with other agents and the user through private Slack channels, with incoming messages pushed into this session. Use when the user asks to start, join, or watch a project chat, hand off findings, or message other agents.
+description: Watch Slack channels and coordinate with other agents and the user there, with incoming messages pushed into this session. Use when the user asks to watch or create a Slack channel, start or join a project chat, hand off findings, or message other agents.
 ---
 
 # Slack Agent Chat
@@ -9,19 +9,31 @@ Messages arrive by themselves as `[slack-agent-chat] …` notices. You never pol
 
 Run every `@BIN@ chat …` command with escalated permissions (outside the sandbox) from the first attempt: they write this Codex home's `slack-agent-chat/` state directory, start a background listener, and connect to Slack and the local Codex app-server socket, all of which the sandbox blocks.
 
-## Start or join
+## Watch a channel
 
-- New project (you are the first agent): `@BIN@ chat channel create <project> [--invite <agent>,<agent>] [--invite-user <person>,<person>]`
-  Invite only the agents and people the user names. The user is always invited. The command also starts your watch.
-- Existing project channel: `@BIN@ chat watch start --channel <name-or-id> [--backlog N]`
+Use these unless the user says "project" (next section):
+
+- Watch an existing channel: `@BIN@ chat watch start --channel <name-or-id> [--channel …] [--backlog N]`
   `--backlog N` hands you the last N messages when the watch starts; otherwise you only get new ones, even if you watched the channel before.
+- New channel: `@BIN@ chat channel create <name> [--invite <agent>,<agent>] [--invite-user <person>,<person>]`
+  Invite only the agents and people the user names. The user is always invited. The command also starts your watch.
 - Add agents or people later (only when the user asks): `@BIN@ chat channel invite <channel> [<agent>,<agent>] [--invite-user <person>]`
 - Stop: `@BIN@ chat watch stop [--channel <channel>]` · check: `@BIN@ chat watch status`
 
+These set up nothing else: no extra channels.
+
+## Projects
+
+Only when the user asks to create or join a *project*:
+
+- New project (you are the first agent): `@BIN@ chat project create <project> [--invite <agent>,<agent>] [--invite-user <person>,<person>]`
+  Same invite rules as above. The command also joins the project.
+- Existing project: `@BIN@ chat project join <project> [--backlog N]`
+
 Project names: lowercase letters, digits, `-`, `_` (periods become `-`), never `__`, at most 32 characters; the command prints the final name.
 
-The commands also set up channels derived from the project, named `<project>__…`:
-- `<project>__<user>_<you>`: you and the user alone. Starting a watch on a project creates it and watches it too. The user talks to you directly here; treat it like the project channel, but replies stay here.
+The project commands also set up channels derived from the project, named `<project>__…`:
+- `<project>__<user>_<you>`: you and the user alone. Joining a project creates it and watches it too. The user talks to you directly here; treat it like the project channel, but replies stay here.
 - `<project>__users`: the people only; no agent is in it.
 - Side channels (below). When another agent opens one with you, you start watching it on your own.
 
@@ -39,7 +51,7 @@ Your agent name is this home's Slack bot, not something the user has to tell you
    - Do not post just to acknowledge or agree; the ✅ from `chat ack` does that.
 4. When you have finished processing a message: `@BIN@ chat ack <channel_id> <ts>` with the channel ID and `ts` from its notice header (adds ✅). Do not ack what you have not processed.
 
-## Side channels
+## Side channels (projects)
 
 Every message in the project channel goes into every agent's context. Use a side channel whenever a message does not need to be in the group to keep the other agents' context complete: any exchange with one or more specific agents that the rest do not need to read (questions, reviews, debugging, coordination between two agents). Keep the project channel for what everyone needs: decisions, handoffs, outcomes, and questions for the group. Use a side channel, never a DM: the user cannot see DMs.
 
@@ -68,7 +80,7 @@ When an action needs the user's approval, a hook asks them in that channel and a
 
 ## `%agents:`
 
-When the user types `%agents: …` (or `%agents@<channel>: …`), the hook posts it to Slack as the user (to the project channel unless a channel is named). Carry it out yourself; do not post it again.
+When the user types `%agents: …` (or `%agents@<channel>: …`), the hook posts it to Slack as the user (to the project channel, or the only channel this session watches, unless a channel is named). Carry it out yourself; do not post it again.
 
 ## Working with other agents
 

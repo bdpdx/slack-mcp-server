@@ -34,6 +34,15 @@ func ValidateProjectName(name string) error {
 	return nil
 }
 
+// ValidatePlainName checks a normalized name for a channel that is not a
+// project's: "__" would make it look derived from a project.
+func ValidatePlainName(name string) error {
+	if strings.Contains(name, derivedSep) {
+		return fmt.Errorf("channel names cannot contain %q; it marks channels derived from a project", derivedSep)
+	}
+	return nil
+}
+
 // ProjectOf returns the project a channel belongs to: the name itself for a
 // project channel, or the part before "__" for a derived one.
 func ProjectOf(name string) (project string, derived bool) {

@@ -92,15 +92,110 @@ func archiveChannels(ctx context.Context, api projectArchiver, chans []projectCh
 	return done, nil
 }
 
-// project runs `chat project archive NAME [--dry-run]`.
+const projectUsage = "usage: project create|join|archive NAME"
+
+// project runs `chat project create|join|archive`.
 func (c *cli) project(ctx context.Context, args []string) error {
-	if len(args) == 0 || args[0] != "archive" {
-		return errors.New("usage: project archive NAME [--dry-run]")
+	if len(args) == 0 {
+		return errors.New(projectUsage)
 	}
-	fs := flag.NewFlagSet("project", flag.ContinueOnError)
+	switch args[0] {
+	case "create":
+		return c.projectCreate(ctx, args[1:])
+	case "join":
+		return c.projectJoin(ctx, args[1:])
+	case "archive":
+		return c.projectArchive(ctx, args[1:])
+	}
+	return errors.New(projectUsage)
+}
+
+// projectCreate runs `chat project create NAME [--invite a,b] [--invite-user u,v]`:
+// the project channel, #NAME__users for the people, then project join.
+func (c *cli) projectCreate(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("project create", flag.ContinueOnError)
+	fs.SetOutput(c.stderr)
+	invite := fs.String("invite", "", "comma-separated agent names to invite")
+	inviteUser := fs.String("invite-user", "", "comma-separated people to invite")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
+		return errors.New("usage: project create NAME [--invite a,b] [--invite-user u,v]")
+	}
+	name, err := NormalizeChannelName(pos[0])
+	if err != nil {
+		return err
+	}
+	if err := ValidateProjectName(name); err != nil {
+		return err
+	}
+	created, err := c.createChannel(ctx, name, *invite, *inviteUser)
+	if err != nil {
+		return err
+	}
+	// Created as the owner, so no bot is ever in it. Another person may
+	// own it already; the project does not depend on it.
+	usersID, _, err := ensureChannel(ctx, c.user, UsersChannelName(name), created.me.ownerID, userIDs(created.people))
+	if err != nil {
+		fmt.Fprintf(c.stderr, "slack-agent-chat: %v\n", err)
+	}
+	c.printJSON(map[string]any{"channel_id": created.id, "name": name, "users_channel_id": usersID})
+	return c.subscribe(ctx, c.projectWatch(ctx, created.me, created.id, name), 0)
+}
+
+// projectJoin runs `chat project join NAME [--backlog N]`.
+func (c *cli) projectJoin(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("project join", flag.ContinueOnError)
+	fs.SetOutput(c.stderr)
+	backlog := fs.Int("backlog", 0, "when the join starts, deliver this many recent messages")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
+		return errors.New("usage: project join NAME [--backlog N]")
+	}
+	id, name, err := c.resolveChannel(ctx, pos[0])
+	if err != nil {
+		return err
+	}
+	if _, derived := ProjectOf(name); derived {
+		return fmt.Errorf("#%s is not a project channel; name the project", name)
+	}
+	me, err := c.identity(ctx)
+	if err != nil {
+		return err
+	}
+	return c.subscribe(ctx, c.projectWatch(ctx, me, id, name), *backlog)
+}
+
+// projectWatch returns the channels a session watches for project (whose
+// channel is id): the project channel, this agent's direct channel with the
+// owner (set up if missing), and the side channels this agent was added to
+// earlier, which a restarted session would otherwise stop watching.
+func (c *cli) projectWatch(ctx context.Context, me identity, id, project string) []string {
+	ids := []string{id}
+	// The project watch must not depend on the direct channel.
+	if direct, err := c.ensureDirect(ctx, me, project); err != nil {
+		fmt.Fprintf(c.stderr, "slack-agent-chat: no direct channel for #%s: %v\n", project, err)
+	} else {
+		ids = append(ids, direct)
+	}
+	derived, err := derivedChannels(ctx, c.bot, project)
+	if err != nil {
+		fmt.Fprintf(c.stderr, "slack-agent-chat: listing #%s's side channels: %v\n", project, err)
+	}
+	return uniq(append(ids, derived...))
+}
+
+// projectArchive runs `chat project archive NAME [--dry-run]`.
+func (c *cli) projectArchive(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("project archive", flag.ContinueOnError)
 	fs.SetOutput(c.stderr)
 	dryRun := fs.Bool("dry-run", false, "list the channels without archiving them")
-	pos, err := parseArgs(fs, args[1:])
+	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
 	}
