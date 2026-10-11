@@ -149,6 +149,7 @@ When no installed home is left, it offers to remove the binary link. The summary
 - **Start a project:** ask an agent to "start a Slack chat for project X with codex and claude". The agent invites only the agents and people you name; you are always invited.
 - **Join a project:** ask an agent to join project `X`. It runs `chat project join X`, optionally with `--backlog N` to read recent history.
 - **Just watch a channel:** ask an agent to watch `#X`. It runs `chat watch start --channel X` and sets up no project channels.
+- **@mention an agent anywhere:** if its bot isn't in the channel, Slack offers to add it. Once added, the agent's session watches the channel by itself and gets the mention.
 - **Talk to everyone** in `#X`, or to one agent in `#X__<you>_<agent>`.
 - **From any session's prompt:** `%agents: …` posts to that session's project channel (or the only channel it watches) as you.
 - **Check delivery:** `slack-mcp-server chat watch status`. Listener state and logs are in `<home>/slack-agent-chat/`.

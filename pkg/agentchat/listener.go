@@ -24,7 +24,8 @@ const (
 	repeatWindow      = 10 * time.Minute
 	relayExpiry       = 2 * time.Minute
 	// autoBacklog is what a session gets from a channel it starts watching
-	// because its bot was added, so it sees what was posted before.
+	// because its bot was added, so it sees what was posted before (the
+	// @mention that brought the bot in among it).
 	autoBacklog = 20
 )
 
@@ -235,10 +236,9 @@ func (l *Listener) HandleMessage(ctx context.Context, m Message) {
 }
 
 // HandleMemberJoined reacts to someone joining a channel this bot is in. When
-// the bot itself is added to a channel derived from a project its sessions
-// watch (a side channel another agent opened), those sessions start watching
-// it. When a person joins a watched project channel, the owner adds them to
-// <project>__users.
+// the bot itself is added to a channel, by anyone, its sessions start
+// watching it (see autoWatch). When a person joins a watched project
+// channel, the owner adds them to <project>__users.
 func (l *Listener) HandleMemberJoined(ctx context.Context, channel, user string) {
 	if user == l.Self.UserID {
 		l.autoWatch(ctx, channel)
@@ -249,11 +249,14 @@ func (l *Listener) HandleMemberJoined(ctx context.Context, channel, user string)
 	}
 }
 
+// autoWatch starts this home's sessions watching channel, which the bot was
+// just added to, with its recent backlog: an @mention of a bot that is not
+// in the channel is posted before Slack adds it, so it never arrives live
+// (CS-40). A side channel of a project goes to the sessions watching that
+// project; any other channel (or a side channel of a project none of them
+// watches) goes to every session, since one session serves each bot.
 func (l *Listener) autoWatch(ctx context.Context, channel string) {
 	project, derived := ProjectOf(l.channelName(ctx, channel))
-	if !derived {
-		return
-	}
 	l.mu.Lock()
 	var subs []Subscription
 	for _, sub := range l.state.Subscriptions {
@@ -264,10 +267,19 @@ func (l *Listener) autoWatch(ctx context.Context, channel string) {
 		}
 	}
 	l.mu.Unlock()
-	for _, sub := range subs {
-		if !slices.ContainsFunc(sub.Channels, func(ch string) bool { return l.channelName(ctx, ch) == project }) {
-			continue
+	if derived {
+		var watching []Subscription
+		for _, sub := range subs {
+			if slices.ContainsFunc(sub.Channels, func(ch string) bool { return l.channelName(ctx, ch) == project }) {
+				watching = append(watching, sub)
+			}
 		}
+		if len(watching) > 0 {
+			subs = watching
+		}
+	}
+	slices.SortFunc(subs, func(a, b Subscription) int { return strings.Compare(a.SessionID, b.SessionID) })
+	for _, sub := range subs {
 		sub.Channels = []string{channel}
 		merged, first, err := l.register(&sub)
 		if err != nil {

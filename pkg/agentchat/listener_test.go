@@ -563,7 +563,6 @@ func TestListenerAutoWatchesDerivedChannels(t *testing.T) {
 	require.NoError(t, l.Subscribe(context.Background(), other, 0))
 
 	l.HandleMemberJoined(context.Background(), "C2", "UCL")
-	l.HandleMemberJoined(context.Background(), "C3", "UCL")
 	l.HandleMemberJoined(context.Background(), "C2", "UCB") // another agent joining is not this bot
 
 	got := map[string][]string{}
@@ -571,9 +570,42 @@ func TestListenerAutoWatchesDerivedChannels(t *testing.T) {
 		got[s.SessionID] = s.Channels
 	}
 	assert.Equal(t, []string{"C1", "C2"}, got["s1"])
-	assert.Equal(t, []string{"C9"}, got["s2"])
+	assert.Equal(t, []string{"C9"}, got["s2"], "only the sessions watching the project")
 	require.Len(t, d.got, 1)
 	assert.Contains(t, d.got[0].text, "side hello")
+
+	// CS-40: a side channel of a project no session watches is still a
+	// channel someone added this bot to: every session watches it.
+	l.HandleMemberJoined(context.Background(), "C3", "UCL")
+	got = map[string][]string{}
+	for _, s := range l.Status() {
+		got[s.SessionID] = s.Channels
+	}
+	assert.Equal(t, []string{"C1", "C2", "C3"}, got["s1"])
+	assert.Equal(t, []string{"C9", "C3"}, got["s2"])
+}
+
+// CS-40: when anyone adds this bot to a channel, the session watches it and
+// gets its backlog, so the @mention that brought the bot in (posted before
+// the bot was a member, so never sent to it live) reaches the agent.
+func TestListenerAutoWatchesAnyChannelItIsAddedTo(t *testing.T) {
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	api.names["C5"] = "comms-test"
+	l := newTestListener(t, api, d)
+	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0))
+	api.history["C5"] = []slack.Message{msg("2000.5", "UMI", "<@UCL> say hello")}
+
+	l.HandleMemberJoined(context.Background(), "C5", "UCL")
+	st := l.Status()
+	require.Len(t, st, 1)
+	assert.Equal(t, []string{"C1", "C5"}, st[0].Channels)
+	require.Len(t, d.got, 1)
+	assert.Contains(t, d.got[0].text, "say hello")
+
+	l.HandleMemberJoined(context.Background(), "C5", "UCL") // a repeated event changes nothing
+	assert.Len(t, d.got, 1)
+	l.HandleMessage(context.Background(), Message{Channel: "C5", TS: "2001.1", User: "UMI", Text: "and then?"})
+	require.Len(t, d.got, 2, "later messages arrive live")
 }
 
 // A person joining a watched project channel is added to <project>__users
