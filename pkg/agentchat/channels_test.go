@@ -130,3 +130,9 @@ func TestDerivedChannels(t *testing.T) {
 	assert.ElementsMatch(t, []string{"C2", "C3"}, ids)
 	assert.Equal(t, []string{"C1", "C2", "C3"}, uniq([]string{"C1", "C2", "C1", "C3", "C2"}))
 }
+
+func TestValidatePlainName(t *testing.T) {
+	assert.NoError(t, ValidatePlainName("comms-test"))
+	assert.NoError(t, ValidatePlainName(strings.Repeat("a", 80)), "no project-name length limit")
+	assert.ErrorContains(t, ValidatePlainName("comms__test"), "derived from a project")
+}

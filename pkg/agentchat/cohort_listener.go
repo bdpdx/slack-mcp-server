@@ -210,7 +210,7 @@ func (l *Listener) cohortControl(ctx context.Context, req ControlRequest) Contro
 func (l *Listener) validateRegistration(session string, in *CohortReg, p *CohortProject, self string) (*CohortReg, error) {
 	sub := l.state.Subscriptions[session]
 	if sub == nil {
-		return nil, errors.New("this session is not watching any channel; run watch start first")
+		return nil, errors.New("this session is not watching any channel; run project join first")
 	}
 	if in.Channel == "" || !sub.Watches(in.Channel) {
 		return nil, fmt.Errorf("this session does not watch the project channel %s", in.Channel)

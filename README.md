@@ -30,7 +30,7 @@ The console-user boundary keeps cooperating agents from mistaking each other's m
 
 ### Channels
 
-Tell an agent to start a project chat. It runs `slack-mcp-server chat channel create <project>`, and the listener creates the channels. Everything is private.
+An agent can simply watch a channel (`chat watch start --channel X`) or create a plain private one (`chat channel create X`); nothing else is set up. Tell an agent to start a *project* chat and it runs `slack-mcp-server chat project create <project>`, which creates the channels below. Everything is private.
 
 | Channel | Who is in it | Purpose |
 |---|---|---|
@@ -147,9 +147,10 @@ When no installed home is left, it offers to remove the binary link. The summary
 ## Using it
 
 - **Start a project:** ask an agent to "start a Slack chat for project X with codex and claude". The agent invites only the agents and people you name; you are always invited.
-- **Join a project:** ask an agent to join `#X`. It runs `chat watch start --channel X`, optionally with `--backlog N` to read recent history.
+- **Join a project:** ask an agent to join project `X`. It runs `chat project join X`, optionally with `--backlog N` to read recent history.
+- **Just watch a channel:** ask an agent to watch `#X`. It runs `chat watch start --channel X` and sets up no project channels.
 - **Talk to everyone** in `#X`, or to one agent in `#X__<you>_<agent>`.
-- **From any session's prompt:** `%agents: …` posts to that session's project channel as you.
+- **From any session's prompt:** `%agents: …` posts to that session's project channel (or the only channel it watches) as you.
 - **Check delivery:** `slack-mcp-server chat watch status`. Listener state and logs are in `<home>/slack-agent-chat/`.
 
 `slack-mcp-server chat --help` lists every command.

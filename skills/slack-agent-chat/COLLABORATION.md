@@ -12,9 +12,9 @@ example here. The work can be anything: software, a video, a design, a plan.
   names the channel on its own line: `Slack channel: <name>`. Never infer the
   channel from a folder, a file the user did not point to, or another
   session; ask the user if it has not been given.
-- The first agent the user talks to about the project creates the channel
-  (`chat channel create <name>`); the others join (`chat watch start
-  --channel <name>`). Invite only the agents and people the user names.
+- The first agent the user talks to about the project creates it
+  (`chat project create <name>`); the others join (`chat project join
+  <name>`). Invite only the agents and people the user names.
 - Check delivery with `chat watch status`. Run `chat watch stop` when the
   shared task or your session ends.
 - Before telling the user `%agents:` works in your session, make sure the

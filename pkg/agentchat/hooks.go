@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -263,6 +264,26 @@ func directChannelsOf(ids []string, names map[string]string, owner, agent string
 	}
 	sort.Slice(found, func(i, j int) bool { return found[i].name < found[j].name })
 	return found
+}
+
+// projectsOf picks, from the watched channels ids (named by names), the ones
+// watched as projects: a channel joined as a project comes with its direct
+// channel, so a plain channel is never mistaken for one by its name.
+func projectsOf(ids []string, names map[string]string, owner, agent string) []string {
+	var projects []string
+	for _, id := range ids {
+		if _, derived := ProjectOf(names[id]); derived {
+			continue
+		}
+		direct, err := DirectChannelName(names[id], owner, agent)
+		if err != nil {
+			continue
+		}
+		if slices.ContainsFunc(ids, func(d string) bool { return names[d] == direct }) {
+			projects = append(projects, id)
+		}
+	}
+	return projects
 }
 
 // postEach posts the same message (what names it in errors) to every target,
