@@ -87,7 +87,7 @@ type Listener struct {
 }
 
 // queueDepth bounds each session's pending deliveries. Overflow is dropped;
-// the messages lack this agent's ✅, so the next watch start catches them up.
+// the session is owed a catch-up, which the sweep sends (RetryBacklogs).
 const queueDepth = 100
 
 type pending struct {
@@ -648,8 +648,9 @@ func validateSubscription(sub *Subscription) error {
 }
 
 // register records sub (merging channels with an existing subscription for
-// the same session) and reports which channels this home is joining for the
-// first time.
+// the same session) and reports which channels the session starts watching
+// now. Each starts fresh: it gets only its requested backlog, and catch-ups
+// never reach back past this start (CS-41).
 func (l *Listener) register(sub *Subscription) (*Subscription, map[string]bool, error) {
 	if err := validateSubscription(sub); err != nil {
 		return nil, nil, err
@@ -657,20 +658,19 @@ func (l *Listener) register(sub *Subscription) (*Subscription, map[string]bool, 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	merged := *sub
+	var watching []string
 	if old := l.state.Subscriptions[sub.SessionID]; old != nil {
-		merged.Channels = slices.Clone(old.Channels)
-		for _, ch := range sub.Channels {
-			if !slices.Contains(merged.Channels, ch) {
-				merged.Channels = append(merged.Channels, ch)
-			}
-		}
+		watching = old.Channels
 	}
+	merged.Channels = slices.Clone(watching)
 	first := map[string]bool{}
 	for _, ch := range sub.Channels {
-		if _, ok := l.state.JoinTS[ch]; !ok {
-			l.state.JoinTS[ch] = NowTS(l.Now())
-			first[ch] = true
+		if slices.Contains(merged.Channels, ch) {
+			continue
 		}
+		merged.Channels = append(merged.Channels, ch)
+		l.state.WatchTS[sub.SessionID+"|"+ch] = NowTS(l.Now())
+		first[ch] = true
 	}
 	l.state.Subscriptions[sub.SessionID] = &merged
 	return &merged, first, l.state.Save(l.StateFile)
@@ -747,7 +747,7 @@ func (l *Listener) recoverKept(ctx context.Context, sub *Subscription, channels 
 			}
 		}
 		l.mu.Lock()
-		join := l.state.JoinTS[ch]
+		join := l.state.WatchStart(sub.SessionID, ch)
 		l.mu.Unlock()
 		msgs, err := l.pendingSince(ctx, ch, join)
 		if err != nil {
@@ -972,7 +972,7 @@ func (l *Listener) keepBacklogs(session string, sizes map[string]int) {
 		}
 		if _, ok := l.state.BacklogBefore[k]; !ok {
 			// Counted back from the watch's start, not from when it is sent.
-			l.state.BacklogBefore[k], changed = l.state.JoinTS[ch], true
+			l.state.BacklogBefore[k], changed = l.state.WatchStart(session, ch), true
 		}
 	}
 	if changed {
@@ -1117,6 +1117,12 @@ func (l *Listener) Unsubscribe(sessionID, channel string) {
 	}
 	if channel != "" {
 		sub.Channels = slices.DeleteFunc(sub.Channels, func(c string) bool { return c == channel })
+	}
+	for k := range l.state.WatchTS {
+		s, ch, _ := strings.Cut(k, "|")
+		if s == sessionID && (channel == "" || ch == channel || len(sub.Channels) == 0) {
+			delete(l.state.WatchTS, k)
+		}
 	}
 	for k, r := range l.state.Cohort {
 		if r.SessionID == sessionID && (channel == "" || r.Channel == channel || len(sub.Channels) == 0) {

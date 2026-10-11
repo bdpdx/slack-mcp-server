@@ -421,7 +421,7 @@ func (c *cli) watch(ctx context.Context, args []string) error {
 	fs.SetOutput(c.stderr)
 	var channels stringList
 	fs.Var(&channels, "channel", "channel ID or name (repeatable)")
-	backlog := fs.Int("backlog", 0, "on first join, deliver this many recent messages")
+	backlog := fs.Int("backlog", 0, "when the watch starts, deliver this many recent messages")
 	if _, err := parseArgs(fs, args[1:]); err != nil {
 		return err
 	}

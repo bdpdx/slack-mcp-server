@@ -748,7 +748,7 @@ func TestCatchUpSendsNewestWithSkippedCount(t *testing.T) {
 		hist = append(hist, msg(fmt.Sprintf("%d.000100", 2001+i), "UBR", fmt.Sprintf("m %03d", i)))
 	}
 	api.history["C1"] = hist
-	require.NoError(t, l.Subscribe(ctx, claudeSub("s9"), 0)) // a new session catches up
+	restartListener(t, l, api, d).RecoverAll(ctx) // s1 catches up after a listener restart
 	require.Len(t, d.got, 1)
 	text := d.got[0].text
 	assert.Contains(t, text, fmt.Sprintf("Catch-up: %d messages, oldest first.", maxRecovery))
@@ -838,6 +838,8 @@ func TestFailedCatchUpIsRetried(t *testing.T) {
 	d.errs = map[string]error{"s7": errors.New("socket busy")}
 	d.mu.Unlock()
 	require.NoError(t, l.Subscribe(ctx, claudeSub("s7"), 0))
+	l = restartListener(t, l, api, d)
+	l.RecoverAll(ctx) // s7's catch-up after the restart fails
 	l.mu.Lock()
 	_, owed := l.catchUpOwed["s7"]
 	l.mu.Unlock()
@@ -931,6 +933,8 @@ func TestQueuedOlderThanCappedCatchUpIsNotSentLate(t *testing.T) {
 	}
 	api.history["C1"] = hist
 	require.NoError(t, l.Subscribe(ctx, claudeSub("s5"), 0))
+	l = restartListener(t, l, api, d)
+	l.RecoverAll(ctx) // capped
 	n := len(d.got)
 	old := Message{Channel: "C1", TS: "2001.000100", User: "UBR", Text: "m 000"} // skipped by the cap
 	l.deliverTo(ctx, l.state.Subscriptions["s5"], []pending{{msg: old}})

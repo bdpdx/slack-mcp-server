@@ -63,3 +63,11 @@ func TestTS(t *testing.T) {
 	assert.True(t, TSLess("10.000001", "10.000002"))
 	assert.False(t, TSLess("10.000002", "10.000002"))
 }
+
+// CS-41: a subscription saved before WatchTS existed keeps catching up from
+// the home's join point.
+func TestWatchStartFallsBackToJoinTS(t *testing.T) {
+	s := &State{JoinTS: map[string]string{"C1": "2000.000000"}, WatchTS: map[string]string{"s2|C1": "3000.000000"}}
+	assert.Equal(t, "2000.000000", s.WatchStart("s1", "C1"))
+	assert.Equal(t, "3000.000000", s.WatchStart("s2", "C1"))
+}

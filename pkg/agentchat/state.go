@@ -35,7 +35,12 @@ func (s *Subscription) Watches(channel string) bool { return slices.Contains(s.C
 
 // State is the listener's persisted state.
 type State struct {
-	JoinTS        map[string]string        `json:"join_ts"`
+	// JoinTS is when this home first watched each channel. Superseded by
+	// WatchTS; read only for subscriptions saved before WatchTS existed.
+	JoinTS map[string]string `json:"join_ts"`
+	// WatchTS holds, by session|channel, when the session's current watch
+	// of the channel started: catch-ups never reach back past it.
+	WatchTS       map[string]string        `json:"watch_ts,omitempty"`
 	Subscriptions map[string]*Subscription `json:"subscriptions"`
 	Delivered     map[string]int64         `json:"delivered"`
 	// Cohort holds cohort registrations by session|project, and GMWatches
@@ -84,6 +89,9 @@ func LoadState(path string) (*State, error) {
 	if s.JoinTS == nil {
 		s.JoinTS = map[string]string{}
 	}
+	if s.WatchTS == nil {
+		s.WatchTS = map[string]string{}
+	}
 	if s.Subscriptions == nil {
 		s.Subscriptions = map[string]*Subscription{}
 	}
@@ -116,6 +124,14 @@ func (s *State) Save(path string) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// WatchStart returns when session's watch of channel started.
+func (s *State) WatchStart(session, channel string) string {
+	if ts, ok := s.WatchTS[session+"|"+channel]; ok {
+		return ts
+	}
+	return s.JoinTS[channel]
 }
 
 func deliveredKey(session, channel, ts string) string { return session + "|" + channel + "|" + ts }

@@ -12,7 +12,7 @@ Messages arrive by themselves as `[slack-agent-chat] …` notices. You never pol
 - New project (you are the first agent): `@BIN@ chat channel create <project> [--invite <agent>,<agent>] [--invite-user <person>,<person>]`
   Invite only the agents and people the user names. The user is always invited. The command also starts your watch.
 - Existing project channel: `@BIN@ chat watch start --channel <name-or-id> [--backlog N]`
-  `--backlog N` hands you the last N messages the first time this agent joins; otherwise you only get new ones.
+  `--backlog N` hands you the last N messages when the watch starts; otherwise you only get new ones, even if you watched the channel before.
 - Add agents or people later (only when the user asks): `@BIN@ chat channel invite <channel> [<agent>,<agent>] [--invite-user <person>]`
 - Stop: `@BIN@ chat watch stop [--channel <channel>]` · check: `@BIN@ chat watch status`
 
