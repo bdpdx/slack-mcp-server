@@ -119,7 +119,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, cfg *toolc
 
 	if cfg.ToolEnabled(ToolConversationsHistory) {
 		s.AddTool(mcp.NewTool(ToolConversationsHistory,
-			mcp.WithDescription("Get messages from the channel (or DM) by channel_id, the last row/column in the response is used as 'cursor' parameter for pagination if not empty"),
+			mcp.WithDescription("Get messages from the channel (or DM) by channel_id, the last row/column in the response is used as 'cursor' parameter for pagination if not empty. The Reactions column gives counts only; use reactions_get to see who reacted."),
 			mcp.WithTitleAnnotation("Get Conversation History"),
 			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("channel_id",
@@ -142,7 +142,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, cfg *toolc
 
 	if cfg.ToolEnabled(ToolConversationsReplies) {
 		s.AddTool(mcp.NewTool(ToolConversationsReplies,
-			mcp.WithDescription("Get a thread of messages posted to a conversation by channelID and thread_ts, the last row/column in the response is used as 'cursor' parameter for pagination if not empty"),
+			mcp.WithDescription("Get a thread of messages posted to a conversation by channelID and thread_ts, the last row/column in the response is used as 'cursor' parameter for pagination if not empty. The Reactions column gives counts only; use reactions_get to see who reacted."),
 			mcp.WithTitleAnnotation("Get Thread Replies"),
 			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("channel_id",
