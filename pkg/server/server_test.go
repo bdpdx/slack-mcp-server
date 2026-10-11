@@ -28,6 +28,7 @@ func TestUnitToolEnabled_ReadOnly_EmptyEnabledTools(t *testing.T) {
 	readOnlyTools := []string{
 		ToolConversationsHistory,
 		ToolConversationsReplies,
+		ToolReactionsGet,
 		ToolConversationsSearchMessages,
 		ToolConversationsUnreads,
 		ToolChannelsList,
@@ -130,6 +131,7 @@ func TestValidToolNames(t *testing.T) {
 			ToolFilesUpload:                 true,
 			ToolReactionsAdd:                true,
 			ToolReactionsRemove:             true,
+			ToolReactionsGet:                true,
 			ToolAttachmentGetData:           true,
 			ToolConversationsSearchMessages: true,
 			ToolConversationsUnreads:        true,
@@ -165,6 +167,7 @@ func TestValidToolNames(t *testing.T) {
 		assert.Equal(t, "files_upload", ToolFilesUpload)
 		assert.Equal(t, "reactions_add", ToolReactionsAdd)
 		assert.Equal(t, "reactions_remove", ToolReactionsRemove)
+		assert.Equal(t, "reactions_get", ToolReactionsGet)
 		assert.Equal(t, "attachment_get_data", ToolAttachmentGetData)
 		assert.Equal(t, "conversations_search_messages", ToolConversationsSearchMessages)
 		assert.Equal(t, "conversations_unreads", ToolConversationsUnreads)

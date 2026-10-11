@@ -17,18 +17,40 @@ import (
 )
 
 type fakeSlack struct {
-	mu        sync.Mutex
-	users     map[string]*slack.User
-	names     map[string]string
-	history   map[string][]slack.Message
-	replies   map[string][]slack.Message // key channel|thread_ts
-	replyPage int                        // when > 0, replies are served this many per page
-	reactions []string                   // name|channel|ts
-	failReads bool                       // history and replies fail
-	failPosts bool                       // PostMessageContext fails (after "accepting")
-	posted    []string                   // channel|text
-	updated   []string                   // channel|ts|text
-	failUpd   int                        // the next failUpd UpdateMessageContext calls fail
+	mu              sync.Mutex
+	users           map[string]*slack.User
+	names           map[string]string
+	history         map[string][]slack.Message
+	replies         map[string][]slack.Message // key channel|thread_ts
+	replyPage       int                        // when > 0, replies are served this many per page
+	reactions       []string                   // name|channel|ts
+	failReads       bool                       // history and replies fail
+	failPosts       bool                       // PostMessageContext fails (after "accepting")
+	posted          []string                   // channel|text
+	updated         []string                   // channel|ts|text
+	failUpd         int                        // the next failUpd UpdateMessageContext calls fail
+	noReactionsRead bool                       // GetReactionsContext fails with missing_scope
+}
+
+// GetReactionsContext finds the message in history or any thread.
+func (f *fakeSlack) GetReactionsContext(_ context.Context, item slack.ItemRef, _ slack.GetReactionsParameters) (slack.ReactedItem, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.noReactionsRead {
+		return slack.ReactedItem{}, errors.New("missing_scope")
+	}
+	all := append([]slack.Message(nil), f.history[item.Channel]...)
+	for k, msgs := range f.replies {
+		if strings.HasPrefix(k, item.Channel+"|") {
+			all = append(all, msgs...)
+		}
+	}
+	for _, m := range all {
+		if m.Timestamp == item.Timestamp {
+			return slack.ReactedItem{Reactions: m.Reactions}, nil
+		}
+	}
+	return slack.ReactedItem{}, errors.New("message_not_found")
 }
 
 func newFakeSlack() *fakeSlack {

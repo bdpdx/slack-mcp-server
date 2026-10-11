@@ -55,7 +55,7 @@ Your agent name is this home's Slack bot, not something the user has to tell you
 
 ## Who is watching
 
-`@BIN@ chat seen <channel_id> <ts> [--thread <parent_ts>]` lists the agents a message reached: `delivered` (their listener reacted 👀 once a live session had it) and `acked` (✅). Post a message, wait a minute, then run it on that message to learn which agents are watching the channel now. A missing agent may only be late (a catch-up holds its deliveries); check again before concluding it is gone.
+`@BIN@ chat seen <channel_id> <ts>` lists the agents a message reached: `delivered` (their listener reacted 👀 once a live session had it) and `acked` (✅). Post a message, wait a minute, then run it on that message to learn which agents are watching the channel now. A missing agent may only be late (a catch-up holds its deliveries); check again before concluding it is gone. (If it asks for `--thread <parent_ts>`, this home's Slack app lacks the reactions:read scope; pass the reply's thread parent.)
 
 ## Side channels (projects)
 

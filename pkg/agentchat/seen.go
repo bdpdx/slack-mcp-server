@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/slack-go/slack"
 )
@@ -20,10 +21,25 @@ type seenResult struct {
 	Acked     []string `json:"acked"`
 }
 
-// seenOn reads message ts in channel (a reply in thread when thread is set)
-// and names who reacted 👀 and ✅. History carries each reaction's users,
-// so no reactions:read scope is needed.
+// reactionsGetter is reactions.get, which needs the reactions:read scope.
+type reactionsGetter interface {
+	GetReactionsContext(ctx context.Context, item slack.ItemRef, params slack.GetReactionsParameters) (slack.ReactedItem, error)
+}
+
+// seenOn names who reacted 👀 and ✅ to message ts in channel. It asks
+// reactions.get, which finds any message, thread replies included; an app
+// without reactions:read falls back to reading the message from history,
+// where a reply needs its parent (thread).
 func seenOn(ctx context.Context, api SlackAPI, channel, ts, thread string) (seenResult, error) {
+	if rg, ok := api.(reactionsGetter); ok {
+		item, err := rg.GetReactionsContext(ctx, slack.ItemRef{Channel: channel, Timestamp: ts}, slack.GetReactionsParameters{Full: true})
+		switch {
+		case err == nil:
+			return seenFrom(ctx, api, channel, ts, item.Reactions), nil
+		case !strings.Contains(err.Error(), "missing_scope"):
+			return seenResult{}, err
+		}
+	}
 	var found *slack.Message
 	if thread == "" {
 		resp, err := api.GetConversationHistoryContext(ctx, &slack.GetConversationHistoryParameters{ChannelID: channel, Latest: ts, Inclusive: true, Limit: 1})
@@ -52,8 +68,13 @@ func seenOn(ctx context.Context, api SlackAPI, channel, ts, thread string) (seen
 			return seenResult{}, fmt.Errorf("no reply %s in thread %s of %s", ts, thread, channel)
 		}
 	}
+	return seenFrom(ctx, api, channel, ts, found.Reactions), nil
+}
+
+// seenFrom names the users in reactions' 👀 and ✅.
+func seenFrom(ctx context.Context, api SlackAPI, channel, ts string, reactions []slack.ItemReaction) seenResult {
 	res := seenResult{Channel: channel, TS: ts, Delivered: []string{}, Acked: []string{}}
-	for _, r := range found.Reactions {
+	for _, r := range reactions {
 		var to *[]string
 		switch r.Name {
 		case reactionDelivered:
@@ -71,14 +92,14 @@ func seenOn(ctx context.Context, api SlackAPI, channel, ts, thread string) (seen
 			*to = append(*to, name)
 		}
 	}
-	return res, nil
+	return res
 }
 
 // seen runs `chat seen CHANNEL TS [--thread PARENT_TS]`.
 func (c *cli) seen(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("seen", flag.ContinueOnError)
 	fs.SetOutput(c.stderr)
-	thread := fs.String("thread", "", "the thread's parent ts, when TS is a reply")
+	thread := fs.String("thread", "", "the thread's parent ts, when TS is a reply (needed only without reactions:read)")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err

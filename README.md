@@ -162,7 +162,7 @@ Tools that only read are always on. Tools that change something are each gated b
 
 | Tool | Installer default |
 |---|---|
-| `conversations_history`, `conversations_replies`, `conversations_search_messages` (user token), `conversations_unreads` (user token), `channels_list`, `channels_me`, `users_search`, `usergroups_list`, `usergroups_me` (list) | always on |
+| `conversations_history`, `conversations_replies`, `reactions_get` (who reacted with what; needs `reactions:read`), `conversations_search_messages` (user token), `conversations_unreads` (user token), `channels_list`, `channels_me`, `users_search`, `usergroups_list`, `usergroups_me` (list) | always on |
 | `conversations_add_message` | on |
 | `conversations_join`, `conversations_leave` | on |
 | `conversations_rename`, `conversations_set_topic`, `conversations_invite` | on |

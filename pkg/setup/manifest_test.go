@@ -36,6 +36,8 @@ func TestRenderManifest(t *testing.T) {
 	assert.Equal(t, "team-claude", m.Features.BotUser.DisplayName)
 	assert.Contains(t, m.OAuth.Scopes.User, "groups:write")
 	assert.Contains(t, m.OAuth.Scopes.Bot, "im:write")
+	assert.Contains(t, m.OAuth.Scopes.User, "reactions:read", "reactions_get as the user")
+	assert.Contains(t, m.OAuth.Scopes.Bot, "reactions:read", "chat seen and reactions_get")
 	assert.Contains(t, m.Settings.Events.BotEvents, "member_joined_channel")
 	assert.True(t, m.Settings.Interactivity.IsEnabled)
 	assert.True(t, m.Settings.SocketMode)

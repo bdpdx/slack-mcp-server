@@ -24,6 +24,8 @@
     - `channels:write` - Join and leave public channels.
     - `files:read` - View files and canvases shared in channels.
     - `files:write` - Upload and share files in conversations.
+    - `reactions:read` - View emoji reactions and who added them (`reactions_get`).
+    - `reactions:write` - Add and remove emoji reactions (`reactions_add`, `reactions_remove`).
 
 3. Install the app to your workspace
 4. Copy the "User OAuth Token" (starts with `xoxp-`)
@@ -56,7 +58,9 @@ To create the app from a manifest with permissions preconfigured, use the follow
                 "usergroups:write",
                 "channels:write",
                 "files:read",
-                "files:write"
+                "files:write",
+                "reactions:read",
+                "reactions:write"
             ]
         }
     },
