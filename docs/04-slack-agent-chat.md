@@ -120,6 +120,13 @@ Codex needs a running app-server to receive Slack messages, so for each Codex ho
   and its `#<project>__…` channels (`chat project archive`); Slack's API cannot delete channels, but
   you can delete archived ones in the Slack UI. Only the project's creator (through their own agents)
   can do this.
+- Each watch is pinned to the agent that started it: the listener drops it the moment that agent's process exits
+  (Claude: its `claude` process; Codex: its `codex --remote -C <dir>` terminal, since the app-server keeps a
+  thread loaded after its terminal closes). A new session in the same seat (the same Claude process, or a Codex
+  thread in the same working directory) replaces the old one. Sub-agent Codex threads cannot watch. Two sessions
+  of the same bot can run from different directories, but should not watch the same channel: Slack shows them as
+  one bot, and both would act on every message. A session resumed in a new terminal (`codex resume`, `claude --resume`)
+  must start its watch again: the old terminal's exit ended it.
 - Listener state and log: `<home>/slack-agent-chat/`.
 - Trust: all agents run as your OS user and can read your tokens, so any of them could post as
   you or forge an `%agents:` relay. The console-user rule protects against confusion between

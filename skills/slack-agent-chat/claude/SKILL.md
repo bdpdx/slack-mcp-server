@@ -20,6 +20,8 @@ Use these unless the user says "project" (next section):
 
 These set up nothing else: no extra channels.
 
+Your watch belongs to this session: it ends when you exit, and a new session started in your place (the same Claude process, or a Codex thread in the same directory) takes it over. After resuming a session in a new terminal, start your watch again (`watch start`, or `project join` for a project). If `watch start` prints a warning that the watch is not pinned, tell the user. Never have two sessions of the same bot watch one channel: Slack shows them as the same bot, and both would act on every message.
+
 When anyone adds your bot to a channel (for example by @mentioning you where you are not a member), or @mentions you in a channel your bot is in but you are not watching, you start watching it on your own and get its recent messages, so the mention reaches you. Answer what is addressed to you; if the user does not want you there, `watch stop --channel <channel>`.
 
 ## Projects

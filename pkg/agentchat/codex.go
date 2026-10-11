@@ -180,6 +180,29 @@ func DeliverCodex(ctx context.Context, socket, threadID, clientMsgID, text strin
 	return "", lastErr
 }
 
+// CodexThreadInfo reads a thread's working directory and, for a sub-agent's
+// thread, its parent thread (thread/read; metadata only).
+func CodexThreadInfo(ctx context.Context, socket, threadID string) (cwd, parent string, err error) {
+	c, err := dialCodex(ctx, socket)
+	if err != nil {
+		return "", "", err
+	}
+	defer c.ws.Close()
+	var read struct {
+		Thread struct {
+			Cwd            string  `json:"cwd"`
+			ParentThreadID *string `json:"parentThreadId"`
+		} `json:"thread"`
+	}
+	if err := c.call(ctx, "thread/read", map[string]any{"threadId": threadID, "includeTurns": false}, &read); err != nil {
+		return "", "", err
+	}
+	if read.Thread.ParentThreadID != nil {
+		parent = *read.Thread.ParentThreadID
+	}
+	return read.Thread.Cwd, parent, nil
+}
+
 // CodexThreadAlive reports whether a Codex thread is still loaded on the
 // daemon. An unreachable daemon is an error, not a dead session.
 func CodexThreadAlive(ctx context.Context, socket, threadID string) (bool, error) {

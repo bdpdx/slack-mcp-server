@@ -423,9 +423,16 @@ func (c *cli) subscribe(ctx context.Context, channelIDs []string, backlog int, o
 	if err != nil {
 		return err
 	}
+	if resp.Warning != "" {
+		fmt.Fprintf(c.stderr, "slack-agent-chat: %s\n", resp.Warning)
+	}
 	for _, s := range resp.Sessions {
 		if s.SessionID == sub.SessionID {
-			c.printJSON(map[string]any{"ok": true, "session": s.SessionID, "channels": s.Channels})
+			out := map[string]any{"ok": true, "session": s.SessionID, "channels": s.Channels}
+			if resp.Warning != "" {
+				out["warning"] = resp.Warning
+			}
+			c.printJSON(out)
 		}
 	}
 	return nil

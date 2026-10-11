@@ -25,6 +25,9 @@ type HostDeliverer struct {
 
 // Deliver routes by session kind.
 func (d *HostDeliverer) Deliver(ctx context.Context, sub *Subscription, clientMsgID, text string) (string, error) {
+	if pinnedAgentGone(sub) {
+		return "", errPinnedAgentGone // a Codex thread outlives its terminal: never deliver to it
+	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	switch sub.Kind {
@@ -38,6 +41,9 @@ func (d *HostDeliverer) Deliver(ctx context.Context, sub *Subscription, clientMs
 
 // Alive checks the session without delivering anything.
 func (d *HostDeliverer) Alive(ctx context.Context, sub *Subscription) (bool, error) {
+	if pinnedAgentGone(sub) {
+		return false, nil
+	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	switch sub.Kind {

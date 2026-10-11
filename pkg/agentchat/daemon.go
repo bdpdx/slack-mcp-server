@@ -124,6 +124,7 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 		return err
 	}
 	l.Async = true // deliveries must never stall the Socket Mode event loop
+	l.ExitWatch = watchExit
 	l.Users = userAPI
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -133,6 +134,7 @@ func RunListener(ctx context.Context, home Home, log *zap.Logger) error {
 	go func() {
 		// Drop sessions that ended while the listener was down, then catch the
 		// rest up on what they missed.
+		l.WatchPins() // restored watches end when their agent process exits
 		l.Sweep(ctx)
 		l.RecoverAll(ctx)
 	}()
