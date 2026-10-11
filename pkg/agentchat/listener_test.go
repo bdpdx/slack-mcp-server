@@ -182,6 +182,15 @@ func newTestListenerAs(t *testing.T, api *fakeSlack, d *fakeDeliverer, self Iden
 	return l
 }
 
+// restartListener starts a new listener on old's state file and clock, as
+// after a listener restart, without catching anyone up yet (see RecoverAll).
+func restartListener(t *testing.T, old *Listener, api *fakeSlack, d Deliverer) *Listener {
+	l, err := NewListener(api, d, old.Self, "UBR", old.StateFile, zap.NewNop())
+	require.NoError(t, err)
+	l.Now = old.Now
+	return l
+}
+
 func claudeSub(id string) *Subscription {
 	return &Subscription{SessionID: id, Kind: KindClaude, Socket: "/s", Token: "t", Channels: []string{"C1"}}
 }
@@ -430,7 +439,7 @@ func TestListenerBacklogCountsDeliveredMessages(t *testing.T) {
 	assert.NotContains(t, d.got[0].text, "too-old")
 }
 
-func TestListenerRecoveryOnRejoin(t *testing.T) {
+func TestListenerRecoveryAfterRestart(t *testing.T) {
 	api, d := newFakeSlack(), &fakeDeliverer{}
 	l := newTestListener(t, api, d)
 	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s1"), 0)) // join point = 2000.000000
@@ -444,9 +453,9 @@ func TestListenerRecoveryOnRejoin(t *testing.T) {
 	reply.ThreadTimestamp = "2001.2"
 	api.replies["C1|2001.2"] = []slack.Message{parent, reply}
 
-	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s2"), 0))
+	restartListener(t, l, api, d).RecoverAll(context.Background())
 	require.Len(t, d.got, 1)
-	assert.Equal(t, "s2", d.got[0].session)
+	assert.Equal(t, "s1", d.got[0].session)
 	assert.Contains(t, d.got[0].text, "parent")
 	assert.Contains(t, d.got[0].text, "thread reply")
 	assert.NotContains(t, d.got[0].text, "acked")
@@ -484,7 +493,7 @@ func TestListenerRecoveryReadsAllReplyPages(t *testing.T) {
 	}
 	api.replies["C1|2001.1"] = thread
 
-	require.NoError(t, l.Subscribe(context.Background(), claudeSub("s2"), 0))
+	restartListener(t, l, api, d).RecoverAll(context.Background())
 	require.Len(t, d.got, 1)
 	for _, text := range []string{"r-one", "r-two", "r-three", "r-four"} {
 		assert.Contains(t, d.got[0].text, text)
@@ -600,4 +609,54 @@ func TestListenerStatusReportsChannelNames(t *testing.T) {
 	resp := l.Control(context.Background(), ControlRequest{Op: "status"})
 	require.Len(t, resp.Sessions, 1)
 	assert.Equal(t, map[string]string{"C1": "proj", "C2": "proj__brian_claude"}, resp.Sessions[0].Names, "unknown names are left out")
+}
+
+// CS-41: a watch start is a fresh start for the session and channel. With
+// --backlog 0 it gets nothing old: not what arrived while it was stopped, not
+// what was posted before it first watched, whoever watched then.
+func TestWatchStartIgnoresOldUnacknowledged(t *testing.T) {
+	ctx := context.Background()
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	l := newTestListener(t, api, d)
+	now := int64(2000)
+	l.Now = func() time.Time { return time.Unix(now, 0) }
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0)) // this home first joins C1 at 2000
+	l.Unsubscribe("s1", "")
+
+	api.history["C1"] = []slack.Message{msg("2002.1", "UBR", "while-stopped"), msg("2001.1", "UBR", "posted-earlier")}
+	now = 3000
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s1"), 0))
+	assert.Empty(t, d.got, "the same session watching again with --backlog 0")
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s9"), 0))
+	assert.Empty(t, d.got, "a new session with --backlog 0")
+
+	require.NoError(t, l.Subscribe(ctx, claudeSub("s8"), 1))
+	require.Len(t, d.got, 1, "--backlog N gives exactly the N newest")
+	assert.Contains(t, d.got[0].text, "while-stopped")
+	assert.NotContains(t, d.got[0].text, "posted-earlier")
+}
+
+// CS-41: a listener restart still catches a session up, but only back to
+// its own watch start.
+func TestRecoverAllStopsAtWatchStart(t *testing.T) {
+	ctx := context.Background()
+	api, d := newFakeSlack(), &fakeDeliverer{}
+	state := filepath.Join(t.TempDir(), "state.json")
+	first, err := NewListener(api, d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", state, zap.NewNop())
+	require.NoError(t, err)
+	now := int64(2000)
+	first.Now = func() time.Time { return time.Unix(now, 0) }
+	require.NoError(t, first.Subscribe(ctx, claudeSub("s1"), 0)) // the home joins at 2000
+	first.Unsubscribe("s1", "")
+	now = 3000
+	require.NoError(t, first.Subscribe(ctx, claudeSub("s1"), 0)) // s1 watches again from 3000
+
+	api.history["C1"] = []slack.Message{msg("3001.1", "UBR", "while-down"), msg("2500.1", "UBR", "before-watch")}
+	restarted, err := NewListener(api, d, Identity{UserID: "UCL", BotID: "BCL"}, "UBR", state, zap.NewNop())
+	require.NoError(t, err)
+	restarted.Now = first.Now
+	restarted.RecoverAll(ctx)
+	require.Len(t, d.got, 1)
+	assert.Contains(t, d.got[0].text, "while-down")
+	assert.NotContains(t, d.got[0].text, "before-watch")
 }
