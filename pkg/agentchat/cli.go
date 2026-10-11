@@ -153,7 +153,9 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
   seen CHANNEL TS [--thread PARENT_TS]
                     list the agents a message was delivered to (their
                     listener's eyes reaction: a live session had it) and
-                    the ones that acked it
+                    the ones that acked it. --thread (the reply's parent)
+                    is needed only when this home's Slack app lacks the
+                    reactions:read scope
   cohort register --project P [--agent NAME] [--project-root DIR]
                     join this session to projects/P's cohort: the listener
                     then tells it when the GM looks unavailable (it is next
