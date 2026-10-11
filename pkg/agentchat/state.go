@@ -28,6 +28,14 @@ type Subscription struct {
 	Socket    string   `json:"socket,omitempty"`
 	Token     string   `json:"token,omitempty"`
 	Channels  []string `json:"channels"`
+	// PinPID and PinStart name the agent process that launched the watch
+	// (Claude's process, or the Codex terminal): the watch ends when it
+	// exits (CS-42). 0 when unknown.
+	PinPID   int   `json:"pin_pid,omitempty"`
+	PinStart int64 `json:"pin_start,omitempty"`
+	// Seat is a Codex thread's working directory: a newer thread watching
+	// from the same seat replaces it.
+	Seat string `json:"seat,omitempty"`
 }
 
 // Watches reports whether the subscription includes channel.

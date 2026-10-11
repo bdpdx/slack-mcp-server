@@ -75,6 +75,9 @@ type ControlResponse struct {
 	// Version is the running listener's build (op "status"). A listener
 	// older than this field leaves it empty: its version is unknown.
 	Version string `json:"version,omitempty"`
+	// Warning is a subscribe caveat for the agent, such as a watch that
+	// could not be pinned to its agent process.
+	Warning string `json:"warning,omitempty"`
 }
 
 // SessionStatus describes one subscribed session.

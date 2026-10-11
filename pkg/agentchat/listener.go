@@ -85,6 +85,12 @@ type Listener struct {
 	views         cohortViews               // project views for cohort tracking
 	approvalWaits map[string]*approvalWait  // Codex registrations seen waiting on an approval, by session|project
 	unobservable  map[string]bool           // Codex sessions whose daemon hides approval waits (warned once)
+
+	// ExitWatch calls onExit when process pid (started at start) exits,
+	// reporting whether it can watch; nil watches nothing (tests replace
+	// it). The daemon uses watchExit.
+	ExitWatch  func(pid int, start int64, onExit func()) bool
+	pinWatched map[[2]int64]bool // pins with a running exit watch (under mu)
 }
 
 // queueDepth bounds each session's pending deliveries. Overflow is dropped;
@@ -1047,10 +1053,15 @@ func (l *Listener) backlogBefore(session, channel string) string {
 
 // Subscribe registers sub and delivers its backlog or pending messages.
 func (l *Listener) Subscribe(ctx context.Context, sub *Subscription, backlog int) error {
+	if err := validateSubscription(sub); err != nil {
+		return err
+	}
+	l.replaceSeat(sub)
 	merged, first, err := l.register(sub)
 	if err != nil {
 		return err
 	}
+	l.watchPin(merged)
 	l.recover(ctx, merged, sub.Channels, first, backlog)
 	return nil
 }
@@ -1058,10 +1069,15 @@ func (l *Listener) Subscribe(ctx context.Context, sub *Subscription, backlog int
 // SubscribeBacklog is Subscribe with the backlog limited to the channels in
 // only (all of them when only is empty).
 func (l *Listener) SubscribeBacklog(ctx context.Context, sub *Subscription, backlog int, only []string) error {
+	if err := validateSubscription(sub); err != nil {
+		return err
+	}
+	l.replaceSeat(sub)
 	merged, first, err := l.register(sub)
 	if err != nil {
 		return err
 	}
+	l.watchPin(merged)
 	l.recoverOnly(ctx, merged, sub.Channels, first, backlog, only)
 	return nil
 }
@@ -1257,11 +1273,25 @@ func (l *Listener) HasSubscriptions() bool {
 func (l *Listener) Control(ctx context.Context, req ControlRequest) ControlResponse {
 	switch req.Op {
 	case "subscribe":
+		if err := validateSubscription(req.Subscription); err != nil {
+			return ControlResponse{Error: err.Error()}
+		}
+		var warning string
+		if p, ok := l.Deliverer.(Pinner); ok {
+			w, err := p.Pin(ctx, req.Subscription)
+			if err != nil {
+				return ControlResponse{Error: err.Error()}
+			}
+			warning = w
+		}
+		l.replaceSeat(req.Subscription)
 		merged, first, err := l.register(req.Subscription)
 		if err != nil {
 			return ControlResponse{Error: err.Error()}
 		}
+		l.watchPin(merged)
 		go l.recoverOnly(context.WithoutCancel(ctx), merged, req.Subscription.Channels, first, req.Backlog, req.BacklogChannels)
+		return ControlResponse{OK: true, Sessions: l.Status(), Warning: warning}
 	case "unsubscribe":
 		l.Unsubscribe(req.SessionID, req.Channel)
 	case "skip":

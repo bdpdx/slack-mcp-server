@@ -214,7 +214,7 @@ func restartListener(t *testing.T, old *Listener, api *fakeSlack, d Deliverer) *
 }
 
 func claudeSub(id string) *Subscription {
-	return &Subscription{SessionID: id, Kind: KindClaude, Socket: "/s", Token: "t", Channels: []string{"C1"}}
+	return &Subscription{SessionID: id, Kind: KindClaude, Socket: "/s/" + id, Token: "t", Channels: []string{"C1"}}
 }
 
 func msg(ts, user, text string) slack.Message {
