@@ -97,5 +97,14 @@ mkdir -p "$(dirname "$link")"
 ln -sfn "$repo/build/slack-mcp-server" "$link"
 say "Linked $link -> $repo/build/slack-mcp-server"
 
+# slackmcpctl (app-server launch agents, slack-mcp-server processes) goes next to it.
+ctl="$(dirname "$link")/slackmcpctl"
+if [ -e "$ctl" ] && [ ! -L "$ctl" ]; then
+	say "$ctl exists and is not a symlink; not linking slackmcpctl there"
+else
+	ln -sfn "$repo/scripts/slackmcpctl" "$ctl"
+	say "Linked $ctl -> $repo/scripts/slackmcpctl"
+fi
+
 # 5. Interactive setup.
 exec "$link" setup --repo "$repo" --bin "$link"

@@ -405,22 +405,37 @@ func Uninstall(o Options) ([]Result, error) {
 	return results, nil
 }
 
-// removeBinLink offers to remove the binary symlink once no home needs it;
-// a regular file is never removed.
+// ctlName is the control script install.sh links next to the binary.
+const ctlName = "slackmcpctl"
+
+func isSymlink(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode()&os.ModeSymlink != 0
+}
+
+// removeBinLink offers to remove the binary symlink, and the slackmcpctl
+// symlink next to it, once no home needs them; a regular file is never removed.
 func removeBinLink(o Options, bin string, results *[]Result) {
-	info, err := os.Lstat(bin)
-	if bin == "" || err != nil || info.Mode()&os.ModeSymlink == 0 {
+	if bin == "" || !isSymlink(bin) {
 		return
 	}
-	yes, err := o.P.Confirm("Remove the binary link "+bin+"?", true)
+	links := []string{bin}
+	question := "Remove the binary link " + bin + "?"
+	if ctl := filepath.Join(filepath.Dir(bin), ctlName); isSymlink(ctl) {
+		links = append(links, ctl)
+		question = "Remove the links " + bin + " and " + ctl + "?"
+	}
+	yes, err := o.P.Confirm(question, true)
 	if err != nil || !yes {
 		return
 	}
 	res := Result{Home: "Binary link"}
-	if err := os.Remove(bin); err != nil {
-		res.Notes = append(res.Notes, "FAILED: "+err.Error())
-	} else {
-		res.Changed = append(res.Changed, "removed "+bin)
+	for _, l := range links {
+		if err := os.Remove(l); err != nil {
+			res.Notes = append(res.Notes, "FAILED: "+err.Error())
+		} else {
+			res.Changed = append(res.Changed, "removed "+l)
+		}
 	}
 	*results = append(*results, res)
 }

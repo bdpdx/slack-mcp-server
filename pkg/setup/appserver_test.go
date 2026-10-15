@@ -19,7 +19,7 @@ func TestAppServerLabel(t *testing.T) {
 }
 
 func TestRenderAppServerPlist(t *testing.T) {
-	got := string(renderAppServerPlist("/Users/alice/.codex-work", "/Users/alice", "/Users/alice/.local/libexec/codex-app-server-supervisor", "alice"))
+	got := string(renderAppServerPlist("/Users/alice/.codex-work", "/Users/alice", "/Users/alice/.local/libexec/codex-app-server-supervisor", "/opt/homebrew/bin/codex", "alice"))
 	for _, want := range []string{
 		"<key>CODEX_HOME</key>\n\t\t<string>/Users/alice/.codex-work</string>",
 		"<key>HOME</key>\n\t\t<string>/Users/alice</string>",
@@ -29,7 +29,7 @@ func TestRenderAppServerPlist(t *testing.T) {
 		"<key>SuccessfulExit</key>\n\t\t<false/>",
 		"<key>Label</key>\n\t<string>com.openai.codex-work.app-server</string>",
 		"<key>ProcessType</key>\n\t<string>Background</string>",
-		"<array>\n\t\t<string>/Users/alice/.local/libexec/codex-app-server-supervisor</string>\n\t</array>",
+		"<array>\n\t\t<string>/Users/alice/.local/libexec/codex-app-server-supervisor</string>\n\t\t<string>/opt/homebrew/bin/codex</string>\n\t</array>",
 		"<key>RunAtLoad</key>\n\t<true/>",
 		"<string>/Users/alice/.codex-work/app-server-daemon/launchagent.stderr.log</string>",
 		"<string>/Users/alice/.codex-work/app-server-daemon/launchagent.stdout.log</string>",
@@ -39,13 +39,13 @@ func TestRenderAppServerPlist(t *testing.T) {
 	}
 	assert.True(t, strings.HasPrefix(got, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist"))
 
-	esc := string(renderAppServerPlist("/a&b/.codex", "/a&b", "/a&b/sup", "me"))
+	esc := string(renderAppServerPlist("/a&b/.codex", "/a&b", "/a&b/sup", "/a&b/codex", "me"))
 	assert.Contains(t, esc, "<string>/a&amp;b/.codex</string>")
 	assert.NotContains(t, esc, "a&b")
 }
 
 type asEnv struct {
-	user, home, plist, label, target, domain, supervisor string
+	user, home, plist, label, target, domain, supervisor, codex string
 }
 
 func newAsEnv(t *testing.T, dir string) asEnv {
@@ -55,7 +55,7 @@ func newAsEnv(t *testing.T, dir string) asEnv {
 	label := appServerLabel(home)
 	domain := "gui/" + strconv.Itoa(os.Getuid())
 	return asEnv{user, home, filepath.Join(user, "Library", "LaunchAgents", label+".plist"), label, domain + "/" + label, domain,
-		filepath.Join(user, ".local", "libexec", "codex-app-server-supervisor")}
+		filepath.Join(user, ".local", "libexec", "codex-app-server-supervisor"), filepath.Join(user, "bin", "codex")}
 }
 
 func (e asEnv) writeSupervisor(t *testing.T) {
@@ -63,9 +63,12 @@ func (e asEnv) writeSupervisor(t *testing.T) {
 	require.NoError(t, os.WriteFile(e.supervisor, []byte("#!/bin/sh\n"), 0o755))
 }
 
+// writePlist writes a plist for home whose supervisor and codex exist.
 func (e asEnv) writePlist(t *testing.T, home string) {
 	e.writeSupervisor(t)
-	require.NoError(t, writeAtomic(e.plist, renderAppServerPlist(home, e.user, e.supervisor, "u"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Dir(e.codex), 0o755))
+	require.NoError(t, os.WriteFile(e.codex, []byte("#!/bin/sh\n"), 0o755))
+	require.NoError(t, writeAtomic(e.plist, renderAppServerPlist(home, e.user, e.supervisor, e.codex, "u"), 0o644))
 }
 
 func TestEnsureAppServerCreatesAgentAndSupervisor(t *testing.T) {
@@ -78,13 +81,14 @@ func TestEnsureAppServerCreatesAgentAndSupervisor(t *testing.T) {
 
 	sup, err := os.ReadFile(e.supervisor)
 	require.NoError(t, err)
-	assert.Contains(t, string(sup), `CODEX_BIN="/usr/local/bin/codex"`)
+	assert.Equal(t, supervisorScript, string(sup))
 	info, _ := os.Stat(e.supervisor)
 	assert.Equal(t, os.FileMode(0o755), info.Mode().Perm())
 
 	plist, err := os.ReadFile(e.plist)
 	require.NoError(t, err)
 	assert.Contains(t, string(plist), "<string>"+e.home+"</string>")
+	assert.Contains(t, string(plist), "<string>"+e.supervisor+"</string>\n\t\t<string>/usr/local/bin/codex</string>")
 	info, _ = os.Stat(e.plist)
 	assert.Equal(t, os.FileMode(0o644), info.Mode().Perm())
 	assert.DirExists(t, filepath.Join(e.home, "app-server-daemon"))
@@ -92,16 +96,27 @@ func TestEnsureAppServerCreatesAgentAndSupervisor(t *testing.T) {
 	assert.Equal(t, []string{"launchctl enable " + e.target, "launchctl bootstrap " + e.domain + " " + e.plist}, r.calls)
 }
 
-func TestEnsureAppServerReusesSupervisor(t *testing.T) {
+func TestEnsureAppServerReusesCurrentSupervisor(t *testing.T) {
 	e := newAsEnv(t, ".codex")
-	e.writeSupervisor(t)
-	r := &fakeRunner{missing: map[string]bool{"codex": true}}
-	_, _, err := ensureAppServer(e.home, e.user, r, &Scripted{})
+	require.NoError(t, os.MkdirAll(filepath.Dir(e.supervisor), 0o755))
+	require.NoError(t, os.WriteFile(e.supervisor, []byte(supervisorScript), 0o755))
+	r := &fakeRunner{}
+	changed, _, err := ensureAppServer(e.home, e.user, r, &Scripted{})
 	require.NoError(t, err)
-	sup, _ := os.ReadFile(e.supervisor)
-	assert.Equal(t, "#!/bin/sh\n", string(sup), "existing supervisor untouched")
+	assert.NotContains(t, changed, e.supervisor, "current supervisor not rewritten")
 	assert.FileExists(t, e.plist)
 	assert.Len(t, r.calls, 2)
+}
+
+func TestEnsureAppServerReplacesStaleSupervisor(t *testing.T) {
+	e := newAsEnv(t, ".codex")
+	e.writeSupervisor(t)
+	r := &fakeRunner{}
+	changed, _, err := ensureAppServer(e.home, e.user, r, &Scripted{})
+	require.NoError(t, err)
+	assert.Contains(t, changed, e.supervisor)
+	sup, _ := os.ReadFile(e.supervisor)
+	assert.Equal(t, supervisorScript, string(sup))
 }
 
 func TestEnsureAppServerSkippedWithoutCodex(t *testing.T) {
@@ -188,12 +203,16 @@ func TestEnsureAppServerMismatchLeavesPlist(t *testing.T) {
 
 func TestVerifyAppServerPlistDefaultHomeWithoutCodexHome(t *testing.T) {
 	e := newAsEnv(t, ".codex")
-	e.writeSupervisor(t)
-	plist := strings.Replace(string(renderAppServerPlist(e.home, e.user, e.supervisor, "u")), "<key>CODEX_HOME</key>\n\t\t<string>"+e.home+"</string>\n", "", 1)
+	e.writePlist(t, e.home)
+	rendered, _ := os.ReadFile(e.plist)
+	plist := strings.Replace(string(rendered), "<key>CODEX_HOME</key>\n\t\t<string>"+e.home+"</string>\n", "", 1)
 	assert.Empty(t, verifyAppServerPlist(plist, e.home, e.user, e.label))
 	assert.NotEmpty(t, verifyAppServerPlist(plist, filepath.Join(e.user, ".codex-x"), e.user, appServerLabel(filepath.Join(e.user, ".codex-x"))))
 	assert.NotEmpty(t, verifyAppServerPlist(plist, e.home, e.user, "other.label"))
 	assert.NotEmpty(t, verifyAppServerPlist(strings.ReplaceAll(plist, e.supervisor, "/no/such"), e.home, e.user, e.label))
+	assert.Equal(t, []string{`codex /no/codex does not exist`}, verifyAppServerPlist(strings.ReplaceAll(plist, e.codex, "/no/codex"), e.home, e.user, e.label))
+	oldFormat := strings.Replace(plist, "\n\t\t<string>"+e.codex+"</string>", "", 1)
+	assert.Empty(t, verifyAppServerPlist(oldFormat, e.home, e.user, e.label), "plist without the codex argument is still valid")
 }
 
 func TestEnsureAppServerMismatchNotRunningDoesNotOffer(t *testing.T) {
