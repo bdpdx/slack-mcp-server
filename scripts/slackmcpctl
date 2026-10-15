@@ -1,0 +1,363 @@
+#!/bin/bash
+# slackmcpctl: control the Codex app-server launch agents and the
+# slack-mcp-server processes of agent homes. Run with -h for usage.
+# Written for macOS's /bin/bash 3.2: no associative arrays or mapfile.
+set -o pipefail
+
+prog=$(basename "$0")
+domain="gui/$(id -u)"
+agents_dir="$HOME/Library/LaunchAgents"
+
+usage() {
+	cat <<EOF
+Usage:
+  $prog restart   [--killmcp] [all | NAME...]
+  $prog pause     [--killmcp] [all | NAME...]
+  $prog resume    [all | NAME...]
+  $prog uninstall [--killmcp] [all | NAME...]
+  $prog killmcp   [all | NAME...]
+
+Commands:
+  restart    stop the app-server launch agents, kill any of their app-server
+             processes still running, then start the agents again
+  pause      stop the launch agents and keep them stopped, also across logins
+  resume     start paused launch agents
+  uninstall  stop the launch agents and delete their plists
+  killmcp    kill the slack-mcp-server processes of the named homes
+
+  --killmcp  restart, pause and uninstall: also kill the slack-mcp-server
+             processes of the same homes
+
+NAME is an agent home's directory name without the leading dot: codex-f1 for
+~/.codex-f1, whose launch agent is
+~/Library/LaunchAgents/com.openai.codex-f1.app-server.plist. Wildcards work
+(quote them so the shell leaves them alone): 'codex*', 'claude*'. Claude homes
+have no launch agent, so they only match slack-mcp-server processes.
+
+'all' means every launch agent, plus every slack-mcp-server process started
+with --env-file for killmcp and --killmcp. With no NAME, $prog lists the
+candidates and asks which to use.
+EOF
+}
+
+die() {
+	printf '%s: %s\n' "$prog" "$*" >&2
+	exit 2
+}
+
+failed=0
+warn() {
+	printf '  %s\n' "$*" >&2
+	failed=1
+}
+
+label_of() { echo "com.openai.$1.app-server"; }
+plist_of() { echo "$agents_dir/$(label_of "$1").plist"; }
+
+# agent_names prints the NAME of every app-server launch agent plist.
+agent_names() {
+	local f n
+	for f in "$agents_dir"/com.openai.*.app-server.plist; do
+		[ -e "$f" ] || continue
+		n=${f#"$agents_dir"/com.openai.}
+		echo "${n%.app-server.plist}"
+	done | sort
+}
+
+# mcp_procs prints "NAME PID" for every slack-mcp-server process started with
+# --env-file, NAME being the env file's directory name without the leading dot.
+mcp_procs() {
+	ps -axo pid=,command= | awk '
+	{
+		n = split($2, p, "/")
+		if (p[n] != "slack-mcp-server") next
+		for (i = 3; i <= NF; i++) {
+			f = ""
+			if ($i == "--env-file" && i < NF) f = $(i + 1)
+			else if (index($i, "--env-file=") == 1) f = substr($i, 12)
+			if (f == "") continue
+			m = split(f, q, "/")
+			if (m >= 2) { h = q[m - 1]; sub(/^\./, "", h); print h, $1 }
+			break
+		}
+	}' | sort
+}
+
+in_list() { # in_list WORD LIST: whether WORD is a line of LIST
+	printf '%s\n' "$2" | grep -qxF -- "$1"
+}
+
+loaded() { launchctl print "$domain/$(label_of "$1")" >/dev/null 2>&1; }
+
+# agent_state prints running, paused (disabled), stopped or not loaded.
+agent_state() {
+	local out
+	if launchctl print-disabled "$domain" 2>/dev/null | grep -qF "\"$(label_of "$1")\" => disabled"; then
+		echo paused
+	elif ! out=$(launchctl print "$domain/$(label_of "$1")" 2>/dev/null); then
+		echo "not loaded"
+	elif printf '%s\n' "$out" | grep -qE '^[[:space:]]*state = running$'; then
+		echo running
+	else
+		echo stopped
+	fi
+}
+
+# home_of prints the Codex home the agent runs: its plist's CODEX_HOME, else ~/.NAME.
+home_of() {
+	plutil -extract EnvironmentVariables.CODEX_HOME raw -o - "$(plist_of "$1")" 2>/dev/null || echo "$HOME/.$1"
+}
+
+# pids_with_prefix prints the PID of every process whose command line starts with $1.
+pids_with_prefix() {
+	ps -axo pid=,command= | awk -v p="$1" '{ c = $0; sub(/^ *[0-9]+ /, "", c); if (index(c, p) == 1) print $1 }'
+}
+
+# kill_pids WHAT PID...: TERM the processes, then KILL any still alive after 5s.
+kill_pids() {
+	local what=$1 pid alive i
+	shift
+	[ $# -gt 0 ] || return 0
+	echo "  killing $what: $*"
+	kill -TERM "$@" 2>/dev/null
+	for i in 1 2 3 4 5 6 7 8 9 10; do
+		alive=
+		for pid in "$@"; do
+			kill -0 "$pid" 2>/dev/null && alive="$alive $pid"
+		done
+		[ -z "$alive" ] && return 0
+		sleep 0.5
+	done
+	echo "  sending KILL to$alive"
+	# shellcheck disable=SC2086 # alive is a list of PIDs
+	kill -KILL $alive 2>/dev/null || warn "could not kill$alive"
+}
+
+# stop_agent unloads the agent (its supervisor stops the daemon on the way
+# out), then kills whatever app-server processes of its home are left.
+stop_agent() {
+	local name=$1 label home
+	label=$(label_of "$name")
+	home=$(home_of "$name")
+	if loaded "$name"; then
+		echo "$name: stopping $label"
+		launchctl bootout "$domain/$label" || warn "launchctl bootout $label failed"
+	else
+		echo "$name: $label is not loaded"
+	fi
+	# shellcheck disable=SC2046 # one word per PID
+	kill_pids "leftover app-server processes" $(pids_with_prefix "$home/packages/app-server-daemon/")
+}
+
+start_agent() {
+	local name=$1 label
+	label=$(label_of "$name")
+	launchctl enable "$domain/$label" || warn "launchctl enable $label failed"
+	if loaded "$name"; then
+		echo "$name: starting $label"
+		launchctl kickstart "$domain/$label" || warn "launchctl kickstart $label failed"
+	else
+		echo "$name: loading $label"
+		launchctl bootstrap "$domain" "$(plist_of "$name")" || warn "launchctl bootstrap $label failed"
+	fi
+}
+
+killmcp() {
+	local name=$1 pids
+	pids=$(printf '%s\n' "$mcp" | awk -v n="$name" '$1 == n { print $2 }')
+	if [ -z "$pids" ]; then
+		echo "$name: no slack-mcp-server processes"
+		return
+	fi
+	echo "$name:"
+	# shellcheck disable=SC2086 # one word per PID
+	kill_pids "slack-mcp-server processes" $pids
+}
+
+# choose prints the lines of $candidates the user picks by number.
+choose() {
+	local names=() n i ans tok lo hi picked bad
+	while IFS= read -r n; do
+		[ -n "$n" ] && names+=("$n")
+	done <<<"$candidates"
+	[ -t 0 ] || die "no NAME given and stdin is not a terminal; name the agents or use 'all'"
+	echo "Which agents? (${cmd}$([ "$with_mcp" = 1 ] && [ "$cmd" != killmcp ] && echo ' --killmcp'))" >&2
+	i=1
+	for n in "${names[@]}"; do
+		printf '  %2d) %-20s %s\n' "$i" "$n" "$(describe "$n")" >&2
+		i=$((i + 1))
+	done
+	while true; do
+		read -r -p "Which agents does this apply to (1,2,...)? " ans || exit 1
+		ans=$(printf '%s' "$ans" | tr ',' ' ')
+		[ -n "${ans// /}" ] || { echo "Nothing selected." >&2; exit 0; }
+		picked=
+		bad=
+		for tok in $ans; do
+			case "$tok" in
+				all) lo=1; hi=${#names[@]} ;;
+				*-*) lo=${tok%-*}; hi=${tok#*-} ;;
+				*) lo=$tok; hi=$tok ;;
+			esac
+			case "$lo$hi" in
+				'' | *[!0-9]*) bad=$tok; break ;;
+			esac
+			if [ "$lo" -lt 1 ] || [ "$hi" -gt ${#names[@]} ] || [ "$lo" -gt "$hi" ]; then
+				bad=$tok
+				break
+			fi
+			for ((i = lo; i <= hi; i++)); do picked="$picked${names[i - 1]}"$'\n'; done
+		done
+		if [ -n "$bad" ]; then
+			echo "'$bad' is not a number from 1 to ${#names[@]}." >&2
+			continue
+		fi
+		printf '%s' "$picked" | sort -u
+		return
+	done
+}
+
+# describe prints what NAME has: its launch agent's state and its number of
+# slack-mcp-server processes.
+describe() {
+	local d= count
+	if in_list "$1" "$agents"; then
+		d="launch agent $(agent_state "$1")"
+	fi
+	count=$(printf '%s\n' "$mcp" | awk -v n="$1" '$1 == n' | grep -c .)
+	if [ "$count" -gt 0 ]; then
+		d="${d:+$d; }slack-mcp-server: $count"
+	fi
+	echo "$d"
+}
+
+# Arguments.
+cmd=
+with_mcp=0
+patterns=()
+for arg in "$@"; do
+	case "$arg" in
+		-h | --help | help)
+			usage
+			exit 0
+			;;
+		--killmcp) with_mcp=1 ;;
+		-*) die "unknown option $arg (see $prog -h)" ;;
+		restart | pause | resume | uninstall | killmcp)
+			[ -z "$cmd" ] || die "give only one of restart, pause, resume, uninstall and killmcp"
+			cmd=$arg
+			;;
+		*) patterns+=("$arg") ;;
+	esac
+done
+[ -n "$cmd" ] || { usage >&2; exit 2; }
+case "$cmd" in
+	resume) [ "$with_mcp" = 0 ] || die "--killmcp works with restart, pause and uninstall" ;;
+	killmcp) with_mcp=1 ;;
+esac
+
+agents=$(agent_names)
+mcp=$(mcp_procs)
+use_agents=1
+[ "$cmd" = killmcp ] && use_agents=0
+candidates=$(
+	{
+		[ "$use_agents" = 1 ] && printf '%s\n' "$agents"
+		[ "$with_mcp" = 1 ] && printf '%s\n' "$mcp" | awk '{ print $1 }'
+	} | grep . | sort -u
+)
+case "$cmd" in
+	killmcp) what="slack-mcp-server processes" ;;
+	*) what="app-server launch agents" ;;
+esac
+
+if [ ${#patterns[@]} -eq 0 ]; then
+	[ -n "$candidates" ] || { echo "No $what found."; exit 0; }
+	selected=$(choose) || exit $?
+	[ -n "$selected" ] || exit 0
+elif [ ${#patterns[@]} -eq 1 ] && [ "${patterns[0]}" = all ]; then
+	[ -n "$candidates" ] || { echo "No $what found."; exit 0; }
+	selected=$candidates
+else
+	selected=
+	for pat in "${patterns[@]}"; do
+		[ "$pat" != all ] || die "'all' can't be combined with names"
+		hit=
+		while IFS= read -r n; do
+			# shellcheck disable=SC2053 # pat is a glob
+			if [ -n "$n" ] && [[ $n == $pat ]]; then
+				hit=1
+				selected="$selected$n"$'\n'
+			fi
+		done <<<"$candidates"
+		[ -n "$hit" ] || die "no $what$([ "$with_mcp" = 1 ] && [ "$cmd" != killmcp ] && echo ' or slack-mcp-server processes') match '$pat'"
+	done
+	selected=$(printf '%s' "$selected" | sort -u)
+fi
+
+# Actions. restart stops everything before starting anything.
+agent_selected=
+while IFS= read -r n; do
+	[ -n "$n" ] || continue
+	# A name matched only by its slack-mcp-server processes (--killmcp) has no agent.
+	if [ "$use_agents" = 1 ] && in_list "$n" "$agents"; then
+		agent_selected="$agent_selected$n"$'\n'
+	fi
+done <<<"$selected"
+
+for_agents() { # for_agents FUNC: run FUNC for every selected launch agent
+	local n
+	while IFS= read -r n; do
+		[ -n "$n" ] && "$1" "$n"
+	done <<<"$agent_selected"
+}
+
+pause_agent() {
+	stop_agent "$1"
+	launchctl disable "$domain/$(label_of "$1")" || warn "launchctl disable $(label_of "$1") failed"
+	echo "$1: paused"
+}
+
+resume_agent() {
+	if [ "$(agent_state "$1")" = running ]; then
+		echo "$1: already running"
+	else
+		start_agent "$1"
+	fi
+}
+
+uninstall_agent() {
+	stop_agent "$1"
+	if rm -f "$(plist_of "$1")"; then
+		echo "$1: removed $(plist_of "$1")"
+	else
+		warn "could not remove $(plist_of "$1")"
+	fi
+}
+
+kill_selected_mcp() {
+	[ "$with_mcp" = 1 ] || return 0
+	local n
+	while IFS= read -r n; do
+		[ -n "$n" ] && killmcp "$n"
+	done <<<"$selected"
+}
+
+case "$cmd" in
+	restart)
+		for_agents stop_agent
+		kill_selected_mcp
+		for_agents start_agent
+		;;
+	pause)
+		for_agents pause_agent
+		kill_selected_mcp
+		;;
+	resume) for_agents resume_agent ;;
+	uninstall)
+		for_agents uninstall_agent
+		kill_selected_mcp
+		;;
+	killmcp) kill_selected_mcp ;;
+esac
+exit $failed

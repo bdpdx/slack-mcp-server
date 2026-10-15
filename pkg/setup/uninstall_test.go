@@ -345,6 +345,21 @@ func TestUninstallFindsStandardHomesNotInState(t *testing.T) {
 	assert.NotContains(t, out, filepath.Join(e.user, ".codex"))
 }
 
+func TestUninstallRemovesCtlLink(t *testing.T) {
+	e := newUnEnv(t)
+	ctl := filepath.Join(filepath.Dir(e.bin), ctlName)
+	require.NoError(t, os.Symlink(filepath.Join(e.repo, "scripts", ctlName), ctl))
+	home := e.claudeHome(t, ".claude-a")
+	e.state(t, HomeState{Path: home, Type: TypeClaude})
+	e.answer("y", "y")
+	e.run(t)
+	assert.Contains(t, e.p.Out.String(), "Remove the links "+e.bin+" and "+ctl+"?")
+	for _, l := range []string{e.bin, ctl} {
+		_, err := os.Lstat(l)
+		assert.True(t, os.IsNotExist(err), l)
+	}
+}
+
 func TestUninstallLinkOnlyWhenNoHomesRemainAndSymlink(t *testing.T) {
 	e := newUnEnv(t)
 	a := e.claudeHome(t, ".claude-a")
