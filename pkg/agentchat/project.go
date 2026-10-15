@@ -135,6 +135,7 @@ func (c *cli) projectCreate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	c.addWatcher(ctx, c.user, created.id)
 	// Created as the owner, so no bot is ever in it. Another person may
 	// own it already; the project does not depend on it.
 	usersID, _, err := ensureChannel(ctx, c.user, UsersChannelName(name), created.me.ownerID, userIDs(created.people))

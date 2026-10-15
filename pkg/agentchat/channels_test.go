@@ -136,3 +136,26 @@ func TestValidatePlainName(t *testing.T) {
 	assert.NoError(t, ValidatePlainName(strings.Repeat("a", 80)), "no project-name length limit")
 	assert.ErrorContains(t, ValidatePlainName("comms__test"), "derived from a project")
 }
+
+func TestMatchUserFindsTheWatcherBot(t *testing.T) {
+	person := slack.User{ID: "UBR", Name: "agent-watcher"}
+	gone := slack.User{ID: "UOLD", Name: "agent-watcher", IsBot: true, Deleted: true}
+	watcher := slack.User{ID: "UAW", Name: "agent_watcher_app", IsBot: true}
+	watcher.Profile.DisplayName = "Agent-Watcher"
+	u, ok := matchUser([]slack.User{person, gone, watcher}, WatcherBotName, true)
+	require.True(t, ok)
+	assert.Equal(t, "UAW", u.ID, "a live bot, matched by display name, ignoring case")
+
+	_, ok = matchUser([]slack.User{person, gone}, WatcherBotName, true)
+	assert.False(t, ok, "no live bot by that name")
+}
+
+func TestWatcherInviteIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeMaker("UCL")
+	id, _, err := ensureChannel(ctx, f, "proj__brian_claude", "UCL", []string{"UBR"})
+	require.NoError(t, err)
+	require.NoError(t, inviteEach(ctx, f, id, "", []string{"UAW"}))
+	require.NoError(t, inviteEach(ctx, f, id, "", []string{"UAW"}), "a later join finds it already in")
+	assert.Equal(t, []string{"UCL", "UBR", "UAW"}, f.members[id])
+}
