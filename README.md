@@ -156,6 +156,7 @@ slackmcpctl pause     [--killmcp] [all | NAME...]  # stop the agents and keep th
 slackmcpctl resume    [all | NAME...]              # start paused agents
 slackmcpctl uninstall [--killmcp] [all | NAME...]  # stop the agents and delete their plists
 slackmcpctl killmcp   [all | NAME...]              # kill the homes' slack-mcp-server processes
+slackmcpctl status    [all | NAME...]              # show what's running for each home
 ```
 
 `NAME` is a home's folder name without the leading dot. For example, `codex-f1` stands for `~/.codex-f1`, whose agent is `com.openai.codex-f1.app-server`. Wildcards work if you quote them, so `'codex*'` matches every Codex home and `'claude*'` every Claude home. Claude homes have no launch agent, so they only match `slack-mcp-server` processes.
@@ -163,6 +164,21 @@ slackmcpctl killmcp   [all | NAME...]              # kill the homes' slack-mcp-s
 A process belongs to a home when it was started with `--env-file <home>/slack-mcp-server.env`. That includes the listener and each session's MCP server. After `killmcp`, reconnect a Claude Code session's MCP server with `/mcp`. `--killmcp` combines `killmcp` with `restart`, `pause` or `uninstall` for the same homes.
 
 `all` covers every launch agent, plus every home with app-server processes running even if it has no launch agent (for `resume`, launch agents only). With `killmcp` or `--killmcp`, it also covers every `slack-mcp-server` process started with an env file. For a home without a launch agent, `restart`, `pause` and `uninstall` only kill its app-server processes, and nothing starts them again. With no names, `slackmcpctl` lists the candidates in alphabetical order with their state and asks which to use. Answer with numbers separated by commas; ranges like `2-4` also work.
+
+`status` changes nothing and doesn't ask; with no names it shows every home. For each home it lists:
+- the launch agent's state (running, stopped, paused or not loaded) and its supervisor PID;
+- each app-server process (daemon, app-server, code-mode host) with its release and uptime;
+- each `slack-mcp-server` process with what it is (listener, MCP server, a hook or `setup`), its uptime, and the process that started it.
+
+`slack-mcp-server` processes without an env file are listed last.
+
+```
+codex-f1
+  launch agent     com.openai.codex-f1.app-server: running (supervisor pid 23137)
+  app-server       pid 23180  0.163.0, up 01:45
+  daemon           pid 23215  0.163.0, up 01:44
+  slack-mcp-server pid 23639  MCP server (stdio), up 00:47, parent 23180 (codex app-server)
+```
 
 `restart` stops every selected agent before starting any. Stopping an agent unloads it and then kills any of its home's app-server processes still running: SIGTERM first, then SIGKILL for any still alive after 5 seconds.
 
