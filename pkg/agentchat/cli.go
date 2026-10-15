@@ -126,12 +126,10 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
   project create NAME [--invite AGENT,AGENT] [--invite-user USER,USER]
                     create a private project channel, invite the user and the
                     named agents and people, create #NAME__users for the
-                    people, and join it as with project join (which also
-                    invites the agent-watcher bot)
+                    people, and join it as with project join
   project join NAME [--backlog N]
                     watch the project channel #NAME, set up and watch the
-                    direct channel #NAME__USER_AGENT, invite the
-                    agent-watcher bot to both, and re-watch the side
+                    direct channel #NAME__USER_AGENT, and re-watch the side
                     channels this agent is in; --backlog N gives the project
                     channel's last N messages, the others none
   project archive NAME [--dry-run]
@@ -518,53 +516,16 @@ func (c *cli) lookupUsers(ctx context.Context, list string, bots bool) ([]slack.
 	}
 	var found []slack.User
 	for _, name := range wanted {
-		u, ok := matchUser(users, name, bots)
-		if !ok {
+		i := slices.IndexFunc(users, func(u slack.User) bool {
+			return u.IsBot == bots && !u.Deleted &&
+				(strings.EqualFold(u.Name, name) || strings.EqualFold(u.Profile.DisplayName, name) || strings.EqualFold(u.RealName, name))
+		})
+		if i < 0 {
 			return nil, fmt.Errorf("no %s named %q", kind, name)
 		}
-		found = append(found, u)
+		found = append(found, users[i])
 	}
 	return found, nil
-}
-
-// matchUser finds the live user (a bot when bots is set) whose user name,
-// display name or real name is name, ignoring case.
-func matchUser(users []slack.User, name string, bots bool) (slack.User, bool) {
-	i := slices.IndexFunc(users, func(u slack.User) bool {
-		return u.IsBot == bots && !u.Deleted &&
-			(strings.EqualFold(u.Name, name) || strings.EqualFold(u.Profile.DisplayName, name) || strings.EqualFold(u.RealName, name))
-	})
-	if i < 0 {
-		return slack.User{}, false
-	}
-	return users[i], true
-}
-
-// usersLister lists the workspace's users.
-type usersLister interface {
-	GetUsersContext(ctx context.Context, options ...slack.GetUsersOption) ([]slack.User, error)
-}
-
-// addWatcher invites the WatcherBotName bot, found through users, to each of
-// channelIDs through api. A workspace without that bot, or a refused invite,
-// is reported on w and never stops the caller: the project works without
-// the watcher.
-func addWatcher(ctx context.Context, users usersLister, api channelInviter, w io.Writer, channelIDs ...string) {
-	all, err := users.GetUsersContext(ctx)
-	if err != nil {
-		fmt.Fprintf(w, "slack-agent-chat: not inviting %s: %v\n", WatcherBotName, err)
-		return
-	}
-	watcher, ok := matchUser(all, WatcherBotName, true)
-	if !ok {
-		fmt.Fprintf(w, "slack-agent-chat: not inviting %s: no such bot in this workspace\n", WatcherBotName)
-		return
-	}
-	for _, id := range channelIDs {
-		if err := inviteEach(ctx, api, id, "", []string{watcher.ID}); err != nil {
-			fmt.Fprintf(w, "slack-agent-chat: %s in %s: %v\n", WatcherBotName, id, err)
-		}
-	}
 }
 
 func userIDs(users []slack.User) []string {
@@ -638,12 +599,12 @@ func (c *cli) whoami(ctx context.Context) error {
 
 // ensureDirect makes sure #PROJECT__OWNER_AGENT exists with the owner in it
 // and returns its ID.
-func ensureDirect(ctx context.Context, api channelMaker, me identity, project string) (string, error) {
+func (c *cli) ensureDirect(ctx context.Context, me identity, project string) (string, error) {
 	name, err := DirectChannelName(project, me.ownerName, me.agentName)
 	if err != nil {
 		return "", err
 	}
-	id, _, err := ensureChannel(ctx, api, name, me.agentID, []string{me.ownerID})
+	id, _, err := ensureChannel(ctx, c.bot, name, me.agentID, []string{me.ownerID})
 	return id, err
 }
 
