@@ -198,6 +198,11 @@ func inviteEach(ctx context.Context, api channelInviter, channelID, self string,
 	return nil
 }
 
+// WatcherBotName is the monitoring bot that belongs in every project channel
+// and every #PROJECT__USER_AGENT direct channel; project create and every
+// project join invite it (Brian, 2026-10-14).
+const WatcherBotName = "agent-watcher"
+
 // ensureChannel creates the private channel name as api's identity (self),
 // or finds it if it already exists, and makes sure users are in it. created
 // reports whether this call made it.
