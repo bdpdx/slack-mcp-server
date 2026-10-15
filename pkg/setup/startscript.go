@@ -11,23 +11,23 @@ import (
 // Each home gets a start script beside the linked binary, named after the
 // home's directory without its leading dot (~/.codex-test →
 // start-codex-test, ~/.claude-b → start-claude-b). It runs the home's agent
-// against a project directory: Codex through the home's app-server, Claude
+// against a repo directory: Codex through the home's app-server, Claude
 // Code with CLAUDE_CONFIG_DIR set to the home.
 
 const codexStartTemplate = `#!/bin/bash
 # Start Codex for the agent home HOME_VALUE (written by slack-mcp-server setup).
 #
-# Usage: SCRIPT_NAME [-m|--model <model>] [-p|--project-root <dir>] [codex arguments...]
+# Usage: SCRIPT_NAME [-m|--model <model>] [-r|--repo-root <dir>] [codex arguments...]
 #   -m daybreak is short for gpt-daybreak-blue-latest; without -m, Codex uses its default model.
-#   -p overrides PROJECT_ROOT below; with neither, the current directory is used.
+#   -r overrides REPO_ROOT below; with neither, the current directory is used.
 #   Everything else is passed to codex ("--" ends these options).
 #
-# Set PROJECT_ROOT below to give this agent a default project directory. Re-running
+# Set REPO_ROOT below to give this agent a default repo directory. Re-running
 # ./install.sh keeps the value you set here.
 set -euo pipefail
 
 export CODEX_HOME=HOME_QUOTED
-export PROJECT_ROOT=PROJECT_ROOT_VALUE
+export REPO_ROOT=REPO_ROOT_VALUE
 
 me="$(basename "$0")"
 model=""
@@ -42,12 +42,12 @@ while [ $# -gt 0 ]; do
 			model="$2"
 			shift 2
 			;;
-		-p|--project-root)
+		-r|--repo-root)
 			if [ $# -lt 2 ]; then
 				echo "$me: $1 needs a directory" >&2
 				exit 2
 			fi
-			PROJECT_ROOT="$2"
+			REPO_ROOT="$2"
 			shift 2
 			;;
 		--)
@@ -66,50 +66,50 @@ case "$model" in
 	daybreak) model="gpt-daybreak-blue-latest" ;;
 esac
 
-case "$PROJECT_ROOT" in
-	"~"/*) PROJECT_ROOT="$HOME/${PROJECT_ROOT#\~/}" ;;
+case "$REPO_ROOT" in
+	"~"/*) REPO_ROOT="$HOME/${REPO_ROOT#\~/}" ;;
 esac
-if [ -z "$PROJECT_ROOT" ]; then
-	PROJECT_ROOT="$PWD"
+if [ -z "$REPO_ROOT" ]; then
+	REPO_ROOT="$PWD"
 fi
-if [ ! -d "$PROJECT_ROOT" ]; then
-	echo "$me: project root $PROJECT_ROOT is not a directory" >&2
+if [ ! -d "$REPO_ROOT" ]; then
+	echo "$me: repo root $REPO_ROOT is not a directory" >&2
 	exit 1
 fi
-export PROJECT_ROOT
+export REPO_ROOT
 
-cd "$PROJECT_ROOT"
+cd "$REPO_ROOT"
 if [ -n "$model" ]; then
-	exec codex --remote unix:// -C "$PROJECT_ROOT" -m "$model" ${args[@]+"${args[@]}"}
+	exec codex --remote unix:// -C "$REPO_ROOT" -m "$model" ${args[@]+"${args[@]}"}
 fi
-exec codex --remote unix:// -C "$PROJECT_ROOT" ${args[@]+"${args[@]}"}
+exec codex --remote unix:// -C "$REPO_ROOT" ${args[@]+"${args[@]}"}
 `
 
 const claudeStartTemplate = `#!/bin/bash
 # Start Claude Code for the agent home HOME_VALUE (written by slack-mcp-server setup).
 #
-# Usage: SCRIPT_NAME [-p|--project-root <dir>] [claude arguments...]
-#   -p overrides PROJECT_ROOT below; with neither, the current directory is used.
+# Usage: SCRIPT_NAME [-r|--repo-root <dir>] [claude arguments...]
+#   -r overrides REPO_ROOT below; with neither, the current directory is used.
 #   Everything else is passed to claude ("--" ends these options, so
-#   SCRIPT_NAME -- -p "prompt" passes claude its own -p).
+#   SCRIPT_NAME -- -r passes claude its own -r, --resume).
 #
-# Set PROJECT_ROOT below to give this agent a default project directory. Re-running
+# Set REPO_ROOT below to give this agent a default repo directory. Re-running
 # ./install.sh keeps the value you set here.
 set -euo pipefail
 
 CLAUDE_CONFIG_LINE
-export PROJECT_ROOT=PROJECT_ROOT_VALUE
+export REPO_ROOT=REPO_ROOT_VALUE
 
 me="$(basename "$0")"
 args=()
 while [ $# -gt 0 ]; do
 	case "$1" in
-		-p|--project-root)
+		-r|--repo-root)
 			if [ $# -lt 2 ]; then
 				echo "$me: $1 needs a directory" >&2
 				exit 2
 			fi
-			PROJECT_ROOT="$2"
+			REPO_ROOT="$2"
 			shift 2
 			;;
 		--)
@@ -124,36 +124,38 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-case "$PROJECT_ROOT" in
-	"~"/*) PROJECT_ROOT="$HOME/${PROJECT_ROOT#\~/}" ;;
+case "$REPO_ROOT" in
+	"~"/*) REPO_ROOT="$HOME/${REPO_ROOT#\~/}" ;;
 esac
-if [ -z "$PROJECT_ROOT" ]; then
-	PROJECT_ROOT="$PWD"
+if [ -z "$REPO_ROOT" ]; then
+	REPO_ROOT="$PWD"
 fi
-if [ ! -d "$PROJECT_ROOT" ]; then
-	echo "$me: project root $PROJECT_ROOT is not a directory" >&2
+if [ ! -d "$REPO_ROOT" ]; then
+	echo "$me: repo root $REPO_ROOT is not a directory" >&2
 	exit 1
 fi
-export PROJECT_ROOT
+export REPO_ROOT
 
-cd "$PROJECT_ROOT"
+cd "$REPO_ROOT"
 exec claude ${args[@]+"${args[@]}"}
 `
 
-var projectRootLine = regexp.MustCompile(`(?m)^export PROJECT_ROOT=(.*)$`)
+// repoRootLine finds the script's REPO_ROOT, or the PROJECT_ROOT of a
+// script written before the rename, so the value carries over.
+var repoRootLine = regexp.MustCompile(`(?m)^export (?:REPO_ROOT|PROJECT_ROOT)=(.*)$`)
 
 // startScriptName is the start script's file name for a home.
 func startScriptName(home string) string {
 	return "start-" + strings.TrimPrefix(filepath.Base(home), ".")
 }
 
-// renderStartScript writes the script for a home of type typ. projectRoot
-// is the raw shell text after `export PROJECT_ROOT=`; an empty quoted string
+// renderStartScript writes the script for a home of type typ. repoRoot
+// is the raw shell text after `export REPO_ROOT=`; an empty quoted string
 // means none. Claude Code's default home (~/.claude, under userHome) runs
 // without CLAUDE_CONFIG_DIR, as setup registers its MCP server: set to
 // ~/.claude, Claude Code would read ~/.claude/.claude.json instead of
 // ~/.claude.json.
-func renderStartScript(typ, home, userHome, projectRoot string) []byte {
+func renderStartScript(typ, home, userHome, repoRoot string) []byte {
 	tmpl := codexStartTemplate
 	if typ == TypeClaude {
 		tmpl = claudeStartTemplate
@@ -167,7 +169,7 @@ func renderStartScript(typ, home, userHome, projectRoot string) []byte {
 		"HOME_VALUE", home,
 		"SCRIPT_NAME", startScriptName(home),
 		"HOME_QUOTED", singleQuote(home),
-		"PROJECT_ROOT_VALUE", projectRoot,
+		"REPO_ROOT_VALUE", repoRoot,
 	).Replace(tmpl)
 	return []byte(s)
 }
@@ -180,22 +182,22 @@ func startScriptPath(bin, home string) string {
 	return filepath.Join(filepath.Dir(bin), startScriptName(home))
 }
 
-// currentProjectRoot returns the raw PROJECT_ROOT text of the script at
+// currentRepoRoot returns the raw REPO_ROOT text of the script at
 // path, and whether the script exists.
-func currentProjectRoot(path string) (string, bool) {
+func currentRepoRoot(path string) (string, bool) {
 	old, err := os.ReadFile(path)
 	if err != nil {
 		return "", false
 	}
-	if m := projectRootLine.FindSubmatch(old); m != nil {
+	if m := repoRootLine.FindSubmatch(old); m != nil {
 		return string(m[1]), true
 	}
 	return "", true
 }
 
-// displayProjectRoot shows raw PROJECT_ROOT text as the user would write
+// displayRepoRoot shows raw REPO_ROOT text as the user would write
 // it: unquoted when it is simply quoted, "" when it is unset.
-func displayProjectRoot(raw string) string {
+func displayRepoRoot(raw string) string {
 	switch {
 	case raw == "''" || raw == `""`:
 		return ""
@@ -206,17 +208,17 @@ func displayProjectRoot(raw string) string {
 }
 
 // installStartScript writes the home's start script next to bin. root is
-// the raw PROJECT_ROOT text to set; nil keeps the one in an existing copy
+// the raw REPO_ROOT text to set; nil keeps the one in an existing copy
 // (none for a new script). It returns the script's path and whether it
 // changed.
 func installStartScript(typ, home, userHome, bin string, root *string, now time.Time) (string, bool, error) {
 	path := startScriptPath(bin, home)
-	projectRoot := "''"
+	repoRoot := "''"
 	if root != nil {
-		projectRoot = *root
-	} else if raw, _ := currentProjectRoot(path); raw != "" {
-		projectRoot = raw
+		repoRoot = *root
+	} else if raw, _ := currentRepoRoot(path); raw != "" {
+		repoRoot = raw
 	}
-	changed, err := replaceFile(path, renderStartScript(typ, home, userHome, projectRoot), 0o755, now)
+	changed, err := replaceFile(path, renderStartScript(typ, home, userHome, repoRoot), 0o755, now)
 	return path, changed, err
 }

@@ -114,7 +114,7 @@ func (e *unEnv) launchAgent(t *testing.T, home string) (plist, target string) {
 
 func (e *unEnv) startScript(t *testing.T, home string) string {
 	p := filepath.Join(filepath.Dir(e.bin), startScriptName(home))
-	require.NoError(t, os.WriteFile(p, []byte("#!/bin/bash\nexport PROJECT_ROOT='/p'\n"), 0o755))
+	require.NoError(t, os.WriteFile(p, []byte("#!/bin/bash\nexport REPO_ROOT='/p'\n"), 0o755))
 	return p
 }
 
