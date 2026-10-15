@@ -88,7 +88,7 @@ func TestStartScriptRejectsBadArguments(t *testing.T) {
 // Re-running setup rewrites the script but keeps a REPO_ROOT the user set.
 func TestInstallStartScriptKeepsRepoRoot(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "bin", "slack-mcp-server")
-	path, changed, err := installStartScript(TypeCodex, "/u/.codex-test", "/u", bin, nil, testNow)
+	path, changed, err := installStartScript(TypeCodex, "/u/.codex-test", "/u", bin, nil, "", testNow)
 	require.NoError(t, err)
 	assert.True(t, changed)
 	assert.Equal(t, filepath.Join(filepath.Dir(bin), "start-codex-test"), path)
@@ -99,11 +99,32 @@ func TestInstallStartScriptKeepsRepoRoot(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	edited := strings.Replace(string(data), "export REPO_ROOT=''", `export REPO_ROOT="$HOME/code/my-project"`, 1)
 	require.NoError(t, os.WriteFile(path, []byte(edited), 0o755))
-	_, changed, err = installStartScript(TypeCodex, "/u/.codex-test", "/u", bin, nil, testNow)
+	_, changed, err = installStartScript(TypeCodex, "/u/.codex-test", "/u", bin, nil, "", testNow)
 	require.NoError(t, err)
 	assert.False(t, changed, "nothing else to update")
 	data, _ = os.ReadFile(path)
 	assert.Contains(t, string(data), `export REPO_ROOT="$HOME/code/my-project"`)
+}
+
+// A changed script's backup goes to the backup directory, not beside the
+// script on PATH.
+func TestInstallStartScriptBacksUpOutsideBinDir(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "bin", "slack-mcp-server")
+	backups := filepath.Join(t.TempDir(), ".install", "backups")
+	path, _, err := installStartScript(TypeCodex, "/u/.codex-test", "/u", bin, nil, backups, testNow)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/bash\n# old\n"), 0o755))
+	_, changed, err := installStartScript(TypeCodex, "/u/.codex-test", "/u", bin, nil, backups, testNow)
+	require.NoError(t, err)
+	assert.True(t, changed)
+	beside, _ := filepath.Glob(path + ".bak-*")
+	assert.Empty(t, beside, "no backup next to the script")
+	saved, _ := filepath.Glob(filepath.Join(backups, "start-codex-test.bak-*"))
+	require.Len(t, saved, 1)
+	data, _ := os.ReadFile(saved[0])
+	assert.Equal(t, "#!/bin/bash\n# old\n", string(data))
+	info, _ := os.Stat(saved[0])
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "backup is not executable")
 }
 
 // runClaudeStart runs the Claude Code script for /u/.claude-b in cwd with a
@@ -155,14 +176,14 @@ func TestClaudeStartScriptRunsClaude(t *testing.T) {
 
 func TestInstallClaudeStartScriptKeepsRepoRoot(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "bin", "slack-mcp-server")
-	path, _, err := installStartScript(TypeClaude, "/u/.claude-b", "/u", bin, nil, testNow)
+	path, _, err := installStartScript(TypeClaude, "/u/.claude-b", "/u", bin, nil, "", testNow)
 	require.NoError(t, err)
 	data, _ := os.ReadFile(path)
 	assert.Contains(t, string(data), "export CLAUDE_CONFIG_DIR='/u/.claude-b'")
 	assert.NotContains(t, string(data), "codex")
 	edited := strings.Replace(string(data), "export REPO_ROOT=''", `export REPO_ROOT=~/code/x`, 1)
 	require.NoError(t, os.WriteFile(path, []byte(edited), 0o755))
-	_, changed, err := installStartScript(TypeClaude, "/u/.claude-b", "/u", bin, nil, testNow)
+	_, changed, err := installStartScript(TypeClaude, "/u/.claude-b", "/u", bin, nil, "", testNow)
 	require.NoError(t, err)
 	assert.False(t, changed)
 }
@@ -204,7 +225,7 @@ func TestInstallStartScriptCarriesOverProjectRoot(t *testing.T) {
 	raw, ok := currentRepoRoot(path)
 	assert.True(t, ok)
 	assert.Equal(t, "'/old/repo'", raw)
-	_, _, err := installStartScript(TypeCodex, "/u/.codex-test", "/u", bin, nil, testNow)
+	_, _, err := installStartScript(TypeCodex, "/u/.codex-test", "/u", bin, nil, "", testNow)
 	require.NoError(t, err)
 	data, _ := os.ReadFile(path)
 	assert.Contains(t, string(data), "export REPO_ROOT='/old/repo'\n")

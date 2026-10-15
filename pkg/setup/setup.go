@@ -336,7 +336,7 @@ func installHome(o Options, h Home, root *string) (Result, error) {
 	if err != nil {
 		return res, err
 	}
-	script, wrote, err := installStartScript(h.Type, h.Path, o.UserHome, o.Bin, root, o.Now())
+	script, wrote, err := installStartScript(h.Type, h.Path, o.UserHome, o.Bin, root, backupsDir(o.Repo), o.Now())
 	if err != nil {
 		return res, err
 	}

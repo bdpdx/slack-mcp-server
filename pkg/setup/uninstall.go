@@ -96,11 +96,10 @@ func (u *uninstaller) removeFile(path string) error {
 	return os.Remove(path)
 }
 
-// removeAway backs up path into <repo>/.install/backups (private, so a plist
-// is not loaded by launchd and a script is not on PATH), deletes it and
-// reports where the backup went.
+// removeAway backs up path into backupsDir, deletes it and reports where
+// the backup went.
 func (u *uninstaller) removeAway(path string) error {
-	dst, err := backupInto(path, filepath.Join(u.o.Repo, ".install", "backups"), 0o600, u.o.Now())
+	dst, err := backupInto(path, backupsDir(u.o.Repo), 0o600, u.o.Now())
 	if err != nil {
 		return err
 	}

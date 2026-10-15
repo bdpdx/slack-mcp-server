@@ -209,9 +209,10 @@ func displayRepoRoot(raw string) string {
 
 // installStartScript writes the home's start script next to bin. root is
 // the raw REPO_ROOT text to set; nil keeps the one in an existing copy
-// (none for a new script). It returns the script's path and whether it
-// changed.
-func installStartScript(typ, home, userHome, bin string, root *string, now time.Time) (string, bool, error) {
+// (none for a new script). A replaced script is backed up into backupDir,
+// not beside it, so no backups pile up on PATH. It returns the script's path
+// and whether it changed.
+func installStartScript(typ, home, userHome, bin string, root *string, backupDir string, now time.Time) (string, bool, error) {
 	path := startScriptPath(bin, home)
 	repoRoot := "''"
 	if root != nil {
@@ -219,6 +220,6 @@ func installStartScript(typ, home, userHome, bin string, root *string, now time.
 	} else if raw, _ := currentRepoRoot(path); raw != "" {
 		repoRoot = raw
 	}
-	changed, err := replaceFile(path, renderStartScript(typ, home, userHome, repoRoot), 0o755, now)
+	changed, err := replaceFileBackupIn(path, renderStartScript(typ, home, userHome, repoRoot), 0o755, backupDir, now)
 	return path, changed, err
 }

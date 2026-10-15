@@ -103,7 +103,7 @@ cd slack-mcp-server
 
 A home that already has an env file offers **Update** (keep tokens, refresh everything else), **Reinstall** (new bot and tokens) or **Skip**. Re-running `./install.sh` is safe:
 
-- Every file it changes is backed up first (`<file>.bak-<timestamp>`), and files are written atomically.
+- Every file it changes is backed up first (`<file>.bak-<timestamp>`), and files are written atomically. Start scripts are backed up to `.install/backups` instead, so no backups pile up next to the binary on your `PATH`.
 - A config file that isn't valid JSON is left alone.
 - Hooks and rules from an earlier install are replaced, not duplicated.
 
