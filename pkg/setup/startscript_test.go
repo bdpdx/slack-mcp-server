@@ -88,7 +88,7 @@ func TestStartScriptRejectsBadArguments(t *testing.T) {
 // Re-running setup rewrites the script but keeps a PROJECT_ROOT the user set.
 func TestInstallStartScriptKeepsProjectRoot(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "bin", "slack-mcp-server")
-	path, changed, err := installStartScript(TypeCodex, "/u/.codex-test", "/u", bin, testNow)
+	path, changed, err := installStartScript(TypeCodex, "/u/.codex-test", "/u", bin, nil, testNow)
 	require.NoError(t, err)
 	assert.True(t, changed)
 	assert.Equal(t, filepath.Join(filepath.Dir(bin), "start-codex-test"), path)
@@ -99,7 +99,7 @@ func TestInstallStartScriptKeepsProjectRoot(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	edited := strings.Replace(string(data), "export PROJECT_ROOT=''", `export PROJECT_ROOT="$HOME/code/my-project"`, 1)
 	require.NoError(t, os.WriteFile(path, []byte(edited), 0o755))
-	_, changed, err = installStartScript(TypeCodex, "/u/.codex-test", "/u", bin, testNow)
+	_, changed, err = installStartScript(TypeCodex, "/u/.codex-test", "/u", bin, nil, testNow)
 	require.NoError(t, err)
 	assert.False(t, changed, "nothing else to update")
 	data, _ = os.ReadFile(path)
@@ -155,14 +155,14 @@ func TestClaudeStartScriptRunsClaude(t *testing.T) {
 
 func TestInstallClaudeStartScriptKeepsProjectRoot(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "bin", "slack-mcp-server")
-	path, _, err := installStartScript(TypeClaude, "/u/.claude-b", "/u", bin, testNow)
+	path, _, err := installStartScript(TypeClaude, "/u/.claude-b", "/u", bin, nil, testNow)
 	require.NoError(t, err)
 	data, _ := os.ReadFile(path)
 	assert.Contains(t, string(data), "export CLAUDE_CONFIG_DIR='/u/.claude-b'")
 	assert.NotContains(t, string(data), "codex")
 	edited := strings.Replace(string(data), "export PROJECT_ROOT=''", `export PROJECT_ROOT=~/code/x`, 1)
 	require.NoError(t, os.WriteFile(path, []byte(edited), 0o755))
-	_, changed, err := installStartScript(TypeClaude, "/u/.claude-b", "/u", bin, testNow)
+	_, changed, err := installStartScript(TypeClaude, "/u/.claude-b", "/u", bin, nil, testNow)
 	require.NoError(t, err)
 	assert.False(t, changed)
 }
@@ -184,4 +184,12 @@ func TestClaudeStartScriptDefaultHomeUnsetsConfigDir(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 	assert.Equal(t, "config=unset\n", string(out))
+}
+
+func TestDisplayProjectRoot(t *testing.T) {
+	assert.Equal(t, "", displayProjectRoot("''"))
+	assert.Equal(t, "", displayProjectRoot(`""`))
+	assert.Equal(t, "/a b/c", displayProjectRoot("'/a b/c'"))
+	assert.Equal(t, `"$HOME/x"`, displayProjectRoot(`"$HOME/x"`), "anything else is shown as written")
+	assert.Equal(t, `'it'\''s'`, displayProjectRoot(`'it'\''s'`))
 }

@@ -166,22 +166,56 @@ func renderStartScript(typ, home, userHome, projectRoot string) []byte {
 	s := strings.NewReplacer(
 		"HOME_VALUE", home,
 		"SCRIPT_NAME", startScriptName(home),
-		"HOME_QUOTED", "'"+strings.ReplaceAll(home, "'", `'\''`)+"'",
+		"HOME_QUOTED", singleQuote(home),
 		"PROJECT_ROOT_VALUE", projectRoot,
 	).Replace(tmpl)
 	return []byte(s)
 }
 
-// installStartScript writes the home's start script next to bin, keeping a
-// PROJECT_ROOT the user set in an existing copy. It returns the script's
-// path and whether it changed.
-func installStartScript(typ, home, userHome, bin string, now time.Time) (string, bool, error) {
-	path := filepath.Join(filepath.Dir(bin), startScriptName(home))
+// singleQuote single-quotes s for the shell, always.
+func singleQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// startScriptPath is where the home's start script goes: next to bin.
+func startScriptPath(bin, home string) string {
+	return filepath.Join(filepath.Dir(bin), startScriptName(home))
+}
+
+// currentProjectRoot returns the raw PROJECT_ROOT text of the script at
+// path, and whether the script exists.
+func currentProjectRoot(path string) (string, bool) {
+	old, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	if m := projectRootLine.FindSubmatch(old); m != nil {
+		return string(m[1]), true
+	}
+	return "", true
+}
+
+// displayProjectRoot shows raw PROJECT_ROOT text as the user would write
+// it: unquoted when it is simply quoted, "" when it is unset.
+func displayProjectRoot(raw string) string {
+	switch {
+	case raw == "''" || raw == `""`:
+		return ""
+	case len(raw) >= 2 && raw[0] == '\'' && raw[len(raw)-1] == '\'' && !strings.Contains(raw[1:len(raw)-1], "'"):
+		return raw[1 : len(raw)-1]
+	}
+	return raw
+}
+
+// installStartScript writes the home's start script next to bin. root is
+// the raw PROJECT_ROOT text to set; nil keeps the one in an existing copy
+// (none for a new script). It returns the script's path and whether it
+// changed.
+func installStartScript(typ, home, userHome, bin string, root *string, now time.Time) (string, bool, error) {
+	path := startScriptPath(bin, home)
 	projectRoot := "''"
-	if old, err := os.ReadFile(path); err == nil {
-		if m := projectRootLine.FindSubmatch(old); m != nil {
-			projectRoot = string(m[1])
-		}
+	if root != nil {
+		projectRoot = *root
+	} else if raw, _ := currentProjectRoot(path); raw != "" {
+		projectRoot = raw
 	}
 	changed, err := replaceFile(path, renderStartScript(typ, home, userHome, projectRoot), 0o755, now)
 	return path, changed, err

@@ -247,9 +247,13 @@ func processHome(ctx context.Context, o Options, st *State, h Home) (Result, boo
 		}
 		bot, notes = name, n
 	}
+	root, err := askProjectRoot(o, h)
+	if err != nil {
+		return Result{Home: h.Path}, false, err
+	}
 	oldBin := ExistingBin([]Home{h})
 	before := snapshotSessionFiles(h.Path)
-	res, err := installHome(o, h)
+	res, err := installHome(o, h, root)
 	res.Fresh = action != actUpdate
 	// Running sessions need a restart only if what they read at start
 	// actually differs now. Setup's writes alone don't say so: re-registering
@@ -282,11 +286,94 @@ type stepError struct {
 func (e *stepError) Error() string { return e.err.Error() }
 func (e *stepError) Unwrap() error { return e.err }
 
-func installHome(o Options, h Home) (Result, error) {
+// installHome installs the agent integration, then the start script with
+// PROJECT_ROOT set to root (nil keeps the script's own).
+func installHome(o Options, h Home, root *string) (Result, error) {
+	var res Result
+	var err error
 	if h.Type == TypeCodex {
-		return InstallCodex(h.Path, o.UserHome, o.Bin, o.R, o.P, o.Now())
+		res, err = InstallCodex(h.Path, o.UserHome, o.Bin, o.R, o.P, o.Now())
+	} else {
+		res, err = InstallClaude(h.Path, o.UserHome, o.Bin, o.R, o.Now())
 	}
-	return InstallClaude(h.Path, o.UserHome, o.Bin, o.R, o.Now())
+	if err != nil {
+		return res, err
+	}
+	script, wrote, err := installStartScript(h.Type, h.Path, o.UserHome, o.Bin, root, o.Now())
+	if err != nil {
+		return res, err
+	}
+	if wrote {
+		res.Changed = append(res.Changed, script)
+	}
+	agent, extra := "Claude Code", ""
+	if h.Type == TypeCodex {
+		agent, extra = "Codex", "; -m daybreak picks gpt-daybreak-blue-latest"
+	}
+	where := "run from your project directory (or pass -p <dir>, or set PROJECT_ROOT in the script)"
+	if raw, _ := currentProjectRoot(script); displayProjectRoot(raw) != "" {
+		where = fmt.Sprintf("in %s (PROJECT_ROOT; -p <dir> overrides it)", displayProjectRoot(raw))
+	}
+	res.Notes = append(res.Notes, fmt.Sprintf("start %s for this home with %s, %s%s", agent, filepath.Base(script), where, extra))
+	return res, nil
+}
+
+// askProjectRoot asks for the start script's default project directory. A
+// new script offers to set one; an existing one shows its PROJECT_ROOT and
+// offers to change it. It returns the raw PROJECT_ROOT text to write, or nil
+// to keep the script's own.
+func askProjectRoot(o Options, h Home) (*string, error) {
+	p := o.P
+	path := startScriptPath(o.Bin, h.Path)
+	name := filepath.Base(path)
+	raw, exists := currentProjectRoot(path)
+	cur := displayProjectRoot(raw)
+	if !exists {
+		yes, err := p.Confirm(fmt.Sprintf("Configure a default PROJECT_ROOT for %s", name), true)
+		if err != nil || !yes {
+			return nil, err
+		}
+		return askProjectDir(o, "Project root directory", "", false)
+	}
+	if cur == "" {
+		p.Say("%s has no default PROJECT_ROOT; it starts in the current directory.", name)
+	} else {
+		p.Say("%s's PROJECT_ROOT is %s", name, cur)
+	}
+	change, err := p.Confirm("Change it?", false)
+	if err != nil || !change {
+		return nil, err
+	}
+	return askProjectDir(o, `Project root directory ("none" for no default)`, cur, true)
+}
+
+// askProjectDir reads an existing directory until one is given, and returns
+// it quoted for the script. With allowNone, "none" clears PROJECT_ROOT.
+func askProjectDir(o Options, q, def string, allowNone bool) (*string, error) {
+	for {
+		raw, err := o.P.Ask(q, def)
+		if err != nil {
+			return nil, err
+		}
+		if allowNone && strings.EqualFold(raw, "none") {
+			none := "''"
+			return &none, nil
+		}
+		if raw == "" {
+			o.P.Say("A directory is required.")
+			continue
+		}
+		dir, err := ExpandPath(raw, o.UserHome)
+		if err != nil {
+			return nil, err
+		}
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+			o.P.Say("%s is not a directory.", dir)
+			continue
+		}
+		q := singleQuote(dir)
+		return &q, nil
+	}
 }
 
 // configureEnv does bot setup and writes the env file. It returns an empty

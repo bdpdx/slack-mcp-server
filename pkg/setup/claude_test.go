@@ -84,13 +84,6 @@ func TestInstallClaude(t *testing.T) {
 	assert.Equal(t, "-u CLAUDE_CONFIG_DIR claude mcp remove -s user slack", r.calls[0], "an inherited CLAUDE_CONFIG_DIR is dropped")
 	assert.Contains(t, r.calls[1], "-u CLAUDE_CONFIG_DIR claude mcp add -s user slack -- "+bin+" --transport stdio --env-file "+filepath.Join(home, "slack-mcp-server.env"))
 	assert.NotEmpty(t, res.Changed)
-
-	script := filepath.Join(user, "bin dir", "start-claude")
-	assert.Contains(t, res.Changed, script)
-	assert.Contains(t, strings.Join(res.Notes, "\n"), "start-claude, run from your project directory")
-	data, err = os.ReadFile(script)
-	require.NoError(t, err)
-	assert.Contains(t, string(data), "unset CLAUDE_CONFIG_DIR", "the default home, as its MCP server is registered")
 }
 
 func TestInstallClaudeRefusesInvalidSettings(t *testing.T) {
