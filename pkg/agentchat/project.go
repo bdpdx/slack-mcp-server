@@ -135,7 +135,6 @@ func (c *cli) projectCreate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	c.addWatcher(ctx, c.user, created.id)
 	// Created as the owner, so no bot is ever in it. Another person may
 	// own it already; the project does not depend on it.
 	usersID, _, err := ensureChannel(ctx, c.user, UsersChannelName(name), created.me.ownerID, userIDs(created.people))
@@ -176,7 +175,7 @@ func (c *cli) projectJoin(ctx context.Context, args []string) error {
 
 // projectWatch returns the channels a session watches for project (whose
 // channel is id): the project channel, this agent's direct channel with the
-// owner (set up if missing), and the side channels this agent was added to
+// owner (set up if missing; both get the watcher bot), and the side channels this agent was added to
 // earlier, which a restarted session would otherwise stop watching.
 func (c *cli) projectWatch(ctx context.Context, me identity, id, project string) []string {
 	ids := []string{id}
@@ -186,6 +185,9 @@ func (c *cli) projectWatch(ctx context.Context, me identity, id, project string)
 	} else {
 		ids = append(ids, direct)
 	}
+	// The watcher bot belongs in the project and direct channels; this
+	// agent's bot is in both, so every create and join (re)invites it.
+	addWatcher(ctx, c.bot, c.bot, c.stderr, ids...)
 	derived, err := derivedChannels(ctx, c.bot, project)
 	if err != nil {
 		fmt.Fprintf(c.stderr, "slack-agent-chat: listing #%s's side channels: %v\n", project, err)

@@ -39,7 +39,7 @@ An agent can simply watch a channel (`chat watch start --channel X`) or create a
 | `#<project>__<agent>_<agent>[_…]` | The named agents (sorted) and you | Side channels: agents open one with `chat side` for anything the rest of the group doesn't need to read |
 | `#<project>__users` | People only | Talk without any agent listening |
 
-`chat project create` invites the `agent-watcher` bot to `#<project>`, and every `chat project join` invites it to that agent's `#<project>__<user>_<agent>` channel (and back in, if it was removed). A workspace without that bot just gets a warning; the project works without it.
+`chat project create` and every `chat project join` invite the `agent-watcher` bot to `#<project>` and to that agent's `#<project>__<user>_<agent>` channel, and back in if it was removed. A workspace without that bot just gets a warning; the project works without it.
 
 Project names use lowercase letters, digits, `-` and `_`. They can't contain `__` and are at most 32 characters. Periods become `-`.
 

@@ -109,10 +109,10 @@ Codex needs a running app-server to receive Slack messages, so for each Codex ho
   channel its bot is in but its session isn't watching, and the session starts watching that channel by
   itself, with recent backlog, so the mention reaches it.
 - Start a project chat: tell the agent to create the project (it runs `chat project create`).
-  This also creates `#<project>__users` (people only) and `#<project>__<you>_<agent>`, and invites the
-  `agent-watcher` bot to `#<project>`.
+  This also creates `#<project>__users` (people only) and `#<project>__<you>_<agent>`.
 - Join a project: `chat project join <name>`; this also creates or joins `#<project>__<you>_<agent>`,
-  where you can talk to that agent alone, and invites the `agent-watcher` bot to it.
+  where you can talk to that agent alone. Create and join both invite the `agent-watcher` bot to
+  `#<project>` and to that direct channel.
 - Agents open side channels (`#<project>__<agent>_<agent>`) with `chat side`; you are always in them.
 - `chat seen CHANNEL TS` lists the agents a message was delivered to (👀) and that acked it (✅):
   post a message, wait a minute, and run it to see who is watching.

@@ -150,12 +150,47 @@ func TestMatchUserFindsTheWatcherBot(t *testing.T) {
 	assert.False(t, ok, "no live bot by that name")
 }
 
-func TestWatcherInviteIsIdempotent(t *testing.T) {
+type fakeUsers struct {
+	users []slack.User
+	err   error
+}
+
+func (f fakeUsers) GetUsersContext(context.Context, ...slack.GetUsersOption) ([]slack.User, error) {
+	return f.users, f.err
+}
+
+func TestAddWatcherInvitesToEveryChannelOnce(t *testing.T) {
 	ctx := context.Background()
 	f := newFakeMaker("UCL")
-	id, _, err := ensureChannel(ctx, f, "proj__brian_claude", "UCL", []string{"UBR"})
+	project, _, err := ensureChannel(ctx, f, "proj", "UCL", nil)
 	require.NoError(t, err)
-	require.NoError(t, inviteEach(ctx, f, id, "", []string{"UAW"}))
-	require.NoError(t, inviteEach(ctx, f, id, "", []string{"UAW"}), "a later join finds it already in")
-	assert.Equal(t, []string{"UCL", "UBR", "UAW"}, f.members[id])
+	direct, _, err := ensureChannel(ctx, f, "proj__brian_claude", "UCL", []string{"UBR"})
+	require.NoError(t, err)
+	users := fakeUsers{users: []slack.User{{ID: "UAW", Name: WatcherBotName, IsBot: true}}}
+	var w strings.Builder
+	addWatcher(ctx, users, f, &w, project, direct)
+	addWatcher(ctx, users, f, &w, project, direct)
+	assert.Empty(t, w.String(), "a later join finds it already in")
+	assert.Equal(t, []string{"UCL", "UAW"}, f.members[project])
+	assert.Equal(t, []string{"UCL", "UBR", "UAW"}, f.members[direct])
+}
+
+func TestAddWatcherOnlyWarns(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeMaker("UCL")
+	id, _, err := ensureChannel(ctx, f, "proj", "UCL", nil)
+	require.NoError(t, err)
+
+	var w strings.Builder
+	addWatcher(ctx, fakeUsers{err: errors.New("ratelimited")}, f, &w, id)
+	assert.Contains(t, w.String(), "not inviting agent-watcher: ratelimited")
+
+	w.Reset()
+	addWatcher(ctx, fakeUsers{users: []slack.User{{ID: "UBR", Name: WatcherBotName}}}, f, &w, id)
+	assert.Contains(t, w.String(), "no such bot in this workspace", "a person with that name is not the watcher")
+
+	w.Reset()
+	addWatcher(ctx, fakeUsers{users: []slack.User{{ID: "UCL", Name: WatcherBotName, IsBot: true}}}, f, &w, id)
+	assert.Contains(t, w.String(), "agent-watcher in Gproj: inviting UCL: cant_invite_self", "a refused invite is reported")
+	assert.Equal(t, []string{"UCL"}, f.members[id])
 }
