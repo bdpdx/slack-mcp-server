@@ -189,6 +189,10 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
   relay-hook        UserPromptSubmit hook for %agents prompts (reads stdin)
   ask-hook          Claude PreToolUse hook for AskUserQuestion: ask in Slack
                     instead of the terminal while watching a project
+  approvals on|off|status
+                    whether this home's approval-hook and denied-hook ask in
+                    Slack (on, the default) or leave every prompt to the
+                    terminal (off). Holds for every session in the home
   approval-hook [--wait 10m]
                     PermissionRequest hook: ask the user in Slack (buttons or
                     a thread reply) and answer the prompt. The terminal shows
@@ -291,6 +295,8 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = c.whoami(ctx)
 	case "listener":
 		err = c.listenerCmd(ctx, rest[1:])
+	case "approvals":
+		err = c.approvals(rest[1:])
 	case "relay-hook":
 		ctx, cancel := context.WithTimeout(ctx, relayTimeout)
 		defer cancel()

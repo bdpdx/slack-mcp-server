@@ -104,10 +104,14 @@ func retryDecision() map[string]any {
 }
 
 // deniedHook asks the owner in Slack whether a blocked action may be retried.
-// It prints nothing (the block stands) when the session watches no project,
+// It prints nothing (the block stands) when Slack approvals are off for the
+// home, the session watches no project,
 // the denial had no classifier verdict, anything fails, the owner declines,
 // the wait runs out or the host stops the hook.
 func (c *cli) deniedHook(ctx context.Context, ev hookEvent, wait time.Duration) int {
+	if !slackApprovals(c.home) {
+		return 0
+	}
 	for _, p := range noVerdictPrefixes {
 		if strings.HasPrefix(strings.TrimSpace(ev.Reason), p) {
 			return 0

@@ -79,6 +79,9 @@ trust new hooks in the next session.
   terminal. A session registered in a cohort (below) then also posts a
   `BLOCKED:` notice naming the agent and the tool (never its input) to its
   project channel, so the other agents know it is stuck.
+  `chat approvals off` turns this off for the home (every session in it): the hook then
+  answers nothing and the terminal prompts as usual. `chat approvals on` turns it back on, and
+  `chat approvals status` shows the setting. It turns off `denied-hook` too.
 - `PermissionDenied` → `denied-hook` (Claude, auto mode only), with
   `"timeout": 660`. An action the auto-mode classifier blocks shows no
   permission prompt, so `approval-hook` never sees it. This hook posts the

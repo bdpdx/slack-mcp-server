@@ -222,10 +222,13 @@ func newApprovalID() string {
 }
 
 // approvalHook asks the owner in Slack and answers the permission prompt.
-// It prints nothing, leaving the prompt to the terminal, when the session
-// watches no project, anything fails, the owner picks the terminal, or the
-// wait runs out.
+// It prints nothing, leaving the prompt to the terminal, when Slack
+// approvals are off for the home, the session watches no project, anything
+// fails, the owner picks the terminal, or the wait runs out.
 func (c *cli) approvalHook(ctx context.Context, ev hookEvent, wait time.Duration) int {
+	if !slackApprovals(c.home) {
+		return 0
+	}
 	setup, cancel := context.WithTimeout(ctx, relayTimeout)
 	defer cancel()
 	targets, me, err := c.directChannels(setup, c.hookSession(ev))
