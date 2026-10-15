@@ -259,7 +259,7 @@ func InstallCodex(home, userHome, bin string, r Runner, p Prompter, now time.Tim
 		return res, err
 	}
 
-	script, wrote, err := installStartScript(home, bin, now)
+	script, wrote, err := installStartScript(TypeCodex, home, userHome, bin, now)
 	if err != nil {
 		return res, err
 	}

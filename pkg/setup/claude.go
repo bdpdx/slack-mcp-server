@@ -90,5 +90,13 @@ func InstallClaude(home, userHome, bin string, r Runner, now time.Time) (Result,
 	} else {
 		res.Changed = append(res.Changed, "MCP server registered with claude")
 	}
+	script, wrote, err := installStartScript(TypeClaude, home, userHome, bin, now)
+	if err != nil {
+		return res, err
+	}
+	if wrote {
+		res.Changed = append(res.Changed, script)
+	}
+	res.Notes = append(res.Notes, fmt.Sprintf("start Claude Code for this home with %s, run from your project directory (or pass -p <dir>, or set PROJECT_ROOT in the script)", filepath.Base(script)))
 	return res, nil
 }

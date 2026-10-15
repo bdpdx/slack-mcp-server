@@ -179,6 +179,17 @@ func TestUninstallClaudeCustomHome(t *testing.T) {
 	assert.NoError(t, err, "link kept when declined")
 }
 
+func TestUninstallClaudeDeletesStartScript(t *testing.T) {
+	e := newUnEnv(t)
+	home := e.claudeHome(t, ".claude-b")
+	script := e.startScript(t, home)
+	e.state(t, HomeState{Path: home, Type: TypeClaude})
+	e.answer("y", "y", "n") // uninstall; delete the script; keep the link
+	e.run(t)
+	assert.False(t, exists(script))
+	assert.Len(t, baks(t, filepath.Join(e.repo, ".install", "backups", "start-claude-b")), 1)
+}
+
 func TestUninstallMissingCLIGivesCommand(t *testing.T) {
 	e := newUnEnv(t)
 	home := e.claudeHome(t, ".claude-work")

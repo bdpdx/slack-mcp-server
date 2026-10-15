@@ -60,12 +60,13 @@ func TestInstallClaude(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(home, "settings.json"),
 		[]byte(`{"model":"x","hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}`), 0o600))
 	r := &fakeRunner{}
-	res, err := InstallClaude(home, user, "/bin dir/slack-mcp-server", r, testNow)
+	bin := filepath.Join(user, "bin dir", "slack-mcp-server")
+	res, err := InstallClaude(home, user, bin, r, testNow)
 	require.NoError(t, err)
 
 	skill, err := os.ReadFile(filepath.Join(home, "skills", "slack-agent-chat", "SKILL.md"))
 	require.NoError(t, err)
-	assert.Contains(t, string(skill), "/bin dir/slack-mcp-server chat")
+	assert.Contains(t, string(skill), bin+" chat")
 	assert.NotContains(t, string(skill), "@BIN@")
 	assert.FileExists(t, filepath.Join(home, "skills", "slack-agent-chat", "COLLABORATION.md"))
 
@@ -75,20 +76,27 @@ func TestInstallClaude(t *testing.T) {
 	assert.Equal(t, "x", doc["model"], "other settings kept")
 	s := string(data)
 	assert.Contains(t, s, "say done")
-	assert.Contains(t, s, `'/bin dir/slack-mcp-server' chat --env-file`)
+	assert.Contains(t, s, "'"+bin+"' chat --env-file")
 	assert.Contains(t, s, `"timeout": 660`)
 	assert.FileExists(t, filepath.Join(home, "settings.json.bak-20261005120000"))
 
 	require.Len(t, r.calls, 2)
 	assert.Equal(t, "-u CLAUDE_CONFIG_DIR claude mcp remove -s user slack", r.calls[0], "an inherited CLAUDE_CONFIG_DIR is dropped")
-	assert.Contains(t, r.calls[1], "-u CLAUDE_CONFIG_DIR claude mcp add -s user slack -- /bin dir/slack-mcp-server --transport stdio --env-file "+filepath.Join(home, "slack-mcp-server.env"))
+	assert.Contains(t, r.calls[1], "-u CLAUDE_CONFIG_DIR claude mcp add -s user slack -- "+bin+" --transport stdio --env-file "+filepath.Join(home, "slack-mcp-server.env"))
 	assert.NotEmpty(t, res.Changed)
+
+	script := filepath.Join(user, "bin dir", "start-claude")
+	assert.Contains(t, res.Changed, script)
+	assert.Contains(t, strings.Join(res.Notes, "\n"), "start-claude, run from your project directory")
+	data, err = os.ReadFile(script)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "unset CLAUDE_CONFIG_DIR", "the default home, as its MCP server is registered")
 }
 
 func TestInstallClaudeRefusesInvalidSettings(t *testing.T) {
 	home := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(home, "settings.json"), []byte(`{"hooks": {`), 0o600))
-	_, err := InstallClaude(home, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{}, testNow)
+	_, err := InstallClaude(home, t.TempDir(), testBin, &fakeRunner{}, testNow)
 	assert.ErrorContains(t, err, "not valid JSON")
 	data, _ := os.ReadFile(filepath.Join(home, "settings.json"))
 	assert.Equal(t, `{"hooks": {`, string(data), "never overwritten")
@@ -125,7 +133,7 @@ func TestRegisterMCPManualQuotesEnvValue(t *testing.T) {
 func TestInstallClaudeInvalidSettingsChangesNothing(t *testing.T) {
 	home := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(home, "settings.json"), []byte(`{"hooks": []}`), 0o600))
-	_, err := InstallClaude(home, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{}, testNow)
+	_, err := InstallClaude(home, t.TempDir(), testBin, &fakeRunner{}, testNow)
 	assert.ErrorContains(t, err, "settings.json")
 	assert.ErrorContains(t, err, "not a JSON object")
 	assert.NoDirExists(t, filepath.Join(home, "skills"))
@@ -134,7 +142,7 @@ func TestInstallClaudeInvalidSettingsChangesNothing(t *testing.T) {
 
 	home2 := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(home2, "settings.json"), []byte(`{`), 0o600))
-	_, err = InstallClaude(home2, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{}, testNow)
+	_, err = InstallClaude(home2, t.TempDir(), testBin, &fakeRunner{}, testNow)
 	assert.Error(t, err)
 	assert.NoDirExists(t, filepath.Join(home2, "skills"))
 }
@@ -142,7 +150,7 @@ func TestInstallClaudeInvalidSettingsChangesNothing(t *testing.T) {
 func TestInstallClaudeNullSettings(t *testing.T) {
 	home := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(home, "settings.json"), []byte(`null`), 0o600))
-	_, err := InstallClaude(home, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{}, testNow)
+	_, err := InstallClaude(home, t.TempDir(), testBin, &fakeRunner{}, testNow)
 	require.NoError(t, err)
 	data, _ := os.ReadFile(filepath.Join(home, "settings.json"))
 	assert.Contains(t, string(data), `"hooks"`)
@@ -152,7 +160,7 @@ func TestInstallClaudeKeepsShellCharsUnescaped(t *testing.T) {
 	home := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(home, "settings.json"),
 		[]byte(`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"a && b 2>/dev/null <in"}]}]}}`), 0o600))
-	_, err := InstallClaude(home, t.TempDir(), "/b/slack-mcp-server", &fakeRunner{}, testNow)
+	_, err := InstallClaude(home, t.TempDir(), testBin, &fakeRunner{}, testNow)
 	require.NoError(t, err)
 	data, _ := os.ReadFile(filepath.Join(home, "settings.json"))
 	assert.Contains(t, string(data), `"command": "a && b 2>/dev/null <in"`)
