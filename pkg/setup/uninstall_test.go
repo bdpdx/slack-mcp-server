@@ -144,7 +144,7 @@ func TestUninstallClaudeDefaultHome(t *testing.T) {
 	e := newUnEnv(t)
 	home := e.claudeHome(t, ".claude")
 	e.state(t, HomeState{Path: home, Type: TypeClaude, Bot: "claude"})
-	e.answer("y", "y") // uninstall home; remove the link
+	e.answer("y", "y") // uninstall home; remove the binary
 	e.run(t)
 
 	doc := readJSON(t, filepath.Join(home, "settings.json"))
@@ -353,7 +353,7 @@ func TestUninstallRemovesCtlLink(t *testing.T) {
 	e.state(t, HomeState{Path: home, Type: TypeClaude})
 	e.answer("y", "y")
 	e.run(t)
-	assert.Contains(t, e.p.Out.String(), "Remove the links "+e.bin+" and "+ctl+"?")
+	assert.Contains(t, e.p.Out.String(), "Remove "+e.bin+" and "+ctl+"?")
 	for _, l := range []string{e.bin, ctl} {
 		_, err := os.Lstat(l)
 		assert.True(t, os.IsNotExist(err), l)
@@ -371,7 +371,7 @@ func TestUninstallLinkOnlyWhenNoHomesRemainAndSymlink(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Len(t, e.loadState(t).Homes, 1)
 
-	// a regular file is never removed
+	// a file install.sh did not put there is never removed
 	e2 := newUnEnv(t)
 	require.NoError(t, os.Remove(e2.bin))
 	require.NoError(t, os.WriteFile(e2.bin, []byte("real"), 0o755))
@@ -380,6 +380,35 @@ func TestUninstallLinkOnlyWhenNoHomesRemainAndSymlink(t *testing.T) {
 	e2.answer("y")
 	e2.run(t)
 	assert.True(t, exists(e2.bin))
+}
+
+// install.sh copies the binary and slackmcpctl; uninstall removes the copies.
+func TestUninstallRemovesInstalledCopies(t *testing.T) {
+	e := newUnEnv(t)
+	require.NoError(t, os.Remove(e.bin))
+	require.NoError(t, os.WriteFile(e.bin, []byte("\x00go.buildinfo github.com/bdpdx/slack-mcp-server/cmd/slack-mcp-server\x00"), 0o755))
+	ctl := filepath.Join(filepath.Dir(e.bin), ctlName)
+	require.NoError(t, os.WriteFile(ctl, []byte("#!/bin/bash\n# slackmcpctl: control ...\n"), 0o755))
+	home := e.claudeHome(t, ".claude-a")
+	e.state(t, HomeState{Path: home, Type: TypeClaude})
+	e.answer("y", "y")
+	e.run(t)
+	assert.Contains(t, e.p.Out.String(), "Remove "+e.bin+" and "+ctl+"?")
+	assert.False(t, exists(e.bin))
+	assert.False(t, exists(ctl))
+}
+
+// A slackmcpctl that install.sh did not put there stays.
+func TestUninstallKeepsForeignCtl(t *testing.T) {
+	e := newUnEnv(t)
+	ctl := filepath.Join(filepath.Dir(e.bin), ctlName)
+	require.NoError(t, os.WriteFile(ctl, []byte("#!/bin/sh\necho mine\n"), 0o755))
+	home := e.claudeHome(t, ".claude-a")
+	e.state(t, HomeState{Path: home, Type: TypeClaude})
+	e.answer("y", "y")
+	e.run(t)
+	assert.Contains(t, e.p.Out.String(), "Remove the binary "+e.bin+"?")
+	assert.True(t, exists(ctl))
 }
 
 func TestUninstallSummaryReminders(t *testing.T) {

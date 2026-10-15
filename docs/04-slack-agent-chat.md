@@ -55,7 +55,7 @@ Remove the old `[mcp_servers.slack.env]` token block from each `config.toml`.
 ./install.sh
 ```
 
-This runs prerequisites, build and the interactive setup, which links `./build/slack-mcp-server`,
+This runs prerequisites, build and the interactive setup, which installs a copy of `./build/slack-mcp-server`,
 installs the skills and writes the SlackAgentChat hooks for each agent home. Codex asks you to
 trust new hooks in the next session.
 

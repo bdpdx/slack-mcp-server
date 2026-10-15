@@ -1,6 +1,6 @@
 #!/bin/bash
 # Set up slack-mcp-server agent chat on this Mac: prerequisites, build,
-# link, then the interactive `slack-mcp-server setup`. Safe to re-run.
+# install, then the interactive `slack-mcp-server setup`. Safe to re-run.
 set -euo pipefail
 
 start_dir="$PWD"
@@ -57,54 +57,68 @@ fi
 # 3. Build.
 make build
 
-# 4. Link the binary.
+# 4. Install the binary.
+# install_copy SRC DEST: copy SRC to DEST (mode 0755) through a temporary file
+# and a rename, so DEST is never half-written and processes still running the
+# old file keep it. A symlink at DEST (from an older install) is replaced.
+install_copy() {
+	local tmp
+	tmp="$(mktemp "$(dirname "$2")/.$(basename "$2").XXXXXX")" || return 1
+	if cp "$1" "$tmp" && chmod 0755 "$tmp" && mv -f "$tmp" "$2"; then
+		return 0
+	fi
+	rm -f "$tmp"
+	return 1
+}
+
 state="$repo/.install-state.json"
-default_link=""
+default_bin=""
 if [ -f "$state" ]; then
-	default_link="$(sed -n 's/.*"bin": *"\([^"]*\)".*/\1/p' "$state" | head -n1)"
+	default_bin="$(sed -n 's/.*"bin": *"\([^"]*\)".*/\1/p' "$state" | head -n1)"
 fi
-if [ -z "$default_link" ]; then
-	default_link="$(./build/slack-mcp-server setup --repo "$repo" --print-existing-bin 2>/dev/null || true)"
+if [ -z "$default_bin" ]; then
+	default_bin="$(./build/slack-mcp-server setup --repo "$repo" --print-existing-bin 2>/dev/null || true)"
 fi
-if [ -z "$default_link" ]; then
-	default_link="$HOME/.local/bin/slack-mcp-server"
+if [ -z "$default_bin" ]; then
+	default_bin="$HOME/.local/bin/slack-mcp-server"
 fi
 while true; do
-	printf '\nWhere should the slack-mcp-server binary be linked?\nPress Enter for %s: ' "$default_link"
-	read -r link
-	case "$link" in
-		"") link="$default_link" ;;
+	printf '\nWhere should the slack-mcp-server binary be installed?\nPress Enter for %s: ' "$default_bin"
+	read -r bin
+	case "$bin" in
+		"") bin="$default_bin" ;;
 		*/* | "~"*) ;;
 		*)
 			say "Enter a path such as ~/.bin/slack-mcp-server, or press Enter to use the default."
 			continue
 			;;
 	esac
-	case "$link" in
-		"~"/*) link="$HOME/${link#\~/}" ;;
+	case "$bin" in
+		"~"/*) bin="$HOME/${bin#\~/}" ;;
 	esac
-	case "$link" in
+	case "$bin" in
 		/*) ;;
-		*) link="$start_dir/$link" ;; # relative to where install.sh was run
+		*) bin="$start_dir/$bin" ;; # relative to where install.sh was run
 	esac
-	if [ -e "$link" ] && [ ! -L "$link" ]; then
-		say "$link exists and is not a symlink; choose another path or move it"
+	# Only an earlier install (a copy, or a symlink from before copies) is replaced.
+	if [ -d "$bin" ] || { [ -e "$bin" ] && [ ! -L "$bin" ] && ! grep -qa "github.com/bdpdx/slack-mcp-server" "$bin"; }; then
+		say "$bin exists and is not a slack-mcp-server binary; choose another path or move it"
 		continue
 	fi
 	break
 done
-mkdir -p "$(dirname "$link")"
-ln -sfn "$repo/build/slack-mcp-server" "$link"
-say "Linked $link -> $repo/build/slack-mcp-server"
+mkdir -p "$(dirname "$bin")"
+install_copy "$repo/build/slack-mcp-server" "$bin" || die "could not install $bin"
+say "Installed $bin"
 
 # slackmcpctl (app-server launch agents, slack-mcp-server processes) goes next to it.
-ctl="$(dirname "$link")/slackmcpctl"
-if [ -e "$ctl" ] && [ ! -L "$ctl" ]; then
-	say "$ctl exists and is not a symlink; not linking slackmcpctl there"
+ctl="$(dirname "$bin")/slackmcpctl"
+if [ -d "$ctl" ] || { [ -e "$ctl" ] && [ ! -L "$ctl" ] && ! sed -n 2p "$ctl" | grep -q '^# slackmcpctl:'; }; then
+	say "$ctl exists and is not slackmcpctl; not installing slackmcpctl there"
 else
-	ln -sfn "$repo/scripts/slackmcpctl" "$ctl"
-	say "Linked $ctl -> $repo/scripts/slackmcpctl"
+	install_copy "$repo/scripts/slackmcpctl" "$ctl" || die "could not install $ctl"
+	say "Installed $ctl"
 fi
 
 # 5. Interactive setup.
-exec "$link" setup --repo "$repo" --bin "$link"
+exec "$bin" setup --repo "$repo" --bin "$bin"

@@ -10,10 +10,10 @@ Requires Go (see `go.mod` for the version) and `make`.
 git clone https://github.com/bdpdx/slack-mcp-server.git
 cd slack-mcp-server
 make build
-mkdir -p ~/.bin && ln -s "$PWD/build/slack-mcp-server" ~/.bin/
+mkdir -p ~/.bin && install -m 0755 build/slack-mcp-server ~/.bin/
 ```
 
-`make build` formats the code and builds `build/slack-mcp-server` with `-mod=readonly`, so it never rewrites `go.mod`/`go.sum`; run `make tidy` separately when you change dependencies. Because `~/.bin/slack-mcp-server` is a symlink, later `make build` runs update it in place. Run `make help` for the other targets.
+`make build` formats the code and builds `build/slack-mcp-server` with `-mod=readonly`, so it never rewrites `go.mod`/`go.sum`; run `make tidy` separately when you change dependencies. `~/.bin/slack-mcp-server` is a copy, so run that `install` again after each `make build` (or run `./install.sh`, which does both). `install` replaces the file instead of writing into it, so processes still running the old binary keep running. Run `make help` for the other targets.
 
 #### Env file
 
