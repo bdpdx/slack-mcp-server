@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -71,7 +72,7 @@ func uninstallHomes(userHome string, st *State) []unHome {
 // uninstaller holds what the per-home steps share.
 type uninstaller struct {
 	o   Options
-	bin string // the linked binary, which locates the start scripts
+	bin string // the installed binary, which locates the start scripts
 	res *Result
 	// failed is set when a step failed, so the home stays in the state file.
 	failed bool
@@ -400,41 +401,54 @@ func Uninstall(o Options) ([]Result, error) {
 		}
 	}
 	if len(st.Homes) == 0 && kept == 0 {
-		removeBinLink(o, bin, &results)
+		removeInstalledFiles(o, bin, &results)
 	}
 	return results, nil
 }
 
-// ctlName is the control script install.sh links next to the binary.
+// ctlName is the control script install.sh installs next to the binary.
 const ctlName = "slackmcpctl"
 
-func isSymlink(path string) bool {
+// installedBy reports whether path is a file install.sh put there: a copy
+// containing marker, or a symlink from installs that linked instead of copying.
+func installedBy(path, marker string) bool {
 	info, err := os.Lstat(path)
-	return err == nil && info.Mode()&os.ModeSymlink != 0
+	if err != nil {
+		return false
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return true
+	}
+	if !info.Mode().IsRegular() {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	return err == nil && bytes.Contains(data, []byte(marker))
 }
 
-// removeBinLink offers to remove the binary symlink, and the slackmcpctl
-// symlink next to it, once no home needs them; a regular file is never removed.
-func removeBinLink(o Options, bin string, results *[]Result) {
-	if bin == "" || !isSymlink(bin) {
+// removeInstalledFiles offers to remove the installed binary, and the
+// slackmcpctl next to it, once no home needs them. A file install.sh did not
+// put there is never removed.
+func removeInstalledFiles(o Options, bin string, results *[]Result) {
+	if bin == "" || !installedBy(bin, "github.com/bdpdx/slack-mcp-server") {
 		return
 	}
-	links := []string{bin}
-	question := "Remove the binary link " + bin + "?"
-	if ctl := filepath.Join(filepath.Dir(bin), ctlName); isSymlink(ctl) {
-		links = append(links, ctl)
-		question = "Remove the links " + bin + " and " + ctl + "?"
+	files := []string{bin}
+	question := "Remove the binary " + bin + "?"
+	if ctl := filepath.Join(filepath.Dir(bin), ctlName); installedBy(ctl, "\n# slackmcpctl:") {
+		files = append(files, ctl)
+		question = "Remove " + bin + " and " + ctl + "?"
 	}
 	yes, err := o.P.Confirm(question, true)
 	if err != nil || !yes {
 		return
 	}
-	res := Result{Home: "Binary link"}
-	for _, l := range links {
-		if err := os.Remove(l); err != nil {
+	res := Result{Home: "Installed files"}
+	for _, f := range files {
+		if err := os.Remove(f); err != nil {
 			res.Notes = append(res.Notes, "FAILED: "+err.Error())
 		} else {
-			res.Changed = append(res.Changed, "removed "+l)
+			res.Changed = append(res.Changed, "removed "+f)
 		}
 	}
 	*results = append(*results, res)
@@ -479,7 +493,7 @@ func printUninstallSummary(w io.Writer, results []Result) {
 func UninstallMain(args []string) int {
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
 	repo := fs.String("repo", ".", "repository directory (for the state file)")
-	bin := fs.String("bin", "", "absolute path the binary is linked at (default: from the state file)")
+	bin := fs.String("bin", "", "absolute path the binary is installed at (default: from the state file)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}

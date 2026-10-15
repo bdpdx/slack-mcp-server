@@ -253,7 +253,7 @@ func processHome(ctx context.Context, o Options, st *State, h Home) (Result, boo
 		if action == actSkip {
 			res := Result{Home: h.Path, Notes: []string{"Skipped."}}
 			if old := ExistingBin([]Home{h}); old != "" && old != o.Bin {
-				res.Notes = append(res.Notes, fmt.Sprintf("This home still points at the old binary path %s; run setup and choose Update to relink it to %s.", old, o.Bin))
+				res.Notes = append(res.Notes, fmt.Sprintf("This home still points at the old binary path %s; run setup and choose Update to point it at %s.", old, o.Bin))
 			}
 			return res, false, nil
 		}
@@ -701,7 +701,7 @@ func binPath(bin string) (string, error) {
 func Main(args []string) int {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	repo := fs.String("repo", ".", "repository directory (for the state file and manifests)")
-	bin := fs.String("bin", "", "absolute path the binary is linked at")
+	bin := fs.String("bin", "", "absolute path the binary is installed at")
 	printBin := fs.Bool("print-existing-bin", false, "print the binary path already used by installed hooks, then exit")
 	if err := fs.Parse(args); err != nil {
 		return 2

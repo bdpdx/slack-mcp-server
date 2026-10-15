@@ -81,7 +81,7 @@ cd slack-mcp-server
 
 1. **Prerequisites.** It checks for Apple's Command Line Tools and starts their installer if they're missing. It also checks for the Go version `go.mod` asks for, and offers to install or upgrade Go with Homebrew.
 2. **Build.** It runs `make build`, which produces `build/slack-mcp-server`.
-3. **Link.** It asks where to link the binary. The default is the path from your last install, or `~/.local/bin/slack-mcp-server`. The answer must be a path, and an existing file that isn't a symlink is never replaced. It also links [`slackmcpctl`](#slackmcpctl) next to the binary.
+3. **Install.** It asks where to install the binary. The default is the path from your last install, or `~/.local/bin/slack-mcp-server`. The answer must be a path. It copies `build/slack-mcp-server` there, and [`slackmcpctl`](#slackmcpctl) next to it, rather than linking into the checkout. It only replaces an earlier install of the same file, including a symlink left by older versions of the installer. Each copy is written to a temporary file and renamed into place, so processes still running the old binary keep running.
 4. **Setup.** It runs the interactive `slack-mcp-server setup`. Setup lists the homes saved from earlier runs and lets you add, remove or re-path homes before it starts. It doesn't look for the default `~/.claude` and `~/.codex`: adding one warns that using the default home isn't recommended (every session started without `CLAUDE_CONFIG_DIR` or `CODEX_HOME` would run as that agent) and asks you to confirm, defaulting to no. Then for each home:
    - **Bot name.** It asks for a bot name (see [Naming rules](#naming-rules)).
    - **Manifest.** It writes a Slack app manifest to `.install/manifests/<bot>.json` and offers to copy it to the clipboard. It tells you how to create a new app from the manifest, or update an existing app, and how to install it to the workspace.
@@ -92,7 +92,7 @@ cd slack-mcp-server
      - lets Slack MCP tools run without approval (`default_tools_approval_mode = "approve"`);
      - offers to remove a `codex-push.py` notify, which turn-end DMs replace.
    - **Codex app-server.** Each Codex home also needs a running app-server. Setup creates, enables and starts a launchd agent, `~/Library/LaunchAgents/com.openai.<home dir without the dot>.app-server.plist`. The agent runs `~/.local/libexec/codex-app-server-supervisor <codex>`, where `<codex>` is the `codex` found on `PATH` when the plist is written. Setup also replaces the supervisor if it differs from the current one. If a plist already exists, setup checks it and offers to start it if it isn't running.
-   - **Start script.** Each home also gets a start script beside the binary link, named after the home's folder (`start-codex`, `start-codex-work`, `start-claude`, `start-claude-b`, …):
+   - **Start script.** Each home also gets a start script beside the binary, named after the home's folder (`start-codex`, `start-codex-work`, `start-claude`, `start-claude-b`, …):
 
      ```bash
      start-codex-work [-m|--model <model>] [--repo-root <dir>] [codex args...]
@@ -111,7 +111,7 @@ Setup saves the binary path and homes in `.install-state.json`, which is gitigno
 
 ### Upgrading
 
-To upgrade, pull and run `./install.sh` again. At the end it restarts each home's running listener on the new binary (`slack-mcp-server chat --env-file <home>/slack-mcp-server.env listener restart --if-running`); a listener already on that build is left alone (`--force` restarts it anyway). Every session keeps its watches, cohort registrations and delivery marks, and messages posted during the restart are caught up. Hooks and chat commands use the new binary from their next run. A listener built before this command existed, or one that doesn't answer, is stopped with SIGTERM and replaced the same way. Restart succeeds only when the home's listener then reports the new build; otherwise setup lists the failure under **Listeners**, prints the command that starts it, and exits non-zero.
+To upgrade, pull and run `./install.sh` again; `make build` alone doesn't change the installed copy. At the end it restarts each home's running listener on the new binary (`slack-mcp-server chat --env-file <home>/slack-mcp-server.env listener restart --if-running`); a listener already on that build is left alone (`--force` restarts it anyway). Every session keeps its watches, cohort registrations and delivery marks, and messages posted during the restart are caught up. Hooks and chat commands use the new binary from their next run. A listener built before this command existed, or one that doesn't answer, is stopped with SIGTERM and replaced the same way. Restart succeeds only when the home's listener then reports the new build; otherwise setup lists the failure under **Listeners**, prints the command that starts it, and exits non-zero.
 
 A restart keeps what the state file holds. Approval answers live only in the listener's memory, so before stopping it waits up to 5 seconds for the waiting hooks to collect the ones already given, and refuses to stop (the restart fails; run it again shortly) if any are still uncollected, or while you are still clicking request buttons (each click holds it for 2 seconds). A click or reply that arrives during the restart itself is not recorded: the request's thread gets a note asking you to answer again, and the request stays live. The listener also finishes every delivery already under way (messages, a new watch's backlog, cohort notices) and marks it delivered before it exits, and starts none after the restart begins: those are left to the new listener (a new watch's requested backlog is kept in the state file for it), so nothing arrives twice or goes missing. Cohort mentions waiting to be re-checked are kept in the state file. A catch-up sends a watch's requested backlog in full plus the newest 50 messages the agent has not acknowledged since it joined the channel, oldest first, in parts of up to 50 when needed. Every catch-up notice gives the total and tells the agent to read all of it before acting, since a later message may change or cancel an earlier one, and says how many older unacknowledged messages were not sent. Live messages wait until a catch-up has been sent in full. A catch-up or live delivery that fails is retried by the listener's sweep (within a minute, then backing off), so an agent waiting on the rest of a catch-up is not left waiting until the next restart. A listener stopped with SIGTERM (one built before this command existed, or one that doesn't answer) gets none of these waits.
 
@@ -144,7 +144,7 @@ It also asks, defaulting to **yes**, whether to:
 
 Backups of the launch agent and start script go to `.install/backups`.
 
-When no installed home is left, it offers to remove the binary link and the `slackmcpctl` link next to it. The summary reminds you to delete the Slack apps you no longer need at https://api.slack.com/apps.
+When no installed home is left, it offers to remove the installed binary and the `slackmcpctl` next to it. The summary reminds you to delete the Slack apps you no longer need at https://api.slack.com/apps.
 
 ## slackmcpctl
 

@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Each home gets a start script beside the linked binary, named after the
+// Each home gets a start script beside the installed binary, named after the
 // home's directory without its leading dot (~/.codex-test →
 // start-codex-test, ~/.claude-b → start-claude-b). It runs the home's agent
 // against a repo directory: Codex through the home's app-server, Claude
