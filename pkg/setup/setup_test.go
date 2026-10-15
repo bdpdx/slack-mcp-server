@@ -55,6 +55,7 @@ func TestRunNewCodexHome(t *testing.T) {
 		" xapp-1 ",  // app token
 		"xoxb-good", // bot token
 		"xoxp-good", // user token
+		"n",         // no default PROJECT_ROOT
 	}}
 	res, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
@@ -116,7 +117,7 @@ func TestRunWithoutManifestNamesBotFromToken(t *testing.T) {
 	codex := filepath.Join(user, ".codex-b")
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(codex, "config.toml"), nil, 0o600))
-	p := &Scripted{Answers: []string{"2", codex, "1", "1", "n", "xapp-1", "xoxb-good", "xoxp-good"}}
+	p := &Scripted{Answers: []string{"2", codex, "1", "1", "n", "xapp-1", "xoxb-good", "xoxp-good", "n"}}
 	res, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
 	require.Len(t, res, 1)
@@ -142,7 +143,7 @@ func TestRunUpdateKeepsEnv(t *testing.T) {
 	require.NoError(t, os.MkdirAll(claude, 0o700))
 	original := "SLACK_MCP_XOXB_TOKEN=xoxb-keep\n"
 	require.NoError(t, os.WriteFile(EnvPath(claude), []byte(original), 0o600))
-	p := &Scripted{Answers: []string{"1", "1"}} // set up; Update
+	p := &Scripted{Answers: []string{"1", "1", "n"}} // set up; Update; no PROJECT_ROOT
 	_, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
 	data, _ := os.ReadFile(EnvPath(claude))
@@ -164,7 +165,7 @@ func TestRunOffersManifestOnClipboard(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(user, ".claude"), 0o700))
 	var copied []byte
-	p := &Scripted{Answers: []string{"1", "1", "y", "pat-claude", "y", "", "xapp-1", "xoxb-good", "xoxp-good"}}
+	p := &Scripted{Answers: []string{"1", "1", "y", "pat-claude", "y", "", "xapp-1", "xoxb-good", "xoxp-good", "n"}}
 	o := opts(user, repo, p)
 	o.Clipboard = func(b []byte) error { copied = b; return nil }
 	_, err := Run(context.Background(), o)
@@ -190,7 +191,7 @@ func TestRunReasksOnlyBadToken(t *testing.T) {
 		"1", "1", "y", "pat-codex", "", // set up; install; manifest; name; Enter after the app step
 		"xapp-1", "xoxp-wrong", // bot slot given a user token: prefix failure, re-ask bot
 
-		"xoxb-good", "xoxp-good",
+		"xoxb-good", "xoxp-good", "n",
 	}}
 	_, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
@@ -223,6 +224,7 @@ func TestRunLiveCheckReasksOnlyBotToken(t *testing.T) {
 		"1", "1", "y", "pat-codex", "",
 		"xapp-1", "xoxb-bad", "xoxp-good", // Slack rejects the bot token
 		"xoxb-good", // only the bot token is asked again
+		"n",
 	}}
 	_, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
@@ -235,7 +237,7 @@ func TestRunLiveCheckReasksOnlyBotToken(t *testing.T) {
 func runWithValidator(t *testing.T, v fakeValidator) string {
 	user, repo := t.TempDir(), t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(user, ".codex"), 0o700))
-	p := &Scripted{Answers: []string{"1", "1", "y", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-good"}}
+	p := &Scripted{Answers: []string{"1", "1", "y", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-good", "n"}}
 	o := opts(user, repo, p)
 	o.V = v
 	_, err := Run(context.Background(), o)
@@ -290,7 +292,7 @@ func TestRunReinstallKeepsCustomToolValues(t *testing.T) {
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	require.NoError(t, os.WriteFile(EnvPath(codex), []byte(
 		"SLACK_MCP_XOXB_TOKEN=xoxb-old\nSLACK_MCP_ADD_MESSAGE_TOOL=C123,#general\nSLACK_MCP_DELETE_MESSAGE_TOOL='!C123 #x'\n"), 0o600))
-	p := &Scripted{Answers: []string{"1", "2", "y", "y", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-good"}}
+	p := &Scripted{Answers: []string{"1", "2", "y", "y", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-good", "n"}}
 	res, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
 	require.Len(t, res, 1)
@@ -312,7 +314,7 @@ func TestRunFailedUpdateSaysChooseUpdate(t *testing.T) {
 	require.NoError(t, os.MkdirAll(claude, 0o700))
 	require.NoError(t, os.WriteFile(EnvPath(claude), []byte("SLACK_MCP_XOXB_TOKEN=x\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(claude, "settings.json"), []byte("{"), 0o600))
-	res, err := Run(context.Background(), opts(user, repo, &Scripted{Answers: []string{"1", "1"}}))
+	res, err := Run(context.Background(), opts(user, repo, &Scripted{Answers: []string{"1", "1", "n"}}))
 	require.NoError(t, err)
 	require.Len(t, res, 1)
 	assert.Contains(t, strings.Join(res[0].Notes, "\n"), "Fix this, then run ./install.sh again and choose Update for this home.")
@@ -413,4 +415,69 @@ func TestRunForgetsDeletedHomes(t *testing.T) {
 	again, err := LoadState(statePath)
 	require.NoError(t, err)
 	assert.Nil(t, again.Home(gone), "dropped from the saved answers")
+}
+
+// updateClaude runs setup's Update on ~/.claude with answers for the
+// PROJECT_ROOT step, returning the output and the start script.
+func updateClaude(t *testing.T, user, repo string, answers ...string) (string, string) {
+	t.Helper()
+	p := &Scripted{Answers: append([]string{"1", "1"}, answers...)} // set up; Update
+	res, err := Run(context.Background(), opts(user, repo, p))
+	require.NoError(t, err)
+	require.Len(t, res, 1)
+	require.True(t, res[0].Installed, res[0].Notes)
+	data, err := os.ReadFile(filepath.Join(repo, "bin", "start-claude"))
+	require.NoError(t, err)
+	return p.Out.String(), string(data)
+}
+
+// A new start script offers a default PROJECT_ROOT; an update shows it and
+// offers to change or clear it.
+func TestRunConfiguresProjectRoot(t *testing.T) {
+	user, repo := t.TempDir(), t.TempDir()
+	claude := filepath.Join(user, ".claude")
+	require.NoError(t, os.MkdirAll(claude, 0o700))
+	require.NoError(t, os.WriteFile(EnvPath(claude), []byte("SLACK_MCP_XOXB_TOKEN=x\n"), 0o600))
+	proj := filepath.Join(user, "code", "proj")
+	require.NoError(t, os.MkdirAll(proj, 0o700))
+
+	// New script: Enter takes the default (yes); a missing directory is asked again.
+	out, script := updateClaude(t, user, repo, "", "~/nope", "~/code/proj")
+	assert.Contains(t, out, "Configure a default PROJECT_ROOT for start-claude (Y/n)")
+	assert.Contains(t, out, filepath.Join(user, "nope")+" is not a directory.")
+	assert.Contains(t, script, "export PROJECT_ROOT='"+proj+"'\n")
+
+	// Update: shown, kept by default.
+	out, script = updateClaude(t, user, repo, "")
+	assert.Contains(t, out, "start-claude's PROJECT_ROOT is "+proj)
+	assert.Contains(t, out, "Change it? (y/N)")
+	assert.Contains(t, script, "export PROJECT_ROOT='"+proj+"'\n")
+
+	// Update: changed, then cleared.
+	other := t.TempDir()
+	_, script = updateClaude(t, user, repo, "y", other)
+	assert.Contains(t, script, "export PROJECT_ROOT='"+other+"'\n")
+	_, script = updateClaude(t, user, repo, "y", "none")
+	assert.Contains(t, script, "export PROJECT_ROOT=''\n")
+	out, _ = updateClaude(t, user, repo, "n")
+	assert.Contains(t, out, "start-claude has no default PROJECT_ROOT; it starts in the current directory.")
+}
+
+// Declining keeps PROJECT_ROOT blank, and a value edited into the script by
+// hand survives an update.
+func TestRunProjectRootDeclinedAndHandEdited(t *testing.T) {
+	user, repo := t.TempDir(), t.TempDir()
+	claude := filepath.Join(user, ".claude")
+	require.NoError(t, os.MkdirAll(claude, 0o700))
+	require.NoError(t, os.WriteFile(EnvPath(claude), []byte("SLACK_MCP_XOXB_TOKEN=x\n"), 0o600))
+
+	_, script := updateClaude(t, user, repo, "n")
+	assert.Contains(t, script, "export PROJECT_ROOT=''\n")
+
+	path := filepath.Join(repo, "bin", "start-claude")
+	edited := strings.Replace(script, "export PROJECT_ROOT=''", `export PROJECT_ROOT="$HOME/code/x"`, 1)
+	require.NoError(t, os.WriteFile(path, []byte(edited), 0o755))
+	out, script := updateClaude(t, user, repo, "n")
+	assert.Contains(t, out, `start-claude's PROJECT_ROOT is "$HOME/code/x"`)
+	assert.Contains(t, script, `export PROJECT_ROOT="$HOME/code/x"`)
 }

@@ -294,7 +294,7 @@ func (u *uninstaller) startScript(h Home) error {
 	if u.bin == "" {
 		return nil
 	}
-	path := filepath.Join(filepath.Dir(u.bin), startScriptName(h.Path))
+	path := startScriptPath(u.bin, h.Path)
 	if !exists(path) {
 		return nil
 	}
