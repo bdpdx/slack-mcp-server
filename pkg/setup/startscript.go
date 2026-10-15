@@ -17,9 +17,9 @@ import (
 const codexStartTemplate = `#!/bin/bash
 # Start Codex for the agent home HOME_VALUE (written by slack-mcp-server setup).
 #
-# Usage: SCRIPT_NAME [-m|--model <model>] [-r|--repo-root <dir>] [codex arguments...]
+# Usage: SCRIPT_NAME [-m|--model <model>] [--repo-root <dir>] [codex arguments...]
 #   -m daybreak is short for gpt-daybreak-blue-latest; without -m, Codex uses its default model.
-#   -r overrides REPO_ROOT below; with neither, the current directory is used.
+#   --repo-root overrides REPO_ROOT below; with neither, the current directory is used.
 #   Everything else is passed to codex ("--" ends these options).
 #
 # Set REPO_ROOT below to give this agent a default repo directory. Re-running
@@ -42,7 +42,7 @@ while [ $# -gt 0 ]; do
 			model="$2"
 			shift 2
 			;;
-		-r|--repo-root)
+		--repo-root)
 			if [ $# -lt 2 ]; then
 				echo "$me: $1 needs a directory" >&2
 				exit 2
@@ -88,10 +88,10 @@ exec codex --remote unix:// -C "$REPO_ROOT" ${args[@]+"${args[@]}"}
 const claudeStartTemplate = `#!/bin/bash
 # Start Claude Code for the agent home HOME_VALUE (written by slack-mcp-server setup).
 #
-# Usage: SCRIPT_NAME [-r|--repo-root <dir>] [claude arguments...]
-#   -r overrides REPO_ROOT below; with neither, the current directory is used.
-#   Everything else is passed to claude ("--" ends these options, so
-#   SCRIPT_NAME -- -r passes claude its own -r, --resume).
+# Usage: SCRIPT_NAME [--repo-root <dir>] [claude arguments...]
+#   --repo-root overrides REPO_ROOT below; with neither, the current directory is used.
+#   Everything else, including all of claude's own options, is passed to
+#   claude ("--" ends these options).
 #
 # Set REPO_ROOT below to give this agent a default repo directory. Re-running
 # ./install.sh keeps the value you set here.
@@ -104,7 +104,7 @@ me="$(basename "$0")"
 args=()
 while [ $# -gt 0 ]; do
 	case "$1" in
-		-r|--repo-root)
+		--repo-root)
 			if [ $# -lt 2 ]; then
 				echo "$me: $1 needs a directory" >&2
 				exit 2
