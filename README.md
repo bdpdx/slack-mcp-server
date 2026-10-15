@@ -162,7 +162,7 @@ slackmcpctl killmcp   [all | NAME...]              # kill the homes' slack-mcp-s
 
 A process belongs to a home when it was started with `--env-file <home>/slack-mcp-server.env`. That includes the listener and each session's MCP server. After `killmcp`, reconnect a Claude Code session's MCP server with `/mcp`. `--killmcp` combines `killmcp` with `restart`, `pause` or `uninstall` for the same homes.
 
-`all` covers every launch agent. With `killmcp` or `--killmcp`, it also covers every `slack-mcp-server` process started with an env file. With no names, `slackmcpctl` lists the candidates in alphabetical order with their state and asks which to use. Answer with numbers separated by commas; ranges like `2-4` also work.
+`all` covers every launch agent, plus every home with app-server processes running even if it has no launch agent (for `resume`, launch agents only). With `killmcp` or `--killmcp`, it also covers every `slack-mcp-server` process started with an env file. For a home without a launch agent, `restart`, `pause` and `uninstall` only kill its app-server processes, and nothing starts them again. With no names, `slackmcpctl` lists the candidates in alphabetical order with their state and asks which to use. Answer with numbers separated by commas; ranges like `2-4` also work.
 
 `restart` stops every selected agent before starting any. Stopping an agent unloads it and then kills any of its home's app-server processes still running: SIGTERM first, then SIGKILL for any still alive after 5 seconds.
 
