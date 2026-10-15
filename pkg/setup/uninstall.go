@@ -331,11 +331,10 @@ func (u *uninstaller) uninstallHome(h unHome) error {
 		}
 		u.env(h.Home)
 	}
-	if h.Type != TypeCodex {
-		return nil
-	}
-	if err := u.launchAgent(h.Home); err != nil {
-		return err
+	if h.Type == TypeCodex {
+		if err := u.launchAgent(h.Home); err != nil {
+			return err
+		}
 	}
 	return u.startScript(h.Home)
 }

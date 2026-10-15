@@ -13,6 +13,7 @@ import (
 
 func TestStartScriptName(t *testing.T) {
 	assert.Equal(t, "start-codex", startScriptName("/u/.codex"))
+	assert.Equal(t, "start-claude-b", startScriptName("/u/.claude-b"))
 	assert.Equal(t, "start-codex-test", startScriptName("/u/.codex-test"))
 	assert.Equal(t, "start-agents", startScriptName("/u/agents"))
 }
@@ -32,7 +33,7 @@ func runStartIn(t *testing.T, cwd, projectRoot string, args ...string) (string, 
 	fake := "#!/bin/bash\necho \"cwd=$(pwd -P) home=$CODEX_HOME root=$PROJECT_ROOT\"\nfor a in \"$@\"; do echo \"arg=$a\"; done\n"
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "codex"), []byte(fake), 0o755))
 	script := filepath.Join(bin, "start-codex-test")
-	require.NoError(t, os.WriteFile(script, renderStartScript("/u/.codex-test", projectRoot), 0o755))
+	require.NoError(t, os.WriteFile(script, renderStartScript(TypeCodex, "/u/.codex-test", "/u", projectRoot), 0o755))
 	cmd := exec.Command("/bin/bash", append([]string{script}, args...)...)
 	cmd.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin")
 	cmd.Dir = cwd
@@ -87,7 +88,7 @@ func TestStartScriptRejectsBadArguments(t *testing.T) {
 // Re-running setup rewrites the script but keeps a PROJECT_ROOT the user set.
 func TestInstallStartScriptKeepsProjectRoot(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "bin", "slack-mcp-server")
-	path, changed, err := installStartScript("/u/.codex-test", bin, testNow)
+	path, changed, err := installStartScript(TypeCodex, "/u/.codex-test", "/u", bin, testNow)
 	require.NoError(t, err)
 	assert.True(t, changed)
 	assert.Equal(t, filepath.Join(filepath.Dir(bin), "start-codex-test"), path)
@@ -98,9 +99,89 @@ func TestInstallStartScriptKeepsProjectRoot(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	edited := strings.Replace(string(data), "export PROJECT_ROOT=''", `export PROJECT_ROOT="$HOME/code/my-project"`, 1)
 	require.NoError(t, os.WriteFile(path, []byte(edited), 0o755))
-	_, changed, err = installStartScript("/u/.codex-test", bin, testNow)
+	_, changed, err = installStartScript(TypeCodex, "/u/.codex-test", "/u", bin, testNow)
 	require.NoError(t, err)
 	assert.False(t, changed, "nothing else to update")
 	data, _ = os.ReadFile(path)
 	assert.Contains(t, string(data), `export PROJECT_ROOT="$HOME/code/my-project"`)
+}
+
+// runClaudeStart runs the Claude Code script for /u/.claude-b in cwd with a
+// fake claude that prints its working directory, CLAUDE_CONFIG_DIR and
+// arguments.
+func runClaudeStart(t *testing.T, cwd, projectRoot string, args ...string) (string, error) {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "bin")
+	require.NoError(t, os.MkdirAll(bin, 0o700))
+	fake := "#!/bin/bash\necho \"cwd=$(pwd -P) config=$CLAUDE_CONFIG_DIR root=$PROJECT_ROOT\"\nfor a in \"$@\"; do echo \"arg=$a\"; done\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "claude"), []byte(fake), 0o755))
+	script := filepath.Join(bin, "start-claude-b")
+	require.NoError(t, os.WriteFile(script, renderStartScript(TypeClaude, "/u/.claude-b", "/u", projectRoot), 0o755))
+	cmd := exec.Command("/bin/bash", append([]string{script}, args...)...)
+	cmd.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin")
+	cmd.Dir = cwd
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func TestClaudeStartScriptRunsClaude(t *testing.T) {
+	proj := t.TempDir()
+	real, err := filepath.EvalSymlinks(proj)
+	require.NoError(t, err)
+
+	out, err := runClaudeStart(t, "", "''", "-p", proj, "--resume", "--", "-p", "hi")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "cwd="+real+" config=/u/.claude-b root="+proj)
+	assert.Equal(t, "arg=--resume\narg=-p\narg=hi\n", out[strings.Index(out, "arg="):],
+		"extra args and everything after -- pass through, nothing else is added")
+
+	other := t.TempDir()
+	out, err = runClaudeStart(t, "", "'"+proj+"'", "--project-root", other)
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "root="+other, "-p overrides PROJECT_ROOT")
+	assert.NotContains(t, out, "arg=", "no arguments of its own")
+
+	cwd := t.TempDir()
+	realCwd, err := filepath.EvalSymlinks(cwd)
+	require.NoError(t, err)
+	out, err = runClaudeStart(t, cwd, "''")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "cwd="+realCwd, "no -p and no PROJECT_ROOT: the current directory")
+
+	out, err = runClaudeStart(t, "", "''", "-p", "/nonexistent/dir")
+	assert.Error(t, err)
+	assert.Contains(t, out, "is not a directory")
+}
+
+func TestInstallClaudeStartScriptKeepsProjectRoot(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "bin", "slack-mcp-server")
+	path, _, err := installStartScript(TypeClaude, "/u/.claude-b", "/u", bin, testNow)
+	require.NoError(t, err)
+	data, _ := os.ReadFile(path)
+	assert.Contains(t, string(data), "export CLAUDE_CONFIG_DIR='/u/.claude-b'")
+	assert.NotContains(t, string(data), "codex")
+	edited := strings.Replace(string(data), "export PROJECT_ROOT=''", `export PROJECT_ROOT=~/code/x`, 1)
+	require.NoError(t, os.WriteFile(path, []byte(edited), 0o755))
+	_, changed, err := installStartScript(TypeClaude, "/u/.claude-b", "/u", bin, testNow)
+	require.NoError(t, err)
+	assert.False(t, changed)
+}
+
+// The default home runs claude without CLAUDE_CONFIG_DIR, even one inherited.
+func TestClaudeStartScriptDefaultHomeUnsetsConfigDir(t *testing.T) {
+	script := renderStartScript(TypeClaude, "/u/.claude", "/u", "''")
+	assert.Contains(t, string(script), "unset CLAUDE_CONFIG_DIR")
+	assert.NotContains(t, string(script), "export CLAUDE_CONFIG_DIR")
+
+	bin := filepath.Join(t.TempDir(), "bin")
+	require.NoError(t, os.MkdirAll(bin, 0o700))
+	fake := "#!/bin/bash\necho \"config=${CLAUDE_CONFIG_DIR-unset}\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "claude"), []byte(fake), 0o755))
+	path := filepath.Join(bin, "start-claude")
+	require.NoError(t, os.WriteFile(path, script, 0o755))
+	cmd := exec.Command("/bin/bash", path, "-p", t.TempDir())
+	cmd.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin", "CLAUDE_CONFIG_DIR=/inherited")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Equal(t, "config=unset\n", string(out))
 }

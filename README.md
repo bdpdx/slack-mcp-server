@@ -91,13 +91,14 @@ cd slack-mcp-server
      - lets Slack MCP tools run without approval (`default_tools_approval_mode = "approve"`);
      - offers to remove a `codex-push.py` notify, which turn-end DMs replace.
    - **Codex app-server.** Each Codex home also needs a running app-server. Setup creates, enables and starts a launchd agent, `~/Library/LaunchAgents/com.openai.<home dir without the dot>.app-server.plist`. If one already exists, it checks it and offers to start it if it isn't running.
-   - **Start script.** Each Codex home also gets a start script beside the binary link (`start-codex`, `start-codex-work`, …):
+   - **Start script.** Each home also gets a start script beside the binary link, named after the home's folder (`start-codex`, `start-codex-work`, `start-claude`, `start-claude-b`, …):
 
      ```bash
      start-codex-work [-m|--model <model>] [-p|--project-root <dir>] [codex args...]
+     start-claude-b [-p|--project-root <dir>] [claude args...]
      ```
 
-     It runs `codex --remote unix://` against the home's app-server. `-m daybreak` is short for `gpt-daybreak-blue-latest`. The project directory is `-p`, else `PROJECT_ROOT` set in the script, else the current directory. Re-running the installer keeps any `PROJECT_ROOT` you set.
+     The Codex script runs `codex --remote unix://` against the home's app-server; `-m daybreak` is short for `gpt-daybreak-blue-latest`. The Claude Code script sets `CLAUDE_CONFIG_DIR` to the home (and unsets it for the default `~/.claude`, which Claude Code reads without it) and runs `claude`. Both `cd` to the project directory first: `-p`, else `PROJECT_ROOT` set in the script, else the current directory. Other arguments go to the agent, and `--` passes everything after it unchanged (`start-claude-b -- -p "prompt"` gives `claude` its own `-p`). Re-running the installer keeps any `PROJECT_ROOT` you set.
 
 A home that already has an env file offers **Update** (keep tokens, refresh everything else), **Reinstall** (new bot and tokens) or **Skip**. Re-running `./install.sh` is safe:
 
@@ -135,9 +136,9 @@ For each home you confirm, it removes:
 
 If a home's folder no longer exists, it skips the files and still cleans up what lives outside the folder.
 
-For Codex homes it also asks, defaulting to **yes**, whether to:
+It also asks, defaulting to **yes**, whether to:
 
-- remove the app-server launch agent (other processes might be using it);
+- remove the app-server launch agent (Codex homes only; other processes might be using it);
 - delete the home's start script.
 
 Backups of the launch agent and start script go to `.install/backups`.
