@@ -282,7 +282,7 @@ func processHome(ctx context.Context, o Options, st *State, h Home) (Result, boo
 		}
 		bot, notes = name, n
 	}
-	root, err := askProjectRoot(o, h)
+	root, err := askRepoRoot(o, h)
 	if err != nil {
 		return Result{Home: h.Path}, false, err
 	}
@@ -322,7 +322,7 @@ func (e *stepError) Error() string { return e.err.Error() }
 func (e *stepError) Unwrap() error { return e.err }
 
 // installHome installs the agent integration, then the start script with
-// PROJECT_ROOT set to root (nil keeps the script's own).
+// REPO_ROOT set to root (nil keeps the script's own).
 func installHome(o Options, h Home, root *string) (Result, error) {
 	var res Result
 	var err error
@@ -345,46 +345,46 @@ func installHome(o Options, h Home, root *string) (Result, error) {
 	if h.Type == TypeCodex {
 		agent, extra = "Codex", "; -m daybreak picks gpt-daybreak-blue-latest"
 	}
-	where := "run from your project directory (or pass -p <dir>, or set PROJECT_ROOT in the script)"
-	if raw, _ := currentProjectRoot(script); displayProjectRoot(raw) != "" {
-		where = fmt.Sprintf("in %s (PROJECT_ROOT; -p <dir> overrides it)", displayProjectRoot(raw))
+	where := "run from your repo directory (or pass -r <dir>, or set REPO_ROOT in the script)"
+	if raw, _ := currentRepoRoot(script); displayRepoRoot(raw) != "" {
+		where = fmt.Sprintf("in %s (REPO_ROOT; -r <dir> overrides it)", displayRepoRoot(raw))
 	}
 	res.Notes = append(res.Notes, fmt.Sprintf("start %s for this home with %s, %s%s", agent, filepath.Base(script), where, extra))
 	return res, nil
 }
 
-// askProjectRoot asks for the start script's default project directory. A
-// new script offers to set one; an existing one shows its PROJECT_ROOT and
-// offers to change it. It returns the raw PROJECT_ROOT text to write, or nil
+// askRepoRoot asks for the start script's default repo directory. A
+// new script offers to set one; an existing one shows its REPO_ROOT and
+// offers to change it. It returns the raw REPO_ROOT text to write, or nil
 // to keep the script's own.
-func askProjectRoot(o Options, h Home) (*string, error) {
+func askRepoRoot(o Options, h Home) (*string, error) {
 	p := o.P
 	path := startScriptPath(o.Bin, h.Path)
 	name := filepath.Base(path)
-	raw, exists := currentProjectRoot(path)
-	cur := displayProjectRoot(raw)
+	raw, exists := currentRepoRoot(path)
+	cur := displayRepoRoot(raw)
 	if !exists {
-		yes, err := p.Confirm(fmt.Sprintf("Configure a default PROJECT_ROOT for %s", name), true)
+		yes, err := p.Confirm(fmt.Sprintf("Configure a default REPO_ROOT for %s", name), true)
 		if err != nil || !yes {
 			return nil, err
 		}
-		return askProjectDir(o, "Project root directory", "", false)
+		return askRepoDir(o, "Repo root directory", "", false)
 	}
 	if cur == "" {
-		p.Say("%s has no default PROJECT_ROOT; it starts in the current directory.", name)
+		p.Say("%s has no default REPO_ROOT; it starts in the current directory.", name)
 	} else {
-		p.Say("%s's PROJECT_ROOT is %s", name, cur)
+		p.Say("%s's REPO_ROOT is %s", name, cur)
 	}
 	change, err := p.Confirm("Change it?", false)
 	if err != nil || !change {
 		return nil, err
 	}
-	return askProjectDir(o, `Project root directory ("none" for no default)`, cur, true)
+	return askRepoDir(o, `Repo root directory ("none" for no default)`, cur, true)
 }
 
-// askProjectDir reads an existing directory until one is given, and returns
-// it quoted for the script. With allowNone, "none" clears PROJECT_ROOT.
-func askProjectDir(o Options, q, def string, allowNone bool) (*string, error) {
+// askRepoDir reads an existing directory until one is given, and returns
+// it quoted for the script. With allowNone, "none" clears REPO_ROOT.
+func askRepoDir(o Options, q, def string, allowNone bool) (*string, error) {
 	for {
 		raw, err := o.P.Ask(q, def)
 		if err != nil {

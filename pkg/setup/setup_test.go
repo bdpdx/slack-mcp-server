@@ -67,7 +67,7 @@ func TestRunNewCodexHome(t *testing.T) {
 		" xapp-1 ",  // app token
 		"xoxb-good", // bot token
 		"xoxp-good", // user token
-		"n",         // no default PROJECT_ROOT
+		"n",         // no default REPO_ROOT
 	}}
 	res, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
@@ -155,7 +155,7 @@ func TestRunUpdateKeepsEnv(t *testing.T) {
 	require.NoError(t, os.MkdirAll(claude, 0o700))
 	original := "SLACK_MCP_XOXB_TOKEN=xoxb-keep\n"
 	require.NoError(t, os.WriteFile(EnvPath(claude), []byte(original), 0o600))
-	p := &Scripted{Answers: []string{"1", "1", "n"}} // set up; Update; no PROJECT_ROOT
+	p := &Scripted{Answers: []string{"1", "1", "n"}} // set up; Update; no REPO_ROOT
 	_, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
 	data, _ := os.ReadFile(EnvPath(claude))
@@ -479,7 +479,7 @@ func TestRunForgetsDeletedHomes(t *testing.T) {
 }
 
 // updateClaude runs setup's Update on ~/.claude with answers for the
-// PROJECT_ROOT step, returning the output and the start script.
+// REPO_ROOT step, returning the output and the start script.
 func updateClaude(t *testing.T, user, repo string, answers ...string) (string, string) {
 	t.Helper()
 	p := &Scripted{Answers: append([]string{"1", "1"}, answers...)} // set up; Update
@@ -492,9 +492,9 @@ func updateClaude(t *testing.T, user, repo string, answers ...string) (string, s
 	return p.Out.String(), string(data)
 }
 
-// A new start script offers a default PROJECT_ROOT; an update shows it and
+// A new start script offers a default REPO_ROOT; an update shows it and
 // offers to change or clear it.
-func TestRunConfiguresProjectRoot(t *testing.T) {
+func TestRunConfiguresRepoRoot(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
 	claude := savedHome(t, repo, filepath.Join(user, ".claude-a"), TypeClaude)
 	require.NoError(t, os.MkdirAll(claude, 0o700))
@@ -504,41 +504,41 @@ func TestRunConfiguresProjectRoot(t *testing.T) {
 
 	// New script: Enter takes the default (yes); a missing directory is asked again.
 	out, script := updateClaude(t, user, repo, "", "~/nope", "~/code/proj")
-	assert.Contains(t, out, "Configure a default PROJECT_ROOT for start-claude-a (Y/n)")
+	assert.Contains(t, out, "Configure a default REPO_ROOT for start-claude-a (Y/n)")
 	assert.Contains(t, out, filepath.Join(user, "nope")+" is not a directory.")
-	assert.Contains(t, script, "export PROJECT_ROOT='"+proj+"'\n")
+	assert.Contains(t, script, "export REPO_ROOT='"+proj+"'\n")
 
 	// Update: shown, kept by default.
 	out, script = updateClaude(t, user, repo, "")
-	assert.Contains(t, out, "start-claude-a's PROJECT_ROOT is "+proj)
+	assert.Contains(t, out, "start-claude-a's REPO_ROOT is "+proj)
 	assert.Contains(t, out, "Change it? (y/N)")
-	assert.Contains(t, script, "export PROJECT_ROOT='"+proj+"'\n")
+	assert.Contains(t, script, "export REPO_ROOT='"+proj+"'\n")
 
 	// Update: changed, then cleared.
 	other := t.TempDir()
 	_, script = updateClaude(t, user, repo, "y", other)
-	assert.Contains(t, script, "export PROJECT_ROOT='"+other+"'\n")
+	assert.Contains(t, script, "export REPO_ROOT='"+other+"'\n")
 	_, script = updateClaude(t, user, repo, "y", "none")
-	assert.Contains(t, script, "export PROJECT_ROOT=''\n")
+	assert.Contains(t, script, "export REPO_ROOT=''\n")
 	out, _ = updateClaude(t, user, repo, "n")
-	assert.Contains(t, out, "start-claude-a has no default PROJECT_ROOT; it starts in the current directory.")
+	assert.Contains(t, out, "start-claude-a has no default REPO_ROOT; it starts in the current directory.")
 }
 
-// Declining keeps PROJECT_ROOT blank, and a value edited into the script by
+// Declining keeps REPO_ROOT blank, and a value edited into the script by
 // hand survives an update.
-func TestRunProjectRootDeclinedAndHandEdited(t *testing.T) {
+func TestRunRepoRootDeclinedAndHandEdited(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
 	claude := savedHome(t, repo, filepath.Join(user, ".claude-a"), TypeClaude)
 	require.NoError(t, os.MkdirAll(claude, 0o700))
 	require.NoError(t, os.WriteFile(EnvPath(claude), []byte("SLACK_MCP_XOXB_TOKEN=x\n"), 0o600))
 
 	_, script := updateClaude(t, user, repo, "n")
-	assert.Contains(t, script, "export PROJECT_ROOT=''\n")
+	assert.Contains(t, script, "export REPO_ROOT=''\n")
 
 	path := filepath.Join(repo, "bin", "start-claude-a")
-	edited := strings.Replace(script, "export PROJECT_ROOT=''", `export PROJECT_ROOT="$HOME/code/x"`, 1)
+	edited := strings.Replace(script, "export REPO_ROOT=''", `export REPO_ROOT="$HOME/code/x"`, 1)
 	require.NoError(t, os.WriteFile(path, []byte(edited), 0o755))
 	out, script := updateClaude(t, user, repo, "n")
-	assert.Contains(t, out, `start-claude-a's PROJECT_ROOT is "$HOME/code/x"`)
-	assert.Contains(t, script, `export PROJECT_ROOT="$HOME/code/x"`)
+	assert.Contains(t, out, `start-claude-a's REPO_ROOT is "$HOME/code/x"`)
+	assert.Contains(t, script, `export REPO_ROOT="$HOME/code/x"`)
 }
