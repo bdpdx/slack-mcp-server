@@ -49,29 +49,53 @@ func DetectType(path string) string {
 
 func exists(path string) bool { _, err := os.Stat(path); return err == nil }
 
-// DiscoverHomes lists ~/.claude and ~/.codex when they exist, then saved
-// homes, without duplicates.
+// defaultHomes are the agents' own default homes, which setup only uses
+// when the user adds one and confirms it.
+var defaultHomes = []struct{ dir, typ string }{{".claude", TypeClaude}, {".codex", TypeCodex}}
+
+// defaultHomeType returns the agent type when path is ~/.claude or ~/.codex.
+func defaultHomeType(path, userHome string) string {
+	for _, d := range defaultHomes {
+		if filepath.Clean(path) == filepath.Join(userHome, d.dir) {
+			return d.typ
+		}
+	}
+	return ""
+}
+
+// DiscoverHomes lists the saved homes that still exist. ~/.claude and
+// ~/.codex are not looked for: the user adds them like any other home.
 func DiscoverHomes(userHome string, st *State) []Home {
 	var homes []Home
-	add := func(path, typ string) {
-		for _, h := range homes {
-			if h.Path == path {
-				return
-			}
-		}
-		homes = append(homes, Home{Path: path, Type: typ, HasEnv: exists(EnvPath(path))})
-	}
-	for _, std := range []struct{ dir, typ string }{{".claude", TypeClaude}, {".codex", TypeCodex}} {
-		if p := filepath.Join(userHome, std.dir); exists(p) {
-			add(p, std.typ)
-		}
-	}
 	for _, h := range st.Homes {
 		if exists(h.Path) {
-			add(h.Path, h.Type)
+			homes = appendHome(homes, h.Path, h.Type)
 		}
 	}
 	return homes
+}
+
+// InstalledHomes is DiscoverHomes plus ~/.claude and ~/.codex when they hold
+// a slack-mcp-server.env, so a default home installed before (and missing
+// from the saved homes) still gets its binary path read and its listener
+// restarted.
+func InstalledHomes(userHome string, st *State) []Home {
+	homes := DiscoverHomes(userHome, st)
+	for _, d := range defaultHomes {
+		if p := filepath.Join(userHome, d.dir); exists(EnvPath(p)) {
+			homes = appendHome(homes, p, d.typ)
+		}
+	}
+	return homes
+}
+
+func appendHome(homes []Home, path, typ string) []Home {
+	for _, h := range homes {
+		if h.Path == path {
+			return homes
+		}
+	}
+	return append(homes, Home{Path: path, Type: typ, HasEnv: exists(EnvPath(path))})
 }
 
 // ExistingBin finds the binary path an earlier install used, from the hook

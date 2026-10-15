@@ -142,6 +142,15 @@ func addHome(o Options, homes []Home) (Home, error) {
 				path = ""
 			}
 		}
+		if path != "" {
+			ok, err := confirmDefaultHome(o, path)
+			if err != nil {
+				return Home{}, err
+			}
+			if !ok {
+				path = ""
+			}
+		}
 	}
 	typ := DetectType(path)
 	if typ == "" {
@@ -172,13 +181,24 @@ func editHome(o Options, st *State, homes []Home, remove bool) ([]Home, error) {
 		dropState(st, old.Path)
 		return append(homes[:i:i], homes[i+1:]...), nil
 	}
-	raw, err := o.P.Ask("New path", old.Path)
-	if err != nil {
-		return nil, err
-	}
-	path, err := ExpandPath(raw, o.UserHome)
-	if err != nil {
-		return nil, err
+	var path string
+	for path == "" {
+		raw, err := o.P.Ask("New path", old.Path)
+		if err != nil {
+			return nil, err
+		}
+		if path, err = ExpandPath(raw, o.UserHome); err != nil {
+			return nil, err
+		}
+		if path != old.Path {
+			ok, err := confirmDefaultHome(o, path)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				path = ""
+			}
+		}
 	}
 	dropState(st, old.Path)
 	typ := DetectType(path)
@@ -187,6 +207,21 @@ func editHome(o Options, st *State, homes []Home, remove bool) ([]Home, error) {
 	}
 	homes[i] = Home{Path: path, Type: typ, HasEnv: exists(EnvPath(path))}
 	return homes, nil
+}
+
+// confirmDefaultHome warns when path is ~/.claude or ~/.codex and asks the
+// user to confirm it, defaulting to no. Any other path is fine.
+func confirmDefaultHome(o Options, path string) (bool, error) {
+	typ := defaultHomeType(path, o.UserHome)
+	if typ == "" {
+		return true, nil
+	}
+	agent, env := "Claude Code", "CLAUDE_CONFIG_DIR"
+	if typ == TypeCodex {
+		agent, env = "Codex", "CODEX_HOME"
+	}
+	o.P.Say("Warning: %s is %s's default home. Using the default home is not recommended: every %s session started without %s would run as this agent, with its Slack bot and hooks. Give each agent its own home instead (for example %s-b).", path, agent, typ, env, path)
+	return o.P.Confirm("Use the default home anyway?", false)
 }
 
 func dropState(st *State, path string) {
@@ -645,7 +680,7 @@ func existingBinFor(user, repo string) string {
 	if err != nil {
 		st = &State{}
 	}
-	return ExistingBin(DiscoverHomes(user, st))
+	return ExistingBin(InstalledHomes(user, st))
 }
 
 // binPath makes the --bin value absolute; empty means this executable.
@@ -704,7 +739,7 @@ func Main(args []string) int {
 		fmt.Fprintln(os.Stderr, "setup: listeners were not restarted:", serr)
 		return 1
 	}
-	if RestartListeners(os.Stdout, ExecRunner{}, linkPath, DiscoverHomes(user, st)) {
+	if RestartListeners(os.Stdout, ExecRunner{}, linkPath, InstalledHomes(user, st)) {
 		fmt.Fprintln(os.Stderr, "setup: a listener restart failed; see Listeners above")
 		code = 1
 	}

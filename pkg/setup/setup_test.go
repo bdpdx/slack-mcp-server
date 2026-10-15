@@ -36,6 +36,18 @@ func (f fakeValidator) BotNameTaken(context.Context, string, string, string) (bo
 	return f.taken, f.checkE
 }
 
+// savedHome adds path to the saved homes in repo's state, as an earlier
+// setup would have, so setup lists it, and returns path.
+func savedHome(t *testing.T, repo, path, typ string) string {
+	t.Helper()
+	statePath := filepath.Join(repo, ".install-state.json")
+	st, err := LoadState(statePath)
+	require.NoError(t, err)
+	st.SetHome(HomeState{Path: path, Type: typ})
+	require.NoError(t, st.Save(statePath))
+	return path
+}
+
 func opts(user, repo string, p Prompter) Options {
 	return Options{Repo: repo, Bin: filepath.Join(repo, "bin", "slack-mcp-server"), UserHome: user,
 		P: p, V: fakeValidator{}, R: &fakeRunner{}, Now: func() time.Time { return testNow }}
@@ -43,7 +55,7 @@ func opts(user, repo string, p Prompter) Options {
 
 func TestRunNewCodexHome(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
-	codex := filepath.Join(user, ".codex")
+	codex := savedHome(t, repo, filepath.Join(user, ".codex-a"), TypeCodex)
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	p := &Scripted{Answers: []string{
 		"1",         // set up these homes
@@ -139,7 +151,7 @@ func TestDefaultBotName(t *testing.T) {
 
 func TestRunUpdateKeepsEnv(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
-	claude := filepath.Join(user, ".claude")
+	claude := savedHome(t, repo, filepath.Join(user, ".claude-a"), TypeClaude)
 	require.NoError(t, os.MkdirAll(claude, 0o700))
 	original := "SLACK_MCP_XOXB_TOKEN=xoxb-keep\n"
 	require.NoError(t, os.WriteFile(EnvPath(claude), []byte(original), 0o600))
@@ -153,17 +165,17 @@ func TestRunUpdateKeepsEnv(t *testing.T) {
 
 func TestRunAbortsOnEOF(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(user, ".codex"), 0o700))
+	require.NoError(t, os.MkdirAll(savedHome(t, repo, filepath.Join(user, ".codex-a"), TypeCodex), 0o700))
 	_, err := Run(context.Background(), opts(user, repo, &Scripted{Answers: []string{"1", "1", "y", "pat-codex"}}))
 	assert.ErrorIs(t, err, ErrAborted)
-	assert.NoFileExists(t, EnvPath(filepath.Join(user, ".codex")))
+	assert.NoFileExists(t, EnvPath(filepath.Join(user, ".codex-a")))
 }
 
 // The bot step always writes the manifest, says where it is, and offers to
 // copy it to the clipboard; it covers both a new and an existing app.
 func TestRunOffersManifestOnClipboard(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(user, ".claude"), 0o700))
+	require.NoError(t, os.MkdirAll(savedHome(t, repo, filepath.Join(user, ".claude-a"), TypeClaude), 0o700))
 	var copied []byte
 	p := &Scripted{Answers: []string{"1", "1", "y", "pat-claude", "y", "", "xapp-1", "xoxb-good", "xoxp-good", "n"}}
 	o := opts(user, repo, p)
@@ -185,7 +197,7 @@ func TestRunOffersManifestOnClipboard(t *testing.T) {
 
 func TestRunReasksOnlyBadToken(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
-	codex := filepath.Join(user, ".codex")
+	codex := savedHome(t, repo, filepath.Join(user, ".codex-a"), TypeCodex)
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	p := &Scripted{Answers: []string{
 		"1", "1", "y", "pat-codex", "", // set up; install; manifest; name; Enter after the app step
@@ -202,7 +214,7 @@ func TestRunReasksOnlyBadToken(t *testing.T) {
 
 func TestRunDottedUsernameFailsHomeOnly(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
-	codex := filepath.Join(user, ".codex")
+	codex := savedHome(t, repo, filepath.Join(user, ".codex-a"), TypeCodex)
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	p := &Scripted{Answers: []string{"1", "1", "y", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-dotted"}}
 	res, err := Run(context.Background(), opts(user, repo, p))
@@ -218,7 +230,7 @@ func TestRunDottedUsernameFailsHomeOnly(t *testing.T) {
 
 func TestRunLiveCheckReasksOnlyBotToken(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
-	codex := filepath.Join(user, ".codex")
+	codex := savedHome(t, repo, filepath.Join(user, ".codex-a"), TypeCodex)
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	p := &Scripted{Answers: []string{
 		"1", "1", "y", "pat-codex", "",
@@ -236,7 +248,7 @@ func TestRunLiveCheckReasksOnlyBotToken(t *testing.T) {
 
 func runWithValidator(t *testing.T, v fakeValidator) string {
 	user, repo := t.TempDir(), t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(user, ".codex"), 0o700))
+	require.NoError(t, os.MkdirAll(savedHome(t, repo, filepath.Join(user, ".codex-a"), TypeCodex), 0o700))
 	p := &Scripted{Answers: []string{"1", "1", "y", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-good", "n"}}
 	o := opts(user, repo, p)
 	o.V = v
@@ -252,7 +264,7 @@ func TestRunBotNameCheckOutcomes(t *testing.T) {
 
 func TestAddHomeRejectsEmptyAndDuplicate(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
-	codex := filepath.Join(user, ".codex")
+	codex := savedHome(t, repo, filepath.Join(user, ".codex-a"), TypeCodex)
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	extra := filepath.Join(user, "extra")
 	require.NoError(t, os.MkdirAll(extra, 0o700))
@@ -269,7 +281,7 @@ func TestAddHomeRejectsEmptyAndDuplicate(t *testing.T) {
 
 func TestRunSavesStateWithoutCompletedHome(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(user, ".codex"), 0o700))
+	require.NoError(t, os.MkdirAll(savedHome(t, repo, filepath.Join(user, ".codex-a"), TypeCodex), 0o700))
 	_, err := Run(context.Background(), opts(user, repo, &Scripted{Answers: []string{"1", "1", "n"}}))
 	require.ErrorIs(t, err, ErrAborted)
 	_, err = os.Stat(filepath.Join(repo, ".install-state.json"))
@@ -280,15 +292,66 @@ func TestExistingBinFor(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
 	assert.Equal(t, "", existingBinFor(user, repo))
 
-	claude := filepath.Join(user, ".claude")
+	claude := savedHome(t, repo, filepath.Join(user, ".claude-a"), TypeClaude)
 	require.NoError(t, os.MkdirAll(claude, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(claude, "settings.json"), []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"/opt/bin/slack-mcp-server chat --env-file /x relay-hook"}]}]}}`), 0o600))
 	assert.Equal(t, "/opt/bin/slack-mcp-server", existingBinFor(user, repo))
+
+	// An installed default home is read even when it isn't saved.
+	user, repo = t.TempDir(), t.TempDir()
+	def := filepath.Join(user, ".claude")
+	require.NoError(t, os.MkdirAll(def, 0o700))
+	require.NoError(t, os.WriteFile(EnvPath(def), []byte("SLACK_MCP_XOXB_TOKEN=x\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(def, "settings.json"), []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"/old/slack-mcp-server chat --env-file /x relay-hook"}]}]}}`), 0o600))
+	assert.Equal(t, "/old/slack-mcp-server", existingBinFor(user, repo))
+}
+
+// Setup no longer lists ~/.claude and ~/.codex on its own. Adding one warns
+// and needs a yes (default no); no asks for the path again.
+func TestRunDefaultHomesNeedConfirming(t *testing.T) {
+	user, repo := t.TempDir(), t.TempDir()
+	claude := filepath.Join(user, ".claude")
+	require.NoError(t, os.MkdirAll(claude, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(claude, "settings.json"), []byte("{}"), 0o600))
+	other := filepath.Join(user, ".claude-b")
+	require.NoError(t, os.MkdirAll(other, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(other, "settings.json"), []byte("{}"), 0o600))
+
+	p := &Scripted{Answers: []string{
+		"2", "~/.claude", "", // add ~/.claude: warned, Enter is no
+		other,                 // asked again: a non-default home
+		"2", "~/.claude", "y", // add ~/.claude again: confirmed
+	}}
+	_, err := Run(context.Background(), opts(user, repo, p))
+	require.ErrorIs(t, err, ErrAborted)
+	out := p.Out.String()
+	assert.True(t, strings.HasPrefix(out, "Agent homes found:\nWhat next?"), "nothing is found by default:\n"+out)
+	assert.Equal(t, 2, strings.Count(out, "Warning: "+claude+" is Claude Code's default home. Using the default home is not recommended"))
+	assert.Contains(t, out, "Use the default home anyway? (y/N)")
+	assert.Contains(t, out, "  1. "+other+" [claude]\n")
+	assert.Contains(t, out, "  2. "+claude+" [claude]\n")
+	assert.NotContains(t, out, "Warning: "+other)
+}
+
+// Changing a home's path to a default home warns the same way.
+func TestRunChangePathToDefaultHomeNeedsConfirming(t *testing.T) {
+	user, repo := t.TempDir(), t.TempDir()
+	codexB := savedHome(t, repo, filepath.Join(user, ".codex-b"), TypeCodex)
+	require.NoError(t, os.MkdirAll(codexB, 0o700))
+	codex := filepath.Join(user, ".codex")
+	require.NoError(t, os.MkdirAll(codex, 0o700))
+	p := &Scripted{Answers: []string{"4", "1", "~/.codex", "n", "~/.codex", "y"}}
+	_, err := Run(context.Background(), opts(user, repo, p))
+	require.ErrorIs(t, err, ErrAborted)
+	out := p.Out.String()
+	assert.Equal(t, 2, strings.Count(out, "Warning: "+codex+" is Codex's default home"))
+	assert.Contains(t, out, "every codex session started without CODEX_HOME")
+	assert.Contains(t, out, "  1. "+codex+" [codex]\n")
 }
 
 func TestRunReinstallKeepsCustomToolValues(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
-	codex := filepath.Join(user, ".codex")
+	codex := savedHome(t, repo, filepath.Join(user, ".codex-a"), TypeCodex)
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	require.NoError(t, os.WriteFile(EnvPath(codex), []byte(
 		"SLACK_MCP_XOXB_TOKEN=xoxb-old\nSLACK_MCP_ADD_MESSAGE_TOOL=C123,#general\nSLACK_MCP_DELETE_MESSAGE_TOOL='!C123 #x'\n"), 0o600))
@@ -310,7 +373,7 @@ func TestRunReinstallKeepsCustomToolValues(t *testing.T) {
 
 func TestRunFailedUpdateSaysChooseUpdate(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
-	claude := filepath.Join(user, ".claude")
+	claude := savedHome(t, repo, filepath.Join(user, ".claude-a"), TypeClaude)
 	require.NoError(t, os.MkdirAll(claude, 0o700))
 	require.NoError(t, os.WriteFile(EnvPath(claude), []byte("SLACK_MCP_XOXB_TOKEN=x\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(claude, "settings.json"), []byte("{"), 0o600))
@@ -401,14 +464,12 @@ func TestBinPathIsAbsolute(t *testing.T) {
 // saved answers, not silently hidden.
 func TestRunForgetsDeletedHomes(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(user, ".claude"), 0o700))
-	require.NoError(t, os.WriteFile(EnvPath(filepath.Join(user, ".claude")), []byte("SLACK_MCP_XOXB_TOKEN=x\n"), 0o600))
 	gone := filepath.Join(user, ".claude-test")
 	statePath := filepath.Join(repo, ".install-state.json")
 	st := &State{Homes: []HomeState{{Path: gone, Type: TypeClaude, Bot: "claude2"}}}
 	require.NoError(t, st.Save(statePath))
 
-	p := &Scripted{Answers: []string{"1", "3"}} // set up; skip ~/.claude
+	p := &Scripted{Answers: []string{"1"}} // set up (nothing left to set up)
 	_, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
 	assert.Contains(t, p.Out.String(), "Forgetting "+gone+": the folder no longer exists")
@@ -426,7 +487,7 @@ func updateClaude(t *testing.T, user, repo string, answers ...string) (string, s
 	require.NoError(t, err)
 	require.Len(t, res, 1)
 	require.True(t, res[0].Installed, res[0].Notes)
-	data, err := os.ReadFile(filepath.Join(repo, "bin", "start-claude"))
+	data, err := os.ReadFile(filepath.Join(repo, "bin", "start-claude-a"))
 	require.NoError(t, err)
 	return p.Out.String(), string(data)
 }
@@ -435,7 +496,7 @@ func updateClaude(t *testing.T, user, repo string, answers ...string) (string, s
 // offers to change or clear it.
 func TestRunConfiguresProjectRoot(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
-	claude := filepath.Join(user, ".claude")
+	claude := savedHome(t, repo, filepath.Join(user, ".claude-a"), TypeClaude)
 	require.NoError(t, os.MkdirAll(claude, 0o700))
 	require.NoError(t, os.WriteFile(EnvPath(claude), []byte("SLACK_MCP_XOXB_TOKEN=x\n"), 0o600))
 	proj := filepath.Join(user, "code", "proj")
@@ -443,13 +504,13 @@ func TestRunConfiguresProjectRoot(t *testing.T) {
 
 	// New script: Enter takes the default (yes); a missing directory is asked again.
 	out, script := updateClaude(t, user, repo, "", "~/nope", "~/code/proj")
-	assert.Contains(t, out, "Configure a default PROJECT_ROOT for start-claude (Y/n)")
+	assert.Contains(t, out, "Configure a default PROJECT_ROOT for start-claude-a (Y/n)")
 	assert.Contains(t, out, filepath.Join(user, "nope")+" is not a directory.")
 	assert.Contains(t, script, "export PROJECT_ROOT='"+proj+"'\n")
 
 	// Update: shown, kept by default.
 	out, script = updateClaude(t, user, repo, "")
-	assert.Contains(t, out, "start-claude's PROJECT_ROOT is "+proj)
+	assert.Contains(t, out, "start-claude-a's PROJECT_ROOT is "+proj)
 	assert.Contains(t, out, "Change it? (y/N)")
 	assert.Contains(t, script, "export PROJECT_ROOT='"+proj+"'\n")
 
@@ -460,24 +521,24 @@ func TestRunConfiguresProjectRoot(t *testing.T) {
 	_, script = updateClaude(t, user, repo, "y", "none")
 	assert.Contains(t, script, "export PROJECT_ROOT=''\n")
 	out, _ = updateClaude(t, user, repo, "n")
-	assert.Contains(t, out, "start-claude has no default PROJECT_ROOT; it starts in the current directory.")
+	assert.Contains(t, out, "start-claude-a has no default PROJECT_ROOT; it starts in the current directory.")
 }
 
 // Declining keeps PROJECT_ROOT blank, and a value edited into the script by
 // hand survives an update.
 func TestRunProjectRootDeclinedAndHandEdited(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
-	claude := filepath.Join(user, ".claude")
+	claude := savedHome(t, repo, filepath.Join(user, ".claude-a"), TypeClaude)
 	require.NoError(t, os.MkdirAll(claude, 0o700))
 	require.NoError(t, os.WriteFile(EnvPath(claude), []byte("SLACK_MCP_XOXB_TOKEN=x\n"), 0o600))
 
 	_, script := updateClaude(t, user, repo, "n")
 	assert.Contains(t, script, "export PROJECT_ROOT=''\n")
 
-	path := filepath.Join(repo, "bin", "start-claude")
+	path := filepath.Join(repo, "bin", "start-claude-a")
 	edited := strings.Replace(script, "export PROJECT_ROOT=''", `export PROJECT_ROOT="$HOME/code/x"`, 1)
 	require.NoError(t, os.WriteFile(path, []byte(edited), 0o755))
 	out, script := updateClaude(t, user, repo, "n")
-	assert.Contains(t, out, `start-claude's PROJECT_ROOT is "$HOME/code/x"`)
+	assert.Contains(t, out, `start-claude-a's PROJECT_ROOT is "$HOME/code/x"`)
 	assert.Contains(t, script, `export PROJECT_ROOT="$HOME/code/x"`)
 }
