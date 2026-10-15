@@ -630,29 +630,6 @@ func TestListenerAutoWatchesAnyChannelItIsAddedTo(t *testing.T) {
 	require.Len(t, d.got, 2, "later messages arrive live")
 }
 
-// A person joining a watched project channel is added to <project>__users
-// as the owner; agents and derived channels are left alone.
-func TestListenerAddsPeopleToUsersChannel(t *testing.T) {
-	api, d := newFakeSlack(), &fakeDeliverer{}
-	api.users["UMI"] = &slack.User{ID: "UMI", Name: "mike"}
-	api.names["C2"] = "proj__claude_codex-b"
-	l := newTestListener(t, api, d)
-	owner := newFakeMaker("UBR")
-	owner.existing["proj__users"] = "GUSERS"
-	owner.members["GUSERS"] = []string{"UBR"}
-	l.Users = owner
-	sub := claudeSub("s1")
-	sub.Channels = []string{"C1", "C2"}
-	require.NoError(t, l.Subscribe(context.Background(), sub, 0))
-
-	l.HandleMemberJoined(context.Background(), "C1", "UMI")
-	l.HandleMemberJoined(context.Background(), "C1", "UMI") // a second listener's event: already in
-	l.HandleMemberJoined(context.Background(), "C1", "UCB")
-	l.HandleMemberJoined(context.Background(), "C2", "UBR")
-	l.HandleMemberJoined(context.Background(), "C9", "UBR")
-	assert.Equal(t, []string{"UBR", "UMI"}, owner.members["GUSERS"])
-}
-
 func TestListenerStatusReportsChannelNames(t *testing.T) {
 	api := newFakeSlack()
 	api.names["C2"] = "proj__brian_claude"

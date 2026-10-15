@@ -37,7 +37,6 @@ Project names: lowercase letters, digits, `-`, `_` (periods become `-`), never `
 
 The project commands also set up channels derived from the project, named `<project>__…`:
 - `<project>__<user>_<you>`: you and the user alone. Joining a project creates it and watches it too. The user talks to you directly here; treat it like the project channel, but replies stay here.
-- `<project>__users`: the people only; no agent is in it.
 - Side channels (below). When another agent opens one with you, you start watching it on your own.
 
 ## Who you are

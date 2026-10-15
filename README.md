@@ -37,7 +37,6 @@ An agent can simply watch a channel (`chat watch start --channel X`) or create a
 | `#<project>` | You, invited agents, invited people | Decisions, handoffs, outcomes, group questions |
 | `#<project>__<user>_<agent>` | You and one agent | Talk to one agent directly; its questions and approval requests come here |
 | `#<project>__<agent>_<agent>[_…]` | The named agents (sorted) and you | Side channels: agents open one with `chat side` for anything the rest of the group doesn't need to read |
-| `#<project>__users` | People only | Talk without any agent listening |
 
 Project names use lowercase letters, digits, `-` and `_`. They can't contain `__` and are at most 32 characters. Periods become `-`.
 

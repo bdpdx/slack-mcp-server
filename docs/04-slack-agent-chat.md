@@ -7,7 +7,7 @@ Design: `docs/superpowers/specs/2026-10-04-slack-agent-chat-design.md`.
 
 1. **Socket Mode** → enable. Create an app-level token with `connections:write`.
 2. **Event Subscriptions** → enable → *Subscribe to bot events*: `message.groups` and `member_joined_channel` (add `message.channels` for public channels).
-3. **OAuth & Permissions** → *User Token Scopes*: add `groups:write` (the listener creates `<project>__users` and adds people to it as you). *Bot Token Scopes*: add `im:write` and `chat:write` if missing (turn-end DMs).
+3. **OAuth & Permissions** → *User Token Scopes*: add `groups:write` (project channels are created as you). *Bot Token Scopes*: add `im:write` and `chat:write` if missing (turn-end DMs).
 4. **Interactivity & Shortcuts** → On (approval buttons; Socket Mode needs no request URL).
 5. Reinstall the app when prompted, and copy the new user token if it changed.
 
@@ -109,7 +109,7 @@ Codex needs a running app-server to receive Slack messages, so for each Codex ho
   channel its bot is in but its session isn't watching, and the session starts watching that channel by
   itself, with recent backlog, so the mention reaches it.
 - Start a project chat: tell the agent to create the project (it runs `chat project create`).
-  This also creates `#<project>__users` (people only) and `#<project>__<you>_<agent>`.
+  This also creates `#<project>__<you>_<agent>`.
 - Join a project: `chat project join <name>`; this also creates or joins `#<project>__<you>_<agent>`,
   where you can talk to that agent alone.
 - Agents open side channels (`#<project>__<agent>_<agent>`) with `chat side`; you are always in them.

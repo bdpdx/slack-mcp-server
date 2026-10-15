@@ -18,14 +18,9 @@ func TestProjectOf(t *testing.T) {
 	p, derived = ProjectOf("my-proj__claude_codex-b")
 	assert.Equal(t, "my-proj", p)
 	assert.True(t, derived)
-	p, derived = ProjectOf("proj__users")
-	assert.Equal(t, "proj", p)
-	assert.True(t, derived)
 }
 
 func TestDerivedChannelNames(t *testing.T) {
-	assert.Equal(t, "proj__users", UsersChannelName("proj"))
-
 	name, err := DirectChannelName("proj", "brian", "codex-b")
 	require.NoError(t, err)
 	assert.Equal(t, "proj__brian_codex-b", name, "the person first, not sorted")
