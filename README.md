@@ -95,11 +95,11 @@ cd slack-mcp-server
    - **Start script.** Each home also gets a start script beside the binary link, named after the home's folder (`start-codex`, `start-codex-work`, `start-claude`, `start-claude-b`, …):
 
      ```bash
-     start-codex-work [-m|--model <model>] [-r|--repo-root <dir>] [codex args...]
-     start-claude-b [-r|--repo-root <dir>] [claude args...]
+     start-codex-work [-m|--model <model>] [--repo-root <dir>] [codex args...]
+     start-claude-b [--repo-root <dir>] [claude args...]
      ```
 
-     The Codex script runs `codex --remote unix://` against the home's app-server; `-m daybreak` is short for `gpt-daybreak-blue-latest`. The Claude Code script sets `CLAUDE_CONFIG_DIR` to the home (and unsets it for the default `~/.claude`, which Claude Code reads without it) and runs `claude`. Both `cd` to the repo directory first: `-r`, else `REPO_ROOT` set in the script, else the current directory. For a new script, setup asks whether to set a default `REPO_ROOT` (default yes) and for the directory, which must exist; on later runs it shows the current value and asks whether to change it (`none` clears it). Other arguments go to the agent, and `--` passes everything after it unchanged (`start-claude-b -- -r` gives `claude` its own `-r`, `--resume`). Re-running the installer keeps the `REPO_ROOT` in the script, including one you edited by hand, unless you change it there. A script from before `REPO_ROOT` was renamed from `PROJECT_ROOT` keeps its value.
+     The Codex script runs `codex --remote unix://` against the home's app-server; `-m daybreak` is short for `gpt-daybreak-blue-latest`. The Claude Code script sets `CLAUDE_CONFIG_DIR` to the home (and unsets it for the default `~/.claude`, which Claude Code reads without it) and runs `claude`. Both `cd` to the repo directory first: `--repo-root`, else `REPO_ROOT` set in the script, else the current directory. For a new script, setup asks whether to set a default `REPO_ROOT` (default yes) and for the directory, which must exist; on later runs it shows the current value and asks whether to change it (`none` clears it). `--repo-root` has no short form, so it never takes one of the agent's own flags: every other argument goes to the agent unchanged, and `--` passes everything after it. Re-running the installer keeps the `REPO_ROOT` in the script, including one you edited by hand, unless you change it there. A script from before `REPO_ROOT` was renamed from `PROJECT_ROOT` keeps its value.
 
 A home that already has an env file offers **Update** (keep tokens, refresh everything else), **Reinstall** (new bot and tokens) or **Skip**. Re-running `./install.sh` is safe:
 

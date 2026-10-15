@@ -46,7 +46,7 @@ func TestStartScriptRunsCodex(t *testing.T) {
 	real, err := filepath.EvalSymlinks(proj)
 	require.NoError(t, err)
 
-	out, err := runStart(t, "''", "-m", "daybreak", "-r", proj, "resume", "--last", "--", "-m", "x")
+	out, err := runStart(t, "''", "-m", "daybreak", "--repo-root", proj, "resume", "--last", "--", "-m", "x")
 	require.NoError(t, err, out)
 	assert.Contains(t, out, "cwd="+real+" home=/u/.codex-test root="+proj)
 	assert.Equal(t, "arg=--remote\narg=unix://\narg=-C\narg="+proj+"\narg=-m\narg=gpt-daybreak-blue-latest\narg=resume\narg=--last\narg=-m\narg=x\n",
@@ -60,7 +60,7 @@ func TestStartScriptRunsCodex(t *testing.T) {
 	other := t.TempDir()
 	out, err = runStart(t, "'"+proj+"'", "--repo-root", other, "--model", "gpt-x")
 	require.NoError(t, err, out)
-	assert.Contains(t, out, "root="+other, "-r overrides REPO_ROOT")
+	assert.Contains(t, out, "root="+other, "--repo-root overrides REPO_ROOT")
 	assert.Contains(t, out, "arg=gpt-x", "other model names pass unchanged")
 }
 
@@ -76,7 +76,7 @@ func TestStartScriptDefaultsToCurrentDirectory(t *testing.T) {
 }
 
 func TestStartScriptRejectsBadArguments(t *testing.T) {
-	out, err := runStart(t, "''", "-r", "/nonexistent/dir")
+	out, err := runStart(t, "''", "--repo-root", "/nonexistent/dir")
 	assert.Error(t, err)
 	assert.Contains(t, out, "is not a directory")
 
@@ -129,16 +129,16 @@ func TestClaudeStartScriptRunsClaude(t *testing.T) {
 	real, err := filepath.EvalSymlinks(proj)
 	require.NoError(t, err)
 
-	out, err := runClaudeStart(t, "", "''", "-r", proj, "-p", "hi", "--", "-r")
+	out, err := runClaudeStart(t, "", "''", "--repo-root", proj, "-r", "-p", "hi", "--", "--repo-root", "x")
 	require.NoError(t, err, out)
 	assert.Contains(t, out, "cwd="+real+" config=/u/.claude-b root="+proj)
-	assert.Equal(t, "arg=-p\narg=hi\narg=-r\n", out[strings.Index(out, "arg="):],
-		"claude's own -p passes through; after --, so does -r; nothing else is added")
+	assert.Equal(t, "arg=-r\narg=-p\narg=hi\narg=--repo-root\narg=x\n", out[strings.Index(out, "arg="):],
+		"claude's own -r and -p pass through, everything after -- does too, and nothing else is added")
 
 	other := t.TempDir()
 	out, err = runClaudeStart(t, "", "'"+proj+"'", "--repo-root", other)
 	require.NoError(t, err, out)
-	assert.Contains(t, out, "root="+other, "-r overrides REPO_ROOT")
+	assert.Contains(t, out, "root="+other, "--repo-root overrides REPO_ROOT")
 	assert.NotContains(t, out, "arg=", "no arguments of its own")
 
 	cwd := t.TempDir()
@@ -148,7 +148,7 @@ func TestClaudeStartScriptRunsClaude(t *testing.T) {
 	require.NoError(t, err, out)
 	assert.Contains(t, out, "cwd="+realCwd, "no -p and no REPO_ROOT: the current directory")
 
-	out, err = runClaudeStart(t, "", "''", "-r", "/nonexistent/dir")
+	out, err = runClaudeStart(t, "", "''", "--repo-root", "/nonexistent/dir")
 	assert.Error(t, err)
 	assert.Contains(t, out, "is not a directory")
 }
@@ -179,7 +179,7 @@ func TestClaudeStartScriptDefaultHomeUnsetsConfigDir(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "claude"), []byte(fake), 0o755))
 	path := filepath.Join(bin, "start-claude")
 	require.NoError(t, os.WriteFile(path, script, 0o755))
-	cmd := exec.Command("/bin/bash", path, "-r", t.TempDir())
+	cmd := exec.Command("/bin/bash", path, "--repo-root", t.TempDir())
 	cmd.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin", "CLAUDE_CONFIG_DIR=/inherited")
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))

@@ -345,9 +345,9 @@ func installHome(o Options, h Home, root *string) (Result, error) {
 	if h.Type == TypeCodex {
 		agent, extra = "Codex", "; -m daybreak picks gpt-daybreak-blue-latest"
 	}
-	where := "run from your repo directory (or pass -r <dir>, or set REPO_ROOT in the script)"
+	where := "run from your repo directory (or pass --repo-root <dir>, or set REPO_ROOT in the script)"
 	if raw, _ := currentRepoRoot(script); displayRepoRoot(raw) != "" {
-		where = fmt.Sprintf("in %s (REPO_ROOT; -r <dir> overrides it)", displayRepoRoot(raw))
+		where = fmt.Sprintf("in %s (REPO_ROOT; --repo-root <dir> overrides it)", displayRepoRoot(raw))
 	}
 	res.Notes = append(res.Notes, fmt.Sprintf("start %s for this home with %s, %s%s", agent, filepath.Base(script), where, extra))
 	return res, nil
