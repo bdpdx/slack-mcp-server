@@ -194,3 +194,30 @@ func TestAddWatcherOnlyWarns(t *testing.T) {
 	assert.Contains(t, w.String(), "agent-watcher in Gproj: inviting UCL: cant_invite_self", "a refused invite is reported")
 	assert.Equal(t, []string{"UCL"}, f.members[id])
 }
+
+type fakeProjectAPI struct {
+	*fakeMaker
+	fakeUsers
+}
+
+// A join of an existing project whose channels lack the watcher puts it back
+// in both the project channel and the direct channel, and nowhere else.
+func TestProjectJoinRepairsTheWatcherInBothChannels(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeMaker("UCL")
+	project, _, err := ensureChannel(ctx, f, "proj", "UCL", []string{"UBR"})
+	require.NoError(t, err)
+	direct, _, err := ensureChannel(ctx, f, "proj__brian_claude", "UCL", []string{"UBR"})
+	require.NoError(t, err)
+	side, _, err := ensureChannel(ctx, f, "proj__claude_codex-b", "UCL", []string{"UBR", "UCB"})
+	require.NoError(t, err)
+	api := fakeProjectAPI{f, fakeUsers{users: []slack.User{{ID: "UAW", Name: WatcherBotName, IsBot: true}}}}
+	me := identity{agentID: "UCL", agentName: "claude", ownerID: "UBR", ownerName: "brian"}
+	var w strings.Builder
+	ids := projectWatchChannels(ctx, api, &w, me, project, "proj")
+	assert.Empty(t, w.String())
+	assert.ElementsMatch(t, []string{project, direct, side}, ids)
+	assert.Contains(t, f.members[project], "UAW", "the project channel is repaired on join")
+	assert.Contains(t, f.members[direct], "UAW", "the direct channel is repaired on join")
+	assert.NotContains(t, f.members[side], "UAW", "side channels never get the watcher")
+}

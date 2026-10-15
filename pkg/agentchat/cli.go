@@ -638,12 +638,12 @@ func (c *cli) whoami(ctx context.Context) error {
 
 // ensureDirect makes sure #PROJECT__OWNER_AGENT exists with the owner in it
 // and returns its ID.
-func (c *cli) ensureDirect(ctx context.Context, me identity, project string) (string, error) {
+func ensureDirect(ctx context.Context, api channelMaker, me identity, project string) (string, error) {
 	name, err := DirectChannelName(project, me.ownerName, me.agentName)
 	if err != nil {
 		return "", err
 	}
-	id, _, err := ensureChannel(ctx, c.bot, name, me.agentID, []string{me.ownerID})
+	id, _, err := ensureChannel(ctx, api, name, me.agentID, []string{me.ownerID})
 	return id, err
 }
 

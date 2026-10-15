@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/slack-go/slack"
@@ -175,22 +176,33 @@ func (c *cli) projectJoin(ctx context.Context, args []string) error {
 
 // projectWatch returns the channels a session watches for project (whose
 // channel is id): the project channel, this agent's direct channel with the
-// owner (set up if missing; both get the watcher bot), and the side channels this agent was added to
-// earlier, which a restarted session would otherwise stop watching.
+// owner (set up if missing; both get the watcher bot), and the side channels
+// this agent was added to earlier, which a restarted session would otherwise
+// stop watching.
 func (c *cli) projectWatch(ctx context.Context, me identity, id, project string) []string {
+	return projectWatchChannels(ctx, c.bot, c.stderr, me, id, project)
+}
+
+// projectAPI is what projectWatchChannels needs of the agent's bot token.
+type projectAPI interface {
+	channelMaker
+	usersLister
+}
+
+func projectWatchChannels(ctx context.Context, api projectAPI, w io.Writer, me identity, id, project string) []string {
 	ids := []string{id}
 	// The project watch must not depend on the direct channel.
-	if direct, err := c.ensureDirect(ctx, me, project); err != nil {
-		fmt.Fprintf(c.stderr, "slack-agent-chat: no direct channel for #%s: %v\n", project, err)
+	if direct, err := ensureDirect(ctx, api, me, project); err != nil {
+		fmt.Fprintf(w, "slack-agent-chat: no direct channel for #%s: %v\n", project, err)
 	} else {
 		ids = append(ids, direct)
 	}
 	// The watcher bot belongs in the project and direct channels; this
 	// agent's bot is in both, so every create and join (re)invites it.
-	addWatcher(ctx, c.bot, c.bot, c.stderr, ids...)
-	derived, err := derivedChannels(ctx, c.bot, project)
+	addWatcher(ctx, api, api, w, ids...)
+	derived, err := derivedChannels(ctx, api, project)
 	if err != nil {
-		fmt.Fprintf(c.stderr, "slack-agent-chat: listing #%s's side channels: %v\n", project, err)
+		fmt.Fprintf(w, "slack-agent-chat: listing #%s's side channels: %v\n", project, err)
 	}
 	return uniq(append(ids, derived...))
 }
