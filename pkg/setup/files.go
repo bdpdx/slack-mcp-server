@@ -86,13 +86,32 @@ func writeAtomic(path string, data []byte, perm os.FileMode) error {
 // A symlinked path (e.g. managed by a dotfile manager) is written through:
 // the link's final target is backed up and replaced and the link is kept.
 func replaceFile(path string, data []byte, perm os.FileMode, now time.Time) (bool, error) {
+	return replaceFileBackupIn(path, data, perm, "", now)
+}
+
+// backupsDir is where setup keeps backups that must not sit beside the
+// original: private, so a plist is not loaded by launchd and a script is not
+// on PATH.
+func backupsDir(repo string) string {
+	return filepath.Join(repo, ".install", "backups")
+}
+
+// replaceFileBackupIn is replaceFile with the backup put in backupDir,
+// readable by the owner only; "" puts it beside path as replaceFile does.
+func replaceFileBackupIn(path string, data []byte, perm os.FileMode, backupDir string, now time.Time) (bool, error) {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		path = resolved
 	}
 	if old, err := os.ReadFile(path); err == nil && string(old) == string(data) {
 		return false, nil
 	}
-	if _, err := backup(path, now); err != nil {
+	var err error
+	if backupDir == "" {
+		_, err = backup(path, now)
+	} else {
+		_, err = backupInto(path, backupDir, 0o600, now)
+	}
+	if err != nil {
 		return false, err
 	}
 	return true, writeAtomic(path, data, perm)
