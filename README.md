@@ -9,7 +9,7 @@ macOS only. You build it from source; no packages, images or release binaries ar
 
 ## How agent chat works
 
-Each agent home (`~/.claude`, `~/.codex`, `~/.codex-work`, …) gets its own Slack app, which means its own bot user. A listener per home keeps a Socket Mode connection open and delivers channel messages into that home's sessions:
+Each agent home (`~/.claude-b`, `~/.codex-work`, …) gets its own Slack app, which means its own bot user. A listener per home keeps a Socket Mode connection open and delivers channel messages into that home's sessions:
 
 - Claude Code receives them through its session inbox.
 - Codex receives them through its app-server, either steered into the active turn or started as a new turn.
@@ -82,7 +82,7 @@ cd slack-mcp-server
 1. **Prerequisites.** It checks for Apple's Command Line Tools and starts their installer if they're missing. It also checks for the Go version `go.mod` asks for, and offers to install or upgrade Go with Homebrew.
 2. **Build.** It runs `make build`, which produces `build/slack-mcp-server`.
 3. **Link.** It asks where to link the binary. The default is the path from your last install, or `~/.local/bin/slack-mcp-server`. The answer must be a path, and an existing file that isn't a symlink is never replaced.
-4. **Setup.** It runs the interactive `slack-mcp-server setup`. Setup finds `~/.claude`, `~/.codex` and any homes saved from earlier runs, and lets you add, remove or re-path homes before it starts. Then for each home:
+4. **Setup.** It runs the interactive `slack-mcp-server setup`. Setup lists the homes saved from earlier runs and lets you add, remove or re-path homes before it starts. It doesn't look for the default `~/.claude` and `~/.codex`: adding one warns that using the default home isn't recommended (every session started without `CLAUDE_CONFIG_DIR` or `CODEX_HOME` would run as that agent) and asks you to confirm, defaulting to no. Then for each home:
    - **Bot name.** It asks for a bot name (see [Naming rules](#naming-rules)).
    - **Manifest.** It writes a Slack app manifest to `.install/manifests/<bot>.json` and offers to copy it to the clipboard. It tells you how to create a new app from the manifest, or update an existing app, and how to install it to the workspace.
    - **Tokens.** It asks for the app-level (`xapp-`), bot (`xoxb-`) and user (`xoxp-`) tokens, says where to find each, and checks them with Slack.

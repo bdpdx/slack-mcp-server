@@ -19,10 +19,19 @@ func TestDiscoverHomes(t *testing.T) {
 	st := &State{Homes: []HomeState{{Path: extra, Type: TypeCodex}}}
 
 	homes := DiscoverHomes(user, st)
-	require.Len(t, homes, 3)
-	assert.Equal(t, Home{Path: filepath.Join(user, ".claude"), Type: TypeClaude}, homes[0])
-	assert.Equal(t, Home{Path: filepath.Join(user, ".codex"), Type: TypeCodex, HasEnv: true}, homes[1])
-	assert.Equal(t, extra, homes[2].Path)
+	assert.Equal(t, []Home{{Path: extra, Type: TypeCodex}}, homes, "the default homes are not looked for")
+
+	// An installed default home (it has an env file) still counts for the
+	// binary path and listener restarts; one that isn't ours does not.
+	homes = InstalledHomes(user, st)
+	assert.Equal(t, []Home{{Path: extra, Type: TypeCodex}, {Path: filepath.Join(user, ".codex"), Type: TypeCodex, HasEnv: true}}, homes)
+}
+
+func TestDefaultHomeType(t *testing.T) {
+	assert.Equal(t, TypeClaude, defaultHomeType("/u/.claude", "/u"))
+	assert.Equal(t, TypeCodex, defaultHomeType("/u/.codex/", "/u"))
+	assert.Equal(t, "", defaultHomeType("/u/.claude-b", "/u"))
+	assert.Equal(t, "", defaultHomeType("/other/.claude", "/u"))
 }
 
 func TestExpandPathAndDetectType(t *testing.T) {
