@@ -328,8 +328,7 @@ func TestRunDefaultHomesNeedConfirming(t *testing.T) {
 	assert.True(t, strings.HasPrefix(out, "Agent homes found:\nWhat next?"), "nothing is found by default:\n"+out)
 	assert.Equal(t, 2, strings.Count(out, "Warning: "+claude+" is Claude Code's default home. Using the default home is not recommended"))
 	assert.Contains(t, out, "Use the default home anyway? (y/N)")
-	assert.Contains(t, out, "  1. "+other+" [claude]\n")
-	assert.Contains(t, out, "  2. "+claude+" [claude]\n")
+	assert.Contains(t, out, "  1. "+claude+" [claude]\n  2. "+other+" [claude]\n", "listed in path order")
 	assert.NotContains(t, out, "Warning: "+other)
 }
 
@@ -541,4 +540,32 @@ func TestRunRepoRootDeclinedAndHandEdited(t *testing.T) {
 	out, script := updateClaude(t, user, repo, "n")
 	assert.Contains(t, out, `start-claude-a's REPO_ROOT is "$HOME/code/x"`)
 	assert.Contains(t, script, `export REPO_ROOT="$HOME/code/x"`)
+}
+
+// Homes are listed and set up in path order, whatever order they were saved
+// or added in.
+func TestRunSortsHomes(t *testing.T) {
+	user, repo := t.TempDir(), t.TempDir()
+	var paths []string
+	for _, dir := range []string{".codex-r1", ".claude-c", ".codex-b1"} {
+		h := savedHome(t, repo, filepath.Join(user, dir), TypeCodex)
+		require.NoError(t, os.MkdirAll(h, 0o700))
+		require.NoError(t, os.WriteFile(EnvPath(h), []byte("SLACK_MCP_XOXB_TOKEN=x\n"), 0o600))
+		paths = append(paths, h)
+	}
+	added := filepath.Join(user, ".claude-a")
+	require.NoError(t, os.MkdirAll(added, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(added, "settings.json"), []byte("{}"), 0o600))
+	p := &Scripted{Answers: []string{"2", added, "1", "2", "3", "3", "3"}} // add; set up; skip all four
+	res, err := Run(context.Background(), opts(user, repo, p))
+	require.NoError(t, err)
+	want := []string{added, paths[1], paths[2], paths[0]} // .claude-a, .claude-c, .codex-b1, .codex-r1
+	got := make([]string, len(res))
+	for i, r := range res {
+		got[i] = r.Home
+	}
+	assert.Equal(t, want, got, "set up in path order")
+	out := p.Out.String()
+	list := out[strings.LastIndex(out, "Agent homes found:"):]
+	assert.Contains(t, list, "  1. "+want[0]+" [claude]\n  2. "+want[1]+" [codex] (has .env)\n  3. "+want[2]+" [codex] (has .env)\n  4. "+want[3]+" [codex] (has .env)\n")
 }

@@ -89,6 +89,8 @@ func chooseHomes(o Options, st *State) ([]Home, error) {
 	}
 	homes := DiscoverHomes(o.UserHome, st)
 	for {
+		// Listed, and then set up, in path order; the menu's numbers follow it.
+		sort.Slice(homes, func(i, j int) bool { return homes[i].Path < homes[j].Path })
 		o.P.Say("Agent homes found:")
 		for i, h := range homes {
 			env := ""
