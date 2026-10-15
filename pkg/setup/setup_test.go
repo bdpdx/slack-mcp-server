@@ -47,6 +47,8 @@ func TestRunNewCodexHome(t *testing.T) {
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	p := &Scripted{Answers: []string{
 		"1",         // set up these homes
+		"1",         // install this home
+		"y",         // create a manifest
 		"my_bot",    // invalid: warned, asked again
 		"pat-codex", // bot name
 		"",          // Enter after creating/updating the app
@@ -81,6 +83,59 @@ func TestRunNewCodexHome(t *testing.T) {
 	assert.Equal(t, "pat-codex", st.Home(codex).Bot)
 }
 
+// A new home is offered for install or skip, says which home it sets up,
+// and suggests a bot name from its folder.
+func TestRunNewHomeInstallOrSkip(t *testing.T) {
+	user, repo := t.TempDir(), t.TempDir()
+	home := filepath.Join(user, ".claude-b")
+	require.NoError(t, os.MkdirAll(home, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "settings.json"), []byte("{}"), 0o600))
+
+	p := &Scripted{Answers: []string{"2", home, "1", "2"}} // add the home; set up; skip
+	res, err := Run(context.Background(), opts(user, repo, p))
+	require.NoError(t, err)
+	require.Len(t, res, 1)
+	assert.False(t, res[0].Installed)
+	assert.Equal(t, []string{"Skipped."}, res[0].Notes)
+	assert.Contains(t, p.Out.String(), home+" is not set up.\n  1) Install\n  2) Skip")
+	assert.NotContains(t, p.Out.String(), "Bot name")
+
+	p = &Scripted{Answers: []string{"2", home, "1", "1", "y", "", ""}} // add; set up; install; manifest; default name; Enter; then EOF
+	_, err = Run(context.Background(), opts(user, repo, p))
+	require.ErrorIs(t, err, ErrAborted)
+	out := p.Out.String()
+	assert.Contains(t, out, "\nSetting up "+home+":\n\nCreate a bot manifest for this home")
+	assert.Contains(t, out, "\n"+uniqueNote+"\nBot name [claude-b]")
+	assert.FileExists(t, filepath.Join(repo, ".install", "manifests", "claude-b.json"))
+}
+
+// Declining the manifest goes straight to the tokens, and the bot's name is
+// read from its token.
+func TestRunWithoutManifestNamesBotFromToken(t *testing.T) {
+	user, repo := t.TempDir(), t.TempDir()
+	codex := filepath.Join(user, ".codex-b")
+	require.NoError(t, os.MkdirAll(codex, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(codex, "config.toml"), nil, 0o600))
+	p := &Scripted{Answers: []string{"2", codex, "1", "1", "n", "xapp-1", "xoxb-good", "xoxp-good"}}
+	res, err := Run(context.Background(), opts(user, repo, p))
+	require.NoError(t, err)
+	require.Len(t, res, 1)
+	assert.True(t, res[0].Installed)
+	out := p.Out.String()
+	assert.NotContains(t, out, "Bot name")
+	assert.NotContains(t, out, uniqueNote)
+	assert.Contains(t, out, "Build → <your app> → Settings")
+	assert.NoDirExists(t, filepath.Join(repo, ".install", "manifests"))
+	st, _ := LoadState(filepath.Join(repo, ".install-state.json"))
+	assert.Equal(t, "newbot", st.Home(codex).Bot)
+}
+
+func TestDefaultBotName(t *testing.T) {
+	assert.Equal(t, "claude-b", defaultBotName(Home{Path: "/u/.claude-b", Type: TypeClaude}))
+	assert.Equal(t, "codex", defaultBotName(Home{Path: "/u/.codex", Type: TypeCodex}))
+	assert.Equal(t, "claude", defaultBotName(Home{Path: "/u/My_Home", Type: TypeClaude}), "an unusable folder name falls back to the type")
+}
+
 func TestRunUpdateKeepsEnv(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
 	claude := filepath.Join(user, ".claude")
@@ -98,7 +153,7 @@ func TestRunUpdateKeepsEnv(t *testing.T) {
 func TestRunAbortsOnEOF(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(user, ".codex"), 0o700))
-	_, err := Run(context.Background(), opts(user, repo, &Scripted{Answers: []string{"1", "pat-codex"}}))
+	_, err := Run(context.Background(), opts(user, repo, &Scripted{Answers: []string{"1", "1", "y", "pat-codex"}}))
 	assert.ErrorIs(t, err, ErrAborted)
 	assert.NoFileExists(t, EnvPath(filepath.Join(user, ".codex")))
 }
@@ -109,7 +164,7 @@ func TestRunOffersManifestOnClipboard(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(user, ".claude"), 0o700))
 	var copied []byte
-	p := &Scripted{Answers: []string{"1", "pat-claude", "y", "", "xapp-1", "xoxb-good", "xoxp-good"}}
+	p := &Scripted{Answers: []string{"1", "1", "y", "pat-claude", "y", "", "xapp-1", "xoxb-good", "xoxp-good"}}
 	o := opts(user, repo, p)
 	o.Clipboard = func(b []byte) error { copied = b; return nil }
 	_, err := Run(context.Background(), o)
@@ -132,7 +187,7 @@ func TestRunReasksOnlyBadToken(t *testing.T) {
 	codex := filepath.Join(user, ".codex")
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	p := &Scripted{Answers: []string{
-		"1", "pat-codex", "", // set up; name; Enter after the app step
+		"1", "1", "y", "pat-codex", "", // set up; install; manifest; name; Enter after the app step
 		"xapp-1", "xoxp-wrong", // bot slot given a user token: prefix failure, re-ask bot
 
 		"xoxb-good", "xoxp-good",
@@ -148,7 +203,7 @@ func TestRunDottedUsernameFailsHomeOnly(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
 	codex := filepath.Join(user, ".codex")
 	require.NoError(t, os.MkdirAll(codex, 0o700))
-	p := &Scripted{Answers: []string{"1", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-dotted"}}
+	p := &Scripted{Answers: []string{"1", "1", "y", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-dotted"}}
 	res, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
 	require.Len(t, res, 1)
@@ -165,7 +220,7 @@ func TestRunLiveCheckReasksOnlyBotToken(t *testing.T) {
 	codex := filepath.Join(user, ".codex")
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	p := &Scripted{Answers: []string{
-		"1", "pat-codex", "",
+		"1", "1", "y", "pat-codex", "",
 		"xapp-1", "xoxb-bad", "xoxp-good", // Slack rejects the bot token
 		"xoxb-good", // only the bot token is asked again
 	}}
@@ -180,7 +235,7 @@ func TestRunLiveCheckReasksOnlyBotToken(t *testing.T) {
 func runWithValidator(t *testing.T, v fakeValidator) string {
 	user, repo := t.TempDir(), t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(user, ".codex"), 0o700))
-	p := &Scripted{Answers: []string{"1", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-good"}}
+	p := &Scripted{Answers: []string{"1", "1", "y", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-good"}}
 	o := opts(user, repo, p)
 	o.V = v
 	_, err := Run(context.Background(), o)
@@ -213,7 +268,7 @@ func TestAddHomeRejectsEmptyAndDuplicate(t *testing.T) {
 func TestRunSavesStateWithoutCompletedHome(t *testing.T) {
 	user, repo := t.TempDir(), t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(user, ".codex"), 0o700))
-	_, err := Run(context.Background(), opts(user, repo, &Scripted{Answers: []string{"1", "n"}}))
+	_, err := Run(context.Background(), opts(user, repo, &Scripted{Answers: []string{"1", "1", "n"}}))
 	require.ErrorIs(t, err, ErrAborted)
 	_, err = os.Stat(filepath.Join(repo, ".install-state.json"))
 	assert.NoError(t, err)
@@ -235,7 +290,7 @@ func TestRunReinstallKeepsCustomToolValues(t *testing.T) {
 	require.NoError(t, os.MkdirAll(codex, 0o700))
 	require.NoError(t, os.WriteFile(EnvPath(codex), []byte(
 		"SLACK_MCP_XOXB_TOKEN=xoxb-old\nSLACK_MCP_ADD_MESSAGE_TOOL=C123,#general\nSLACK_MCP_DELETE_MESSAGE_TOOL='!C123 #x'\n"), 0o600))
-	p := &Scripted{Answers: []string{"1", "2", "y", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-good"}}
+	p := &Scripted{Answers: []string{"1", "2", "y", "y", "pat-codex", "", "xapp-1", "xoxb-good", "xoxp-good"}}
 	res, err := Run(context.Background(), opts(user, repo, p))
 	require.NoError(t, err)
 	require.Len(t, res, 1)

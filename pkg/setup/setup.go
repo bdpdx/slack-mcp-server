@@ -220,6 +220,14 @@ func processHome(ctx context.Context, o Options, st *State, h Home) (Result, boo
 			}
 			return res, false, nil
 		}
+	} else {
+		a, err := o.P.Choose(fmt.Sprintf("%s is not set up.", h.Path), []string{"Install", "Skip"}, 0)
+		if err != nil {
+			return Result{}, false, err
+		}
+		if a == 1 {
+			return Result{Home: h.Path, Notes: []string{"Skipped."}}, false, nil
+		}
 	}
 	var notes []string
 	if action != actUpdate {
@@ -344,32 +352,56 @@ func reportTools(p Prompter, envPath string, tools map[string]bool, custom map[s
 	p.Say("To change them, edit %s and restart the agent.", envPath)
 }
 
+// setupBot names the bot and reads its tokens. Without a manifest the app
+// already exists, so the name is the bot's own, read from its token.
 func setupBot(ctx context.Context, o Options, h Home, saved string) (string, Tokens, error) {
 	p := o.P
-	p.Say("%s", uniqueNote)
-	def := saved
-	if def == "" {
-		def = h.Type
+	p.Say("\nSetting up %s:\n", h.Path)
+	manifest, err := p.Confirm("Create a bot manifest for this home", true)
+	if err != nil {
+		return "", Tokens{}, err
 	}
-	var name string
+	name := ""
+	if manifest {
+		def := saved
+		if def == "" {
+			def = defaultBotName(h)
+		}
+		p.Say("\n%s", uniqueNote)
+		if name, err = askBotName(p, def); err != nil {
+			return "", Tokens{}, err
+		}
+		if err := showManifest(o, name); err != nil {
+			return "", Tokens{}, err
+		}
+		p.Say("\n"+iconMsgFmt, name, name)
+	}
+	tok, err := askTokens(ctx, o, &name, defaultBotName(h))
+	return name, tok, err
+}
+
+// defaultBotName suggests a bot name from the home's folder (~/.claude-b
+// suggests claude-b), or the agent type when the folder's name can't be one.
+func defaultBotName(h Home) string {
+	if n := strings.TrimPrefix(filepath.Base(h.Path), "."); ValidateBotName(n) == "" {
+		return n
+	}
+	return h.Type
+}
+
+// askBotName reads a bot name until it is valid.
+func askBotName(p Prompter, def string) (string, error) {
 	for {
 		n, err := p.Ask("Bot name", def)
 		if err != nil {
-			return "", Tokens{}, err
+			return "", err
 		}
-		if problem := ValidateBotName(n); problem != "" {
-			p.Say("%s", problem)
-			continue
+		problem := ValidateBotName(n)
+		if problem == "" {
+			return n, nil
 		}
-		name = n
-		break
+		p.Say("%s", problem)
 	}
-	if err := showManifest(o, name); err != nil {
-		return "", Tokens{}, err
-	}
-	p.Say("\n"+iconMsgFmt, name, name)
-	tok, err := askTokens(ctx, o, name)
-	return name, tok, err
 }
 
 // showManifest saves the Slack app manifest, offers to copy it, and says how
@@ -425,10 +457,17 @@ func askToken(p Prompter, kind, label string) (string, error) {
 	}
 }
 
-func askTokens(ctx context.Context, o Options, name string) (Tokens, error) {
+// askTokens reads and checks the tokens. An empty *name is set to the bot's
+// own name once its token checks out (asked for, defaulting to def, if that
+// name can't be used).
+func askTokens(ctx context.Context, o Options, name *string, def string) (Tokens, error) {
 	p := o.P
+	app := *name
+	if app == "" {
+		app = "<your app>"
+	}
 	p.Say("\n%s", appTokHelp)
-	p.Say("\n"+tokenHelpFm, name)
+	p.Say("\n"+tokenHelpFm, app)
 	var tok Tokens
 	need := map[string]bool{"app": true, "bot": true, "user": true}
 	for {
@@ -448,7 +487,7 @@ func askTokens(ctx context.Context, o Options, name string) (Tokens, error) {
 				need[k.kind] = false
 			}
 		}
-		redo, err := validateTokens(ctx, o, name, tok)
+		redo, err := validateTokens(ctx, o, name, def, tok)
 		if err != nil {
 			return Tokens{}, err
 		}
@@ -459,9 +498,10 @@ func askTokens(ctx context.Context, o Options, name string) (Tokens, error) {
 	}
 }
 
-// validateTokens checks the tokens live. It returns the kind to re-ask, or
-// an error that ends this home.
-func validateTokens(ctx context.Context, o Options, name string, tok Tokens) (string, error) {
+// validateTokens checks the tokens live, setting an empty *name as
+// askTokens says. It returns the kind to re-ask, or an error that ends this
+// home.
+func validateTokens(ctx context.Context, o Options, name *string, def string, tok Tokens) (string, error) {
 	p := o.P
 	bot, err := o.V.AuthTest(ctx, tok.Bot)
 	if err != nil {
@@ -492,12 +532,22 @@ func validateTokens(ctx context.Context, o Options, name string, tok Tokens) (st
 		p.Say("The app-level token was rejected by Slack: %v. Please enter the app-level token again.", err)
 		return "app", nil
 	}
-	taken, err := o.V.BotNameTaken(ctx, tok.Bot, name, bot.UserID)
+	if *name == "" {
+		if problem := ValidateBotName(bot.User); problem == "" {
+			*name = bot.User
+		} else {
+			p.Say("This bot is named %q, which this setup can't use: %s", bot.User, problem)
+			if *name, err = askBotName(p, def); err != nil {
+				return "", err
+			}
+		}
+	}
+	taken, err := o.V.BotNameTaken(ctx, tok.Bot, *name, bot.UserID)
 	switch {
 	case err != nil:
-		p.Say("Could not check whether %q is already used by another bot: %v", name, err)
+		p.Say("Could not check whether %q is already used by another bot: %v", *name, err)
 	case taken:
-		p.Say(takenMsg, name)
+		p.Say(takenMsg, *name)
 	}
 	return "", nil
 }
