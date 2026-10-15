@@ -661,9 +661,6 @@ func (c *cli) channel(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := ValidatePlainName(name); err != nil {
-			return err
-		}
 		created, err := c.createChannel(ctx, name, *invite, *inviteUser)
 		if err != nil {
 			return err
