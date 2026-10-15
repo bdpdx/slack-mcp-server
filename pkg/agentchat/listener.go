@@ -41,13 +41,6 @@ type SlackAPI interface {
 	UpdateMessageContext(ctx context.Context, channel, timestamp string, options ...slack.MsgOption) (string, string, string, error)
 }
 
-// UserAPI is the part of the owner's *slack.Client (user token) the listener
-// uses to keep the project's people-only channel up to date.
-type UserAPI interface {
-	GetConversationsForUserContext(ctx context.Context, params *slack.GetConversationsForUserParameters) ([]slack.Channel, string, error)
-	InviteUsersToConversationContext(ctx context.Context, channelID string, users ...string) (*slack.Channel, error)
-}
-
 // Listener routes one home's Slack messages into its subscribed sessions.
 type Listener struct {
 	API       SlackAPI
@@ -60,8 +53,6 @@ type Listener struct {
 	// Async hands each session's deliveries to its own worker so a slow
 	// session never holds up the caller. The daemon enables it.
 	Async bool
-	// Users acts as the owner; nil leaves <project>__users alone.
-	Users UserAPI
 	// Stop ends the running daemon (control op shutdown); nil when the
 	// listener is not run as a daemon.
 	Stop func()
@@ -262,15 +253,10 @@ func (l *Listener) mentionsSelf(m Message) bool {
 
 // HandleMemberJoined reacts to someone joining a channel this bot is in. When
 // the bot itself is added to a channel, by anyone, its sessions start
-// watching it (see autoWatch). When a person joins a watched project
-// channel, the owner adds them to <project>__users.
+// watching it (see autoWatch).
 func (l *Listener) HandleMemberJoined(ctx context.Context, channel, user string) {
 	if user == l.Self.UserID {
 		l.autoWatch(ctx, channel)
-		return
-	}
-	if !l.isAgent(ctx, user) {
-		l.addToUsersChannel(ctx, channel, user)
 	}
 }
 
@@ -314,30 +300,6 @@ func (l *Listener) autoWatch(ctx context.Context, channel string) {
 		l.Log.Info("auto-watching", zap.String("session", sub.SessionID), zap.String("channel", channel))
 		l.recover(ctx, merged, sub.Channels, first, autoBacklog)
 	}
-}
-
-func (l *Listener) addToUsersChannel(ctx context.Context, channel, user string) {
-	if l.Users == nil {
-		return
-	}
-	l.mu.Lock()
-	watched := len(l.state.Watchers(channel)) > 0
-	l.mu.Unlock()
-	name := l.channelName(ctx, channel)
-	if _, derived := ProjectOf(name); !watched || derived {
-		return
-	}
-	target := UsersChannelName(name)
-	id, err := findChannel(ctx, l.Users, target)
-	if err != nil {
-		l.Log.Info("not adding to people channel", zap.String("channel", target), zap.String("user", user), zap.Error(err))
-		return
-	}
-	if err := inviteEach(ctx, l.Users, id, "", []string{user}); err != nil {
-		l.Log.Warn("adding to people channel failed", zap.String("channel", target), zap.String("user", user), zap.Error(err))
-		return
-	}
-	l.Log.Info("added to people channel", zap.String("channel", target), zap.String("user", user))
 }
 
 // dispatch delivers now, or with Async queues the delivery on the session's

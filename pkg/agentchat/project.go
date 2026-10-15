@@ -111,7 +111,7 @@ func (c *cli) project(ctx context.Context, args []string) error {
 }
 
 // projectCreate runs `chat project create NAME [--invite a,b] [--invite-user u,v]`:
-// the project channel, #NAME__users for the people, then project join.
+// the project channel, then project join.
 func (c *cli) projectCreate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("project create", flag.ContinueOnError)
 	fs.SetOutput(c.stderr)
@@ -135,13 +135,7 @@ func (c *cli) projectCreate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	// Created as the owner, so no bot is ever in it. Another person may
-	// own it already; the project does not depend on it.
-	usersID, _, err := ensureChannel(ctx, c.user, UsersChannelName(name), created.me.ownerID, userIDs(created.people))
-	if err != nil {
-		fmt.Fprintf(c.stderr, "slack-agent-chat: %v\n", err)
-	}
-	c.printJSON(map[string]any{"channel_id": created.id, "name": name, "users_channel_id": usersID})
+	c.printJSON(map[string]any{"channel_id": created.id, "name": name})
 	return c.subscribe(ctx, c.projectWatch(ctx, created.me, created.id, name), 0)
 }
 

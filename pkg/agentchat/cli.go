@@ -125,8 +125,7 @@ Commands (CHANNEL is an ID like C0123ABCD or a name like #proj):
                     add agents or people to a channel
   project create NAME [--invite AGENT,AGENT] [--invite-user USER,USER]
                     create a private project channel, invite the user and the
-                    named agents and people, create #NAME__users for the
-                    people, and join it as with project join
+                    named agents and people, and join it as with project join
   project join NAME [--backlog N]
                     watch the project channel #NAME, set up and watch the
                     direct channel #NAME__USER_AGENT, and re-watch the side
@@ -608,12 +607,11 @@ func (c *cli) ensureDirect(ctx context.Context, me identity, project string) (st
 	return id, err
 }
 
-// createdChannel is a channel createChannel made (or found), with who it
-// was made for.
+// createdChannel is a channel createChannel made (or found), with who
+// made it.
 type createdChannel struct {
-	id     string
-	me     identity
-	people []slack.User
+	id string
+	me identity
 }
 
 // createChannel creates the private channel name as the owner, so Slack
@@ -637,7 +635,7 @@ func (c *cli) createChannel(ctx context.Context, name, inviteAgents, invitePeopl
 	if err != nil {
 		return createdChannel{}, err
 	}
-	return createdChannel{id, me, people}, nil
+	return createdChannel{id, me}, nil
 }
 
 func (c *cli) channel(ctx context.Context, args []string) error {

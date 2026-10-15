@@ -11,12 +11,11 @@ import (
 
 // Channels derived from a project channel are named after it, then "__":
 //
-//	<project>__users           the people in the project, no bots
 //	<project>__<user>_<agent>  one person and one of their agents
 //	<project>__<agent>_<agent> a side channel; participants sorted
 //
 // so project names never contain "__", and user and agent names never
-// contain "_" (and no bot is named "users").
+// contain "_".
 const derivedSep = "__"
 
 // maxProjectName leaves room in Slack's 80-character limit for the names of
@@ -40,9 +39,6 @@ func ProjectOf(name string) (project string, derived bool) {
 	project, _, derived = strings.Cut(name, derivedSep)
 	return project, derived
 }
-
-// UsersChannelName names the project's people-only channel.
-func UsersChannelName(project string) string { return project + derivedSep + "users" }
 
 // DirectChannelName names the channel between a person and one agent.
 func DirectChannelName(project, user, agent string) (string, error) {
