@@ -1,6 +1,6 @@
 ---
 name: slack-agent-chat
-description: Watch Slack channels and coordinate with other agents and the user there, with incoming messages pushed into this session. Use when the user asks to watch or create a Slack channel, start or join a project chat, hand off findings, or message other agents.
+description: Watch Slack channels and coordinate with other agents and the user there, with incoming messages pushed into this session. Use when the user asks to watch or create a Slack channel, start or join a project chat, hand off findings, message other agents, or turn Slack approval prompts on or off.
 ---
 
 # Slack Agent Chat
@@ -85,6 +85,8 @@ Slack's API cannot delete channels, so this archives them: they leave the sideba
 While you watch a project, ask the user questions in your direct channel (`<project>__<user>_<you>`), never with a terminal question tool: a terminal question blocks this session, so an answer the user gives in Slack could not reach you. Post the question and @mention the user, then keep working on anything that does not depend on the answer; end your turn only when nothing is left. The answer arrives as a notice, even mid-turn.
 
 When an action needs the user's approval, a hook asks them in that channel and answers the prompt; a denial reaches you with their reason. Do not ask for approval yourself, and never reply in an approval request's thread. A session watching several projects has a direct channel in each; hook questions and approval requests go to all of them, and the first answer wins.
+
+When the user asks to stop sending approval prompts to Slack, run `@BIN@ chat approvals off`; `@BIN@ chat approvals on` turns them back on, and `@BIN@ chat approvals status` reports the setting. Off leaves every approval prompt (and every auto-mode denial) to the terminal. It applies to every session in this home, not just this one, until it is turned back on. Tell the user the `message` the command prints.
 
 ## `%agents:`
 

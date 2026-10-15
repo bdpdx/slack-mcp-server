@@ -61,6 +61,8 @@ The installer adds these hooks to each home:
 | `denied-hook` (PermissionDenied, timeout 660s) | Claude | In auto mode, an action the classifier blocks goes to your direct channel with its reason and **Approve retry** / **Decline** buttons; the agent waits up to 10 minutes. Approve lets the model retry (the classifier judges the retry again); anything else leaves the block standing. Exfiltration verdicts never relay the input |
 | `stop-hook` (Stop) | Both | When a turn you typed at the terminal ends, the agent's bot DMs you its final response. Turns started from Slack send nothing |
 
+To keep approval prompts in the terminal, run `slack-mcp-server chat approvals off` in a session (or tell the agent to turn Slack approvals off). `approval-hook` and `denied-hook` then answer nothing, so every prompt goes to the terminal and auto-mode denials stand. It applies to every session in that home until `chat approvals on`; `chat approvals status` shows the setting.
+
 A Codex home whose `config.toml` sets `approvals_reviewer = "auto_review"` doesn't get `approval-hook`. Codex runs the hook before its reviewer, so the hook would take over requests the reviewer would have approved.
 
 The `slack-agent-chat` skill, installed into each home, teaches the agent these commands and conventions. Its `COLLABORATION.md` covers working with other agents.
