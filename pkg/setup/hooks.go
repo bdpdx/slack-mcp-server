@@ -15,34 +15,31 @@ type HookSpec struct {
 	Timeout int
 }
 
+// ourHooks lists every hook setup has ever installed, so a re-run removes
+// ones it no longer installs (approval-hook: permission prompts now stay in
+// the terminal).
 var ourHooks = []string{"relay-hook", "ask-hook", "approval-hook", "denied-hook", "stop-hook"}
 
-// approvalTimeout must exceed approval-hook's --wait (10m) so the hook can
-// hand the prompt back to the terminal before the host kills it.
-const approvalTimeout = 660
+// deniedTimeout must exceed denied-hook's --wait (10m) so the hook can leave
+// the denial standing before the host kills it.
+const deniedTimeout = 660
 
 // ClaudeHookSpecs are Claude Code's hooks.
 func ClaudeHookSpecs() []HookSpec {
 	return []HookSpec{
 		{Event: "UserPromptSubmit", Hook: "relay-hook", Timeout: 15},
 		{Event: "PreToolUse", Matcher: "AskUserQuestion", Hook: "ask-hook", Timeout: 15},
-		{Event: "PermissionRequest", Hook: "approval-hook", Timeout: approvalTimeout},
-		{Event: "PermissionDenied", Hook: "denied-hook", Timeout: approvalTimeout},
+		{Event: "PermissionDenied", Hook: "denied-hook", Timeout: deniedTimeout},
 		{Event: "Stop", Hook: "stop-hook", Timeout: 15},
 	}
 }
 
-// CodexHookSpecs are Codex's hooks; approval is false for homes using
-// auto_review, which runs after PermissionRequest hooks.
-func CodexHookSpecs(approval bool) []HookSpec {
-	specs := []HookSpec{
+// CodexHookSpecs are Codex's hooks.
+func CodexHookSpecs() []HookSpec {
+	return []HookSpec{
 		{Event: "UserPromptSubmit", Hook: "relay-hook", Timeout: 15},
 		{Event: "Stop", Hook: "stop-hook", Timeout: 15},
 	}
-	if approval {
-		specs = append(specs, HookSpec{Event: "PermissionRequest", Hook: "approval-hook", Timeout: approvalTimeout})
-	}
-	return specs
 }
 
 var plainWord = regexp.MustCompile(`^[A-Za-z0-9_./=:@-]+$`)

@@ -35,7 +35,7 @@ An agent can simply watch a channel (`chat watch start --channel X`) or create a
 | Channel | Who is in it | Purpose |
 |---|---|---|
 | `#<project>` | You, invited agents, invited people | Decisions, handoffs, outcomes, group questions |
-| `#<project>__<user>_<agent>` | You and one agent | Talk to one agent directly; its questions and approval requests come here |
+| `#<project>__<user>_<agent>` | You and one agent | Talk to one agent directly; its questions (and, in Claude Code's auto mode, blocked actions) come here |
 | `#<project>__<agent>_<agent>[_…]` | The named agents (sorted) and you | Side channels: agents open one with `chat side` for anything the rest of the group doesn't need to read |
 
 Project names use lowercase letters, digits, `-` and `_`. They can't contain `__` and are at most 32 characters. Periods become `-`.
@@ -57,13 +57,12 @@ The installer adds these hooks to each home:
 |---|---|---|
 | `relay-hook` (UserPromptSubmit) | Both | `%agents: …` (or `%agents@<channel>: …`) at the prompt posts the text to the project channel as you. It also marks a turn as typed at the terminal |
 | `ask-hook` (PreToolUse, `AskUserQuestion`) | Claude | While the agent watches a project, its questions go to your direct channel, not the terminal |
-| `approval-hook` (PermissionRequest, timeout 660s) | Both | Permission prompts go to your direct channel with **Allow** / **Deny** / **Answer in terminal** buttons. Only the button can allow. A typed reply can deny (with a reason for the agent) or send the prompt back to the terminal. In Claude Code sessions there is also **Allow similar** when Claude Code suggests a rule (the request names the rule and where it is saved), and a reply `allow <rule>` (`allow Bash(git push *)`, or `allow git push` for a shell command prefix) redraws the request with buttons that allow it and add the rule for this session, this project or all projects; nothing is added until you click, and a reply that isn't a rule gets the accepted formats back. Codex takes no rules from hooks, so Codex requests keep the three buttons. Claude Code has been seen to show its terminal prompt at the same time; the first answer wins, and a request answered in the terminal is marked ended in Slack. After 10 minutes with no answer, it is left to the terminal; a session registered in a cohort (`chat cohort register`) also posts a `BLOCKED:` notice (agent and tool name only) to its project channel so peers know it is stuck |
 | `denied-hook` (PermissionDenied, timeout 660s) | Claude | In auto mode, an action the classifier blocks goes to your direct channel with its reason and **Approve retry** / **Decline** buttons; the agent waits up to 10 minutes. Approve lets the model retry (the classifier judges the retry again); anything else leaves the block standing. Exfiltration verdicts never relay the input |
 | `stop-hook` (Stop) | Both | When a turn you typed at the terminal ends, the agent's bot DMs you its final response. Turns started from Slack send nothing |
 
-To keep approval prompts in the terminal, run `slack-mcp-server chat approvals off` in a session (or tell the agent to turn Slack approvals off). `approval-hook` and `denied-hook` then answer nothing, so every prompt goes to the terminal and auto-mode denials stand. It applies to every session in that home until `chat approvals on`; `chat approvals status` shows the setting.
+Permission prompts (manual approval mode) are not sent to Slack; they go straight to the terminal in both Claude Code and Codex. Re-running setup removes an `approval-hook` an earlier install added.
 
-A Codex home whose `config.toml` sets `approvals_reviewer = "auto_review"` doesn't get `approval-hook`. Codex runs the hook before its reviewer, so the hook would take over requests the reviewer would have approved.
+To keep auto-mode denials out of Slack too, run `slack-mcp-server chat approvals off` in a session (or tell the agent to turn Slack approvals off). `denied-hook` then answers nothing, so auto-mode denials stand. It applies to every session in that home until `chat approvals on`; `chat approvals status` shows the setting.
 
 The `slack-agent-chat` skill, installed into each home, teaches the agent these commands and conventions. Its `COLLABORATION.md` covers working with other agents.
 

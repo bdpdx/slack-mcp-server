@@ -11,14 +11,7 @@ import (
 	"time"
 )
 
-var (
-	autoReviewLine = regexp.MustCompile(`(?m)^\s*approvals_reviewer\s*=\s*"auto_review"\s*(#.*)?$`)
-	notifyAssign   = regexp.MustCompile(`(?m)^(\s*notify\s*=\s*)(\[.*\])\s*$`)
-)
-
-// usesAutoReview reports whether a Codex config.toml routes approvals
-// through auto_review (which runs after PermissionRequest hooks).
-func usesAutoReview(cfg string) bool { return autoReviewLine.MatchString(cfg) }
+var notifyAssign = regexp.MustCompile(`(?m)^(\s*notify\s*=\s*)(\[.*\])\s*$`)
 
 // fixNotify drops a `--previous-notify <command>` pair from notify when the
 // command is codex-push.py, which Slack turn-end DMs replace.
@@ -168,7 +161,6 @@ func InstallCodex(home, userHome, bin string, r Runner, p Prompter, now time.Tim
 	cfgPath := filepath.Join(home, "config.toml")
 	cfgData, _ := os.ReadFile(cfgPath)
 	cfg := string(cfgData)
-	autoReview := usesAutoReview(cfg)
 
 	hooksPath := filepath.Join(home, "hooks.json")
 	doc, err := readJSONObject(hooksPath)
@@ -186,16 +178,13 @@ func InstallCodex(home, userHome, bin string, r Runner, p Prompter, now time.Tim
 	if err != nil {
 		return res, err
 	}
-	doc["hooks"] = MergeHooks(events, CodexHookSpecs(!autoReview), bin, EnvPath(home), "SlackAgentChat")
+	doc["hooks"] = MergeHooks(events, CodexHookSpecs(), bin, EnvPath(home), "SlackAgentChat")
 	if wrote, err := writeJSONObject(hooksPath, doc, now); err != nil {
 		return res, err
 	} else if wrote {
 		res.Changed = append(res.Changed, hooksPath)
 		// (Whether this changed what sessions read is decided in processHome,
 		// by comparing the files before and after.)
-	}
-	if autoReview {
-		res.Notes = append(res.Notes, "approval requests stay with Codex's auto_review (no Slack approval hook)")
 	}
 
 	rulesPath := filepath.Join(home, "rules", "default.rules")

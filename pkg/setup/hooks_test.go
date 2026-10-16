@@ -24,7 +24,7 @@ func TestMergeHooksReplacesOursKeepsOthers(t *testing.T) {
 	  "Stop": [{"hooks": [{"type":"command","command":"say done"}]}]
 	}`), &events))
 
-	out := MergeHooks(events, CodexHookSpecs(false), "/new/slack-mcp-server", "/h/slack-mcp-server.env", "SlackAgentChat")
+	out := MergeHooks(events, CodexHookSpecs(), "/new/slack-mcp-server", "/h/slack-mcp-server.env", "SlackAgentChat")
 	data, _ := json.Marshal(out)
 	s := string(data)
 	assert.NotContains(t, s, "/old/", "old paths are replaced")
@@ -34,7 +34,7 @@ func TestMergeHooksReplacesOursKeepsOthers(t *testing.T) {
 	assert.Equal(t, 1, countCommands(out, "relay-hook"))
 	assert.Equal(t, 1, countCommands(out, "stop-hook"))
 
-	again := MergeHooks(out, CodexHookSpecs(false), "/new/slack-mcp-server", "/h/slack-mcp-server.env", "SlackAgentChat")
+	again := MergeHooks(out, CodexHookSpecs(), "/new/slack-mcp-server", "/h/slack-mcp-server.env", "SlackAgentChat")
 	assert.Equal(t, 1, countCommands(again, "relay-hook"), "re-running does not duplicate")
 }
 
@@ -44,13 +44,13 @@ func TestClaudeHookSpecs(t *testing.T) {
 	for _, s := range specs {
 		byHook[s.Hook] = s
 	}
-	assert.Equal(t, 660, byHook["approval-hook"].Timeout)
+	assert.NotContains(t, byHook, "approval-hook", "permission prompts stay in the terminal")
 	assert.Equal(t, "AskUserQuestion", byHook["ask-hook"].Matcher)
 	assert.Equal(t, "PreToolUse", byHook["ask-hook"].Event)
 	assert.Equal(t, "PermissionDenied", byHook["denied-hook"].Event)
 	assert.Equal(t, 660, byHook["denied-hook"].Timeout, "outlasts its 10m wait")
-	assert.Len(t, specs, 5)
-	assert.Len(t, CodexHookSpecs(true), 3, "Codex has no PermissionDenied event")
+	assert.Len(t, specs, 4)
+	assert.Len(t, CodexHookSpecs(), 2, "Codex has no PermissionDenied event")
 }
 
 func countCommands(events map[string]any, hook string) int {
@@ -67,15 +67,15 @@ func countCommands(events map[string]any, hook string) int {
 	return n
 }
 
-func TestMergeHooksReplacesHookWithTrailingArgs(t *testing.T) {
+func TestMergeHooksRemovesHookWithTrailingArgs(t *testing.T) {
 	var events map[string]any
 	require.NoError(t, json.Unmarshal([]byte(`{
 	  "PermissionRequest": [{"hooks": [{"type":"command","command":"/old/slack-mcp-server chat --env-file /h/slack-mcp-server.env approval-hook --wait 5m","timeout":400}]}]
 	}`), &events))
 	out := MergeHooks(events, ClaudeHookSpecs(), "/new/slack-mcp-server", "/h/slack-mcp-server.env", "")
 	data, _ := json.Marshal(out)
-	assert.NotContains(t, string(data), "--wait 5m", "the old hook is replaced")
-	assert.Equal(t, 1, countCommands(out, "approval-hook"))
+	assert.NotContains(t, string(data), "--wait 5m", "the old hook is removed")
+	assert.Equal(t, 0, countCommands(out, "approval-hook"))
 	assert.False(t, isOurHook("/x/slack-mcp-server serve approval-hook"), "only chat subcommands")
 }
 

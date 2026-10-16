@@ -17,12 +17,6 @@ const notifyLine = `notify = ["/Apps/Client", "turn-ended", "--previous-notify",
 // Codex start script beside it.
 var testBin = filepath.Join(os.TempDir(), "setup-test-bin", "slack-mcp-server")
 
-func TestUsesAutoReview(t *testing.T) {
-	assert.True(t, usesAutoReview("model = \"x\"\napprovals_reviewer = \"auto_review\"\n"))
-	assert.False(t, usesAutoReview("# approvals_reviewer = \"auto_review\"\n"))
-	assert.False(t, usesAutoReview("[profile]\napprovals_reviewer = \"user\"\n"))
-}
-
 func TestFixNotify(t *testing.T) {
 	out, changed, err := fixNotify("a = 1\n" + notifyLine + "\nb = 2\n")
 	require.NoError(t, err)
@@ -38,7 +32,7 @@ func TestFixNotify(t *testing.T) {
 
 func TestInstallCodex(t *testing.T) {
 	home := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(home, "config.toml"), []byte("approvals_reviewer = \"auto_review\"\n"+notifyLine+"\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "config.toml"), []byte(notifyLine+"\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(home, "hooks.json"), []byte(`{"description":"mine","hooks":{"PermissionRequest":[{"hooks":[{"type":"command","command":"/old/slack-mcp-server chat --env-file /x approval-hook"}]}]}}`), 0o600))
 	r := &fakeRunner{}
 	p := &Scripted{Answers: []string{"y"}} // remove codex-push.py from notify
@@ -46,7 +40,7 @@ func TestInstallCodex(t *testing.T) {
 	require.NoError(t, err)
 
 	hooks, _ := os.ReadFile(filepath.Join(home, "hooks.json"))
-	assert.NotContains(t, string(hooks), "approval-hook", "auto_review homes get no approval hook")
+	assert.NotContains(t, string(hooks), "approval-hook", "an old approval hook is removed")
 	assert.Contains(t, string(hooks), "relay-hook")
 	assert.Contains(t, string(hooks), `"description": "mine"`)
 
@@ -76,7 +70,7 @@ func TestInstallCodexKeepsNotifyWhenDeclined(t *testing.T) {
 	cfg, _ := os.ReadFile(filepath.Join(home, "config.toml"))
 	assert.Contains(t, string(cfg), "codex-push.py")
 	hooks, _ := os.ReadFile(filepath.Join(home, "hooks.json"))
-	assert.Contains(t, string(hooks), "approval-hook", "no auto_review: the approval hook is installed")
+	assert.NotContains(t, string(hooks), "approval-hook", "no approval hook: prompts stay in the terminal")
 }
 
 func TestInstallCodexRejectsNonObjectHooks(t *testing.T) {

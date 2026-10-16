@@ -62,29 +62,11 @@ trust new hooks in the next session.
 - `UserPromptSubmit` → `relay-hook`: `%agents:` prompts (both hosts).
 - `PreToolUse` with matcher `AskUserQuestion` → `ask-hook` (Claude): questions go to the
   session's `#<project>__<you>_<agent>` channel instead of the terminal.
-- `PermissionRequest` → `approval-hook`, with `"timeout": 660`. Claude runs it only when it would
-  show a permission dialog. Codex runs it *before* its `auto_review` reviewer, so with
-  `approvals_reviewer = "auto_review"` the hook would take over every request the reviewer would
-  approve on its own; leave it out of such Codex homes. When installed: approval requests
-  come to that channel with Allow / Deny / Answer in terminal buttons (in Claude Code also Allow
-  similar, and `allow <rule>` replies confirmed by a button; see the README). Only a button can allow;
-  a reply in the channel or the request's thread can deny (`no` plus a reason for the agent) or say
-  `terminal`. Claude Code has been observed to show its own terminal prompt at
-  the same time (its docs don't say), and the first answer wins. A hook that
-  finishes, or is stopped by its host, redraws its request as ended; if a
-  hook is killed outright, the listener redraws it about 30 seconds after the
-  hook stops polling. (A listener restart loses its record of pending
-  requests; a hook still waiting registers its request again.)
-  With no answer in 10 minutes (`--wait`), the hook leaves the prompt to the
-  terminal. A session registered in a cohort (below) then also posts a
-  `BLOCKED:` notice naming the agent and the tool (never its input) to its
-  project channel, so the other agents know it is stuck.
-  `chat approvals off` turns this off for the home (every session in it): the hook then
-  answers nothing and the terminal prompts as usual. `chat approvals on` turns it back on, and
-  `chat approvals status` shows the setting. It turns off `denied-hook` too.
+- No `PermissionRequest` hook: permission prompts (manual approval mode) go straight to the
+  terminal in both hosts. Setup removes an `approval-hook` an earlier install added.
 - `PermissionDenied` → `denied-hook` (Claude, auto mode only), with
   `"timeout": 660`. An action the auto-mode classifier blocks shows no
-  permission prompt, so `approval-hook` never sees it. This hook posts the
+  permission prompt. This hook posts the
   blocked action and the classifier's reason to the direct channel with
   Approve retry / Decline buttons, and the agent waits up to 10 minutes
   (`--wait`). Approve answers `retry`: Claude Code tells the model it may
@@ -97,6 +79,9 @@ trust new hooks in the next session.
   input is not relayed to Slack and the request cannot be approved there, so
   the hook posts a notice and the agent does not wait. A request the listener
   has ended takes no late answer.
+  `chat approvals off` turns this off for the home (every session in it): the hook then
+  answers nothing and the denial stands. `chat approvals on` turns it back on, and
+  `chat approvals status` shows the setting.
 - `Stop` → `stop-hook` (both hosts): when a turn you started by typing at the terminal ends, the
   agent's bot DMs you its final response. Turns started by Slack messages, background work or
   subagents send nothing. This replaces a Codex `notify` push notification.
