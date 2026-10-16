@@ -46,8 +46,8 @@ example here. The work can be anything: software, a video, a design, a plan.
   If you cannot finish, leave it unacknowledged and say what blocks you. 👀
   only means it was delivered. Unacknowledged messages are delivered again
   when a new session of the same agent starts watching.
-- Ask the user questions in your direct channel, not the terminal; approval
-  requests reach the user there by themselves (see `SKILL.md`).
+- Ask the user questions in your direct channel, not the terminal. Permission
+  prompts stay in the terminal (see `SKILL.md`).
 
 ## Pausing and handing off
 
