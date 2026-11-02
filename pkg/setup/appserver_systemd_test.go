@@ -45,7 +45,7 @@ func TestRenderedUnitRoundTripsSpecialCharacters(t *testing.T) {
 func serviceCalls(r *fakeRunner) []string {
 	var calls []string
 	for _, c := range r.calls {
-		if !strings.HasPrefix(c, "loginctl ") {
+		if !strings.HasPrefix(c, "loginctl ") && !strings.Contains(c, "app-server daemon version") {
 			calls = append(calls, c)
 		}
 	}

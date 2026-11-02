@@ -21,10 +21,16 @@ func appServerLabel(home string) string {
 // ensureAppServer sets up (or verifies) the service that runs the Codex
 // app-server for one home, with this machine's service manager.
 func ensureAppServer(home, userHome string, r Runner, p Prompter) (changed, notes []string, err error) {
-	if hostOS == "darwin" {
-		return ensureAppServerLaunchd(home, userHome, r, p)
+	repaired, err := repairDaemonPackage(home, r)
+	if err != nil {
+		return nil, nil, err
 	}
-	return ensureAppServerSystemd(home, userHome, r, p)
+	if hostOS == "darwin" {
+		changed, notes, err = ensureAppServerLaunchd(home, userHome, r, p)
+	} else {
+		changed, notes, err = ensureAppServerSystemd(home, userHome, r, p)
+	}
+	return append(repaired, changed...), notes, err
 }
 
 func currentUsername() string {

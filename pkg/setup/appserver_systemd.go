@@ -171,7 +171,7 @@ func ensureAppServerUnit(home, userHome string, r Runner, p Prompter) (changed, 
 		if err := startAppServer(r, unit); err != nil {
 			return changed, nil, err
 		}
-		return append(changed, "app-server service "+label+" created and started"), nil, nil
+		return append(changed, "app-server service "+label+" created and started"), appServerStarted(home, label, "systemd.stderr.log", r), nil
 	}
 
 	problems := verifyAppServerUnit(string(existing), home, userHome)
@@ -198,7 +198,7 @@ func ensureAppServerUnit(home, userHome string, r Runner, p Prompter) (changed, 
 	if err := startAppServer(r, unit); err != nil {
 		return nil, notes, err
 	}
-	return []string{"app-server " + label + " started"}, notes, nil
+	return []string{"app-server " + label + " started"}, append(notes, appServerStarted(home, label, "systemd.stderr.log", r)...), nil
 }
 
 // startAppServer makes systemd see the unit file, then enables and starts it.

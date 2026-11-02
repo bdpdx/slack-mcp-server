@@ -88,7 +88,7 @@ func TestLaunchdEnsureAppServerCreatesAgentAndSupervisor(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o644), info.Mode().Perm())
 	assert.DirExists(t, filepath.Join(e.home, "app-server-daemon"))
 
-	assert.Equal(t, []string{"launchctl enable " + e.target, "launchctl bootstrap " + e.domain + " " + e.plist}, r.calls)
+	assert.Equal(t, []string{"launchctl enable " + e.target, "launchctl bootstrap " + e.domain + " " + e.plist}, serviceCalls(r))
 }
 
 func TestLaunchdEnsureAppServerReusesCurrentSupervisor(t *testing.T) {
@@ -100,7 +100,7 @@ func TestLaunchdEnsureAppServerReusesCurrentSupervisor(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, changed, e.supervisor, "current supervisor not rewritten")
 	assert.FileExists(t, e.plist)
-	assert.Len(t, r.calls, 2)
+	assert.Len(t, serviceCalls(r), 2)
 }
 
 func TestLaunchdEnsureAppServerReplacesStaleSupervisor(t *testing.T) {
@@ -141,7 +141,7 @@ func TestLaunchdEnsureAppServerExistingRunning(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, changed)
 	assert.Equal(t, []string{"app-server " + e.label + " verified and running"}, notes)
-	assert.Equal(t, []string{"launchctl print " + e.target}, r.calls)
+	assert.Equal(t, []string{"launchctl print " + e.target}, serviceCalls(r))
 	after, _ := os.ReadFile(e.plist)
 	assert.Equal(t, before, after)
 }
@@ -154,7 +154,7 @@ func TestLaunchdEnsureAppServerNotRunningYesKickstartsLoaded(t *testing.T) {
 	changed, _, err := ensureAppServer(e.home, e.user, r, p)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"app-server " + e.label + " started"}, changed)
-	assert.Equal(t, []string{"launchctl print " + e.target, "launchctl enable " + e.target, "launchctl kickstart -k " + e.target}, r.calls)
+	assert.Equal(t, []string{"launchctl print " + e.target, "launchctl enable " + e.target, "launchctl kickstart -k " + e.target}, serviceCalls(r))
 }
 
 func TestLaunchdEnsureAppServerNotRunningYesBootstrapsUnloaded(t *testing.T) {
@@ -164,7 +164,7 @@ func TestLaunchdEnsureAppServerNotRunningYesBootstrapsUnloaded(t *testing.T) {
 	p := &Scripted{Answers: []string{"y"}}
 	_, _, err := ensureAppServer(e.home, e.user, r, p)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"launchctl print " + e.target, "launchctl enable " + e.target, "launchctl bootstrap " + e.domain + " " + e.plist}, r.calls)
+	assert.Equal(t, []string{"launchctl print " + e.target, "launchctl enable " + e.target, "launchctl bootstrap " + e.domain + " " + e.plist}, serviceCalls(r))
 }
 
 func TestLaunchdEnsureAppServerNotRunningNo(t *testing.T) {
@@ -176,7 +176,7 @@ func TestLaunchdEnsureAppServerNotRunningNo(t *testing.T) {
 	assert.Empty(t, changed)
 	require.Len(t, notes, 1)
 	assert.Contains(t, notes[0], "is not running; Slack messages won't reach this Codex home")
-	assert.Equal(t, []string{"launchctl print " + e.target}, r.calls)
+	assert.Equal(t, []string{"launchctl print " + e.target}, serviceCalls(r))
 }
 
 func TestLaunchdEnsureAppServerMismatchLeavesPlist(t *testing.T) {
@@ -219,6 +219,6 @@ func TestLaunchdEnsureAppServerMismatchNotRunningDoesNotOffer(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, changed)
 	assert.Contains(t, strings.Join(notes, "\n"), "fix or remove the plist above and run ./install.sh again")
-	assert.Equal(t, []string{"launchctl print " + e.target}, r.calls)
+	assert.Equal(t, []string{"launchctl print " + e.target}, serviceCalls(r))
 	assert.Empty(t, p.Out.String())
 }

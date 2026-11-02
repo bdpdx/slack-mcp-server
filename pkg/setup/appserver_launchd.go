@@ -127,7 +127,7 @@ func ensureAppServerLaunchd(home, userHome string, r Runner, p Prompter) (change
 		if out, err := r.Run(nil, "launchctl", "bootstrap", domain, plist); err != nil {
 			return changed, nil, fmt.Errorf("launchctl bootstrap %s failed: %v: %s", domain, err, strings.TrimSpace(out))
 		}
-		return append(changed, "app-server launch agent "+label+" created and started"), nil, nil
+		return append(changed, "app-server launch agent "+label+" created and started"), appServerStarted(home, label, "launchagent.stderr.log", r), nil
 	}
 
 	problems := verifyAppServerPlist(string(existing), home, userHome, label)
@@ -161,5 +161,5 @@ func ensureAppServerLaunchd(home, userHome string, r Runner, p Prompter) (change
 	} else if out, err := r.Run(nil, "launchctl", "bootstrap", domain, plist); err != nil {
 		return nil, notes, fmt.Errorf("launchctl bootstrap %s failed: %v: %s", domain, err, strings.TrimSpace(out))
 	}
-	return []string{"app-server " + label + " started"}, notes, nil
+	return []string{"app-server " + label + " started"}, append(notes, appServerStarted(home, label, "launchagent.stderr.log", r)...), nil
 }

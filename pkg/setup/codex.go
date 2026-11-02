@@ -158,6 +158,12 @@ func withCodexRule(text, rule, bin string) string {
 // MCP registration, plus the app-server service, in a Codex home. The env file is written separately.
 func InstallCodex(home, userHome, bin string, r Runner, p Prompter, now time.Time) (Result, error) {
 	res := Result{Home: home}
+	// First, while the files still say where the home used to be.
+	moved, err := rewriteMovedPaths(home, userHome, []string{"config.toml", "hooks.json", "rules/default.rules"}, now)
+	res.Changed = append(res.Changed, moved...)
+	if err != nil {
+		return res, err
+	}
 	cfgPath := filepath.Join(home, "config.toml")
 	cfgData, _ := os.ReadFile(cfgPath)
 	cfg := string(cfgData)

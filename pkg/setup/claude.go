@@ -59,6 +59,12 @@ func writeJSONObject(path string, doc map[string]any, now time.Time) (bool, erro
 // Code home. The env file is written separately.
 func InstallClaude(home, userHome, bin string, r Runner, now time.Time) (Result, error) {
 	res := Result{Home: home}
+	// First, while the file still says where the home used to be.
+	moved, err := rewriteMovedPaths(home, userHome, []string{"settings.json"}, now)
+	res.Changed = append(res.Changed, moved...)
+	if err != nil {
+		return res, err
+	}
 	settings := filepath.Join(home, "settings.json")
 	doc, err := readJSONObject(settings)
 	if err != nil {
