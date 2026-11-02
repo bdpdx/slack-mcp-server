@@ -1,12 +1,22 @@
 #!/bin/bash
-# slackmcpctl: control the Codex app-server launch agents and the
-# slack-mcp-server processes of agent homes. Run with -h for usage.
-# Written for macOS's /bin/bash 3.2: no associative arrays or mapfile.
+# slackmcpctl: control the Codex app-server services (launchd on macOS, systemd
+# on Linux) and the slack-mcp-server processes of agent homes. Run with -h for
+# usage. Written for macOS's /bin/bash 3.2: no associative arrays or mapfile.
 set -o pipefail
 
 prog=$(basename "$0")
-domain="gui/$(id -u)"
-agents_dir="$HOME/Library/LaunchAgents"
+if [ "$(uname -s)" = Darwin ]; then
+	domain="gui/$(id -u)"
+	units_dir="$HOME/Library/LaunchAgents"
+	unit_ext=plist
+	svc="launch agent"
+	svc_files=plists
+else
+	units_dir="$HOME/.config/systemd/user"
+	unit_ext=service
+	svc=service
+	svc_files="unit files"
+fi
 
 usage() {
 	cat <<EOF
@@ -19,16 +29,16 @@ Usage:
   $prog status    [all | NAME...]
 
 Commands:
-  restart    stop the app-server launch agents, kill any of their app-server
-             processes still running, then start the agents again
-  pause      stop the launch agents and keep them stopped, also across logins
-  resume     start paused launch agents
-  uninstall  stop the launch agents and delete their plists
+  restart    stop the app-server ${svc}s, kill any of their app-server
+             processes still running, then start the ${svc}s again
+  pause      stop the ${svc}s and keep them stopped, also across restarts
+  resume     start paused ${svc}s
+  uninstall  stop the ${svc}s and delete their $svc_files
 
   restart, pause and uninstall also kill the app-server processes of homes
-  that have no launch agent; nothing starts those again.
+  that have no $svc; nothing starts those again.
   killmcp    kill the slack-mcp-server processes of the named homes
-  status     show each home's launch agent, app-server processes and
+  status     show each home's $svc, app-server processes and
              slack-mcp-server processes (what each is and what started it);
              with no NAME, every home
 
@@ -36,13 +46,13 @@ Commands:
              processes of the same homes
 
 NAME is an agent home's directory name without the leading dot: codex-f1 for
-~/.codex-f1, whose launch agent is
-~/Library/LaunchAgents/com.openai.codex-f1.app-server.plist. Wildcards work
+~/.codex-f1, whose $svc is
+$(unit_path_of codex-f1). Wildcards work
 (quote them so the shell leaves them alone): 'codex*', 'claude*'. Claude homes
-have no launch agent, so they only match slack-mcp-server processes.
+have no $svc, so they only match slack-mcp-server processes.
 
-'all' means every launch agent and every home with app-server processes
-running (resume: every launch agent), plus every slack-mcp-server process
+'all' means every $svc and every home with app-server processes
+running (resume: every $svc), plus every slack-mcp-server process
 started with --env-file for killmcp and --killmcp. With no NAME, $prog lists the
 candidates and asks which to use.
 EOF
@@ -60,22 +70,22 @@ warn() {
 }
 
 label_of() { echo "com.openai.$1.app-server"; }
-plist_of() { echo "$agents_dir/$(label_of "$1").plist"; }
+unit_path_of() { echo "$units_dir/$(label_of "$1").$unit_ext"; }
 
-# agent_names prints the NAME of every app-server launch agent plist.
+# agent_names prints the NAME of every app-server plist or unit file.
 agent_names() {
 	local f n
-	for f in "$agents_dir"/com.openai.*.app-server.plist; do
+	for f in "$units_dir"/com.openai.*.app-server."$unit_ext"; do
 		[ -e "$f" ] || continue
-		n=${f#"$agents_dir"/com.openai.}
-		echo "${n%.app-server.plist}"
+		n=${f#"$units_dir"/com.openai.}
+		echo "${n%.app-server."$unit_ext"}"
 	done | sort
 }
 
 # mcp_procs prints "NAME PID" for every slack-mcp-server process started with
 # --env-file, NAME being the env file's directory name without the leading dot.
 mcp_procs() {
-	ps -axo pid=,command= | awk '
+	ps -axwwo pid=,command= | awk '
 	{
 		n = split($2, p, "/")
 		if (p[n] != "slack-mcp-server") next
@@ -95,7 +105,7 @@ mcp_procs() {
 # running (<home>/packages/app-server-daemon/...), with or without an agent.
 # Only the executable is matched, so this awk never matches itself.
 daemon_homes() {
-	ps -axo command= | awk '
+	ps -axwwo command= | awk '
 	{
 		i = index($1, "/packages/app-server-daemon/")
 		if (i < 2) next
@@ -110,34 +120,99 @@ in_list() { # in_list WORD LIST: whether WORD is a line of LIST
 	printf '%s\n' "$2" | grep -qxF -- "$1"
 }
 
-loaded() { launchctl print "$domain/$(label_of "$1")" >/dev/null 2>&1; }
+# The service manager, one implementation per OS:
+#   loaded NAME         whether the manager knows the service
+#   agent_state NAME    running, paused (disabled), stopped or not loaded
+#   agent_pid NAME      the supervisor's PID, if any
+#   agent_stop NAME     stop it
+#   agent_start NAME    enable and start it, loading it if needed
+#   agent_disable NAME  keep it from starting
+#   agent_forget NAME   called before and after deleting its file ($2 = before, after)
+#   unit_home NAME      print the CODEX_HOME in its file, or fail
+#   manager_ok          whether the manager can be reached
+if [ "$(uname -s)" = Darwin ]; then
+	target_of() { echo "$domain/$(label_of "$1")"; }
+	loaded() { launchctl print "$(target_of "$1")" >/dev/null 2>&1; }
+	agent_state() {
+		local out
+		if launchctl print-disabled "$domain" 2>/dev/null | grep -qF "\"$(label_of "$1")\" => disabled"; then
+			echo paused
+		elif ! out=$(launchctl print "$(target_of "$1")" 2>/dev/null); then
+			echo "not loaded"
+		elif printf '%s\n' "$out" | grep -qE '^[[:space:]]*state = running$'; then
+			echo running
+		else
+			echo stopped
+		fi
+	}
+	agent_pid() {
+		launchctl print "$(target_of "$1")" 2>/dev/null | awk '$1 == "pid" && $2 == "=" { print $3; exit }'
+	}
+	agent_stop() { launchctl bootout "$(target_of "$1")" || warn "launchctl bootout $(label_of "$1") failed"; }
+	agent_start() {
+		launchctl enable "$(target_of "$1")" || warn "launchctl enable $(label_of "$1") failed"
+		if loaded "$1"; then
+			launchctl kickstart "$(target_of "$1")" || warn "launchctl kickstart $(label_of "$1") failed"
+		else
+			launchctl bootstrap "$domain" "$(unit_path_of "$1")" || warn "launchctl bootstrap $(label_of "$1") failed"
+		fi
+	}
+	agent_disable() { launchctl disable "$(target_of "$1")" || warn "launchctl disable $(label_of "$1") failed"; }
+	agent_forget() { :; }
+	unit_home() { plutil -extract EnvironmentVariables.CODEX_HOME raw -o - "$(unit_path_of "$1")" 2>/dev/null; }
+	manager_ok() { :; }
+else
+	sysd() { systemctl --user "$@"; }
+	unit_of() { echo "$(label_of "$1").service"; }
+	loaded() { [ "$(sysd show -p LoadState --value "$(unit_of "$1")" 2>/dev/null)" = loaded ]; }
+	agent_state() {
+		if ! loaded "$1"; then
+			echo "not loaded"
+		elif sysd is-active --quiet "$(unit_of "$1")"; then
+			echo running
+		elif [ "$(sysd is-enabled "$(unit_of "$1")" 2>/dev/null)" = disabled ]; then
+			echo paused
+		else
+			echo stopped
+		fi
+	}
+	agent_pid() {
+		local pid
+		pid=$(sysd show -p MainPID --value "$(unit_of "$1")" 2>/dev/null)
+		[ "$pid" = 0 ] || echo "$pid"
+	}
+	agent_stop() { sysd stop "$(unit_of "$1")" || warn "systemctl stop $(label_of "$1") failed"; }
+	agent_start() {
+		sysd daemon-reload || warn "systemctl daemon-reload failed"
+		sysd enable --quiet --now "$(unit_of "$1")" || warn "systemctl enable --now $(label_of "$1") failed"
+	}
+	agent_disable() { sysd disable --quiet "$(unit_of "$1")" || warn "systemctl disable $(label_of "$1") failed"; }
+	agent_forget() {
+		case "$2" in
+			before) agent_disable "$1" ;;
+			after) sysd daemon-reload || warn "systemctl daemon-reload failed" ;;
+		esac
+	}
+	unit_home() {
+		local h
+		h=$(sed -n 's/^Environment="CODEX_HOME=\(.*\)"$/\1/p' "$(unit_path_of "$1")" 2>/dev/null | sed 's/%%/%/g; s/\\\(.\)/\1/g')
+		[ -n "$h" ] && echo "$h"
+	}
+	manager_ok() { sysd show-environment >/dev/null 2>&1; }
+fi
 
-# agent_state prints running, paused (disabled), stopped or not loaded.
-agent_state() {
-	local out
-	if launchctl print-disabled "$domain" 2>/dev/null | grep -qF "\"$(label_of "$1")\" => disabled"; then
-		echo paused
-	elif ! out=$(launchctl print "$domain/$(label_of "$1")" 2>/dev/null); then
-		echo "not loaded"
-	elif printf '%s\n' "$out" | grep -qE '^[[:space:]]*state = running$'; then
-		echo running
-	else
-		echo stopped
-	fi
-}
-
-# home_of prints NAME's Codex home: its plist's CODEX_HOME, else the home of its
+# home_of prints NAME's Codex home: its service's CODEX_HOME, else the home of its
 # running app-server processes, else ~/.NAME.
 home_of() {
 	local h
-	plutil -extract EnvironmentVariables.CODEX_HOME raw -o - "$(plist_of "$1")" 2>/dev/null && return
+	unit_home "$1" && return
 	h=$(printf '%s\n' "$daemons" | awk -v n="$1" '$1 == n { sub(/^[^ ]+ /, ""); print; exit }')
 	echo "${h:-$HOME/.$1}"
 }
 
 # pids_with_prefix prints the PID of every process whose command line starts with $1.
 pids_with_prefix() {
-	ps -axo pid=,command= | awk -v p="$1" '{ c = $0; sub(/^ *[0-9]+ /, "", c); if (index(c, p) == 1) print $1 }'
+	ps -axwwo pid=,command= | awk -v p="$1" '{ c = $0; sub(/^ *[0-9]+ /, "", c); if (index(c, p) == 1) print $1 }'
 }
 
 # kill_pids WHAT PID...: TERM the processes, then KILL any still alive after 5s.
@@ -160,18 +235,18 @@ kill_pids() {
 	kill -KILL $alive 2>/dev/null || warn "could not kill$alive"
 }
 
-# stop_agent unloads the agent (its supervisor stops the daemon on the way
+# stop_agent stops the service (its supervisor stops the daemon on the way
 # out), then kills whatever app-server processes of its home are left. A home
-# without an agent just has its app-server processes killed.
+# without one just has its app-server processes killed.
 stop_agent() {
 	local name=$1 label home
 	label=$(label_of "$name")
 	home=$(home_of "$name")
 	if ! in_list "$name" "$agents"; then
-		echo "$name: no launch agent"
+		echo "$name: no $svc"
 	elif loaded "$name"; then
 		echo "$name: stopping $label"
-		launchctl bootout "$domain/$label" || warn "launchctl bootout $label failed"
+		agent_stop "$name"
 	else
 		echo "$name: $label is not loaded"
 	fi
@@ -183,17 +258,11 @@ start_agent() {
 	local name=$1 label
 	label=$(label_of "$name")
 	if ! in_list "$name" "$agents"; then
-		echo "$name: no launch agent to start"
+		echo "$name: no $svc to start"
 		return
 	fi
-	launchctl enable "$domain/$label" || warn "launchctl enable $label failed"
-	if loaded "$name"; then
-		echo "$name: starting $label"
-		launchctl kickstart "$domain/$label" || warn "launchctl kickstart $label failed"
-	else
-		echo "$name: loading $label"
-		launchctl bootstrap "$domain" "$(plist_of "$name")" || warn "launchctl bootstrap $label failed"
-	fi
+	echo "$name: starting $label"
+	agent_start "$name"
 }
 
 killmcp() {
@@ -251,14 +320,14 @@ choose() {
 	done
 }
 
-# describe prints what NAME has: its launch agent's state and its number of
+# describe prints what NAME has: its service's state and its number of
 # slack-mcp-server processes.
 describe() {
 	local d='' count
 	if in_list "$1" "$agents"; then
-		d="launch agent $(agent_state "$1")"
+		d="$svc $(agent_state "$1")"
 	elif in_list "$1" "$daemon_names"; then
-		d="app-server running, no launch agent"
+		d="app-server running, no $svc"
 	fi
 	count=$(printf '%s\n' "$mcp" | awk -v n="$1" '$1 == n' | grep -c .)
 	if [ "$count" -gt 0 ]; then
@@ -271,7 +340,7 @@ describe() {
 # (KIND a) and slack-mcp-server process (KIND m) of a home, from one ps
 # snapshot. slack-mcp-server processes without --env-file get NAME "-".
 status_lines() {
-	ps -axo pid=,ppid=,etime=,command= | awk '
+	ps -axwwo pid=,ppid=,etime=,command= | awk '
 	function base(path,   n, p) { n = split(path, p, "/"); return p[n] }
 	{ line[NR] = $0; exe[$1] = $4 }
 	END {
@@ -309,7 +378,8 @@ status_lines() {
 				if (m >= 2) { name = q[m - 1]; sub(/^\./, "", name) }
 			}
 			if (role == "") role = chat ? "chat command" : "MCP server (stdio)"
-			if (ppid == 1) owner = "detached"
+			# Orphans go to init, or to the user manager that started their service.
+			if (ppid == 1 || base(exe[ppid]) == "systemd") owner = "detached"
 			else if (!(ppid in exe)) owner = "parent " ppid
 			else if (index(exe[ppid], "/packages/app-server-daemon/")) owner = "parent " ppid " (codex app-server)"
 			else owner = "parent " ppid " (" base(exe[ppid]) ")"
@@ -318,7 +388,7 @@ status_lines() {
 	}'
 }
 
-# status prints, per home in $selected, its launch agent and processes.
+# status prints, per home in $selected, its service and processes.
 status() {
 	local lines n state pid
 	lines=$(status_lines)
@@ -330,10 +400,10 @@ status() {
 			echo "$n"
 			if in_list "$n" "$agents"; then
 				state=$(agent_state "$n")
-				pid=$(launchctl print "$domain/$(label_of "$n")" 2>/dev/null | awk '$1 == "pid" && $2 == "=" { print $3; exit }')
-				printf '  %-16s %s: %s%s\n' "launch agent" "$(label_of "$n")" "$state" "${pid:+ (supervisor pid $pid)}"
+				pid=$(agent_pid "$n")
+				printf '  %-16s %s: %s%s\n' "$svc" "$(label_of "$n")" "$state" "${pid:+ (supervisor pid $pid)}"
 			else
-				printf '  %-16s none\n' "launch agent"
+				printf '  %-16s none\n' "$svc"
 			fi
 		fi
 		printf '%s\n' "$lines" | awk -F '\t' -v n="$n" '$1 == n && $2 == "a" { print "  " $3 }'
@@ -370,15 +440,21 @@ case "$cmd" in
 esac
 
 agents=$(agent_names)
+case "$cmd" in
+	restart | pause | resume | uninstall)
+		[ -z "$agents" ] || manager_ok ||
+			die "can't reach the systemd user manager; log in directly (ssh, not su) so XDG_RUNTIME_DIR is set"
+		;;
+esac
 daemons=$(daemon_homes)
 daemon_names=$(printf '%s\n' "$daemons" | awk 'NF { print $1 }' | sort -u)
 mcp=$(mcp_procs)
 use_agents=1
 [ "$cmd" = killmcp ] && use_agents=0
-# Homes with app-server processes but no agent can be stopped, not resumed.
+# Homes with app-server processes but no service can be stopped, not resumed.
 app_names=$agents
 [ "$cmd" = resume ] || app_names=$(printf '%s\n%s\n' "$agents" "$daemon_names" | grep . | sort -u)
-# status covers every home with an agent or a process, and asks nothing.
+# status covers every home with a service or a process, and asks nothing.
 if [ "$cmd" = status ]; then
 	[ ${#patterns[@]} -gt 0 ] || patterns=(all)
 	with_mcp=1
@@ -393,9 +469,9 @@ candidates=$(
 )
 case "$cmd" in
 	killmcp) what="slack-mcp-server processes" ;;
-	status) what="launch agents, app-servers or slack-mcp-server processes" ;;
-	resume) what="app-server launch agents" ;;
-	*) what="app-server launch agents or running app-servers" ;;
+	status) what="${svc}s, app-servers or slack-mcp-server processes" ;;
+	resume) what="app-server ${svc}s" ;;
+	*) what="app-server ${svc}s or running app-servers" ;;
 esac
 
 if [ ${#patterns[@]} -eq 0 ]; then
@@ -444,7 +520,7 @@ for_agents() { # for_agents FUNC: run FUNC for every selected app-server home
 pause_agent() {
 	stop_agent "$1"
 	if in_list "$1" "$agents"; then
-		launchctl disable "$domain/$(label_of "$1")" || warn "launchctl disable $(label_of "$1") failed"
+		agent_disable "$1"
 		echo "$1: paused"
 	fi
 }
@@ -460,11 +536,13 @@ resume_agent() {
 uninstall_agent() {
 	stop_agent "$1"
 	in_list "$1" "$agents" || return 0
-	if rm -f "$(plist_of "$1")"; then
-		echo "$1: removed $(plist_of "$1")"
+	agent_forget "$1" before
+	if rm -f "$(unit_path_of "$1")"; then
+		echo "$1: removed $(unit_path_of "$1")"
 	else
-		warn "could not remove $(plist_of "$1")"
+		warn "could not remove $(unit_path_of "$1")"
 	fi
+	agent_forget "$1" after
 }
 
 kill_selected_mcp() {

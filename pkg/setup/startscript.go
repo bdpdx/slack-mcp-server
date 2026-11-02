@@ -22,12 +22,15 @@ const codexStartTemplate = `#!/bin/bash
 #   --repo-root overrides REPO_ROOT below; with neither, the current directory is used.
 #   Everything else is passed to codex ("--" ends these options).
 #
-# Set REPO_ROOT below to give this agent a default repo directory. Re-running
-# ./install.sh keeps the value you set here.
+# Set REPO_ROOT below to give this agent a default repo directory. Set CODEX_ARGS
+# below to arguments codex should get on every start, written as you would type
+# them, quotes included: CODEX_ARGS='--foo bar --baz "two words"'. They come before
+# any arguments given here. Re-running ./install.sh keeps the values you set.
 set -euo pipefail
 
 export CODEX_HOME=HOME_QUOTED
 export REPO_ROOT=REPO_ROOT_VALUE
+CODEX_ARGS=DEFAULT_ARGS_VALUE
 
 me="$(basename "$0")"
 model=""
@@ -79,10 +82,11 @@ fi
 export REPO_ROOT
 
 cd "$REPO_ROOT"
+eval "default_args=($CODEX_ARGS)"
 if [ -n "$model" ]; then
-	exec codex --remote unix:// -C "$REPO_ROOT" -m "$model" ${args[@]+"${args[@]}"}
+	exec codex --remote unix:// -C "$REPO_ROOT" -m "$model" ${default_args[@]+"${default_args[@]}"} ${args[@]+"${args[@]}"}
 fi
-exec codex --remote unix:// -C "$REPO_ROOT" ${args[@]+"${args[@]}"}
+exec codex --remote unix:// -C "$REPO_ROOT" ${default_args[@]+"${default_args[@]}"} ${args[@]+"${args[@]}"}
 `
 
 const claudeStartTemplate = `#!/bin/bash
@@ -93,12 +97,15 @@ const claudeStartTemplate = `#!/bin/bash
 #   Everything else, including all of claude's own options, is passed to
 #   claude ("--" ends these options).
 #
-# Set REPO_ROOT below to give this agent a default repo directory. Re-running
-# ./install.sh keeps the value you set here.
+# Set REPO_ROOT below to give this agent a default repo directory. Set CLAUDE_ARGS
+# below to arguments claude should get on every start, written as you would type
+# them, quotes included: CLAUDE_ARGS='--foo bar --baz "two words"'. They come before
+# any arguments given here. Re-running ./install.sh keeps the values you set.
 set -euo pipefail
 
 CLAUDE_CONFIG_LINE
 export REPO_ROOT=REPO_ROOT_VALUE
+CLAUDE_ARGS=DEFAULT_ARGS_VALUE
 
 me="$(basename "$0")"
 args=()
@@ -137,12 +144,17 @@ fi
 export REPO_ROOT
 
 cd "$REPO_ROOT"
-exec claude ${args[@]+"${args[@]}"}
+eval "default_args=($CLAUDE_ARGS)"
+exec claude ${default_args[@]+"${default_args[@]}"} ${args[@]+"${args[@]}"}
 `
 
 // repoRootLine finds the script's REPO_ROOT, or the PROJECT_ROOT of a
 // script written before the rename, so the value carries over.
 var repoRootLine = regexp.MustCompile(`(?m)^export (?:REPO_ROOT|PROJECT_ROOT)=(.*)$`)
+
+// defaultArgsLine finds the script's CLAUDE_ARGS or CODEX_ARGS value: one shell
+// word, whose quoted parts may span lines.
+var defaultArgsLine = regexp.MustCompile(`(?m)^(?:CLAUDE|CODEX)_ARGS=((?:'[^']*'|"(?:[^"\\]|\\.)*"|\\.|[^\s#'"\\])*)`)
 
 // startScriptName is the start script's file name for a home.
 func startScriptName(home string) string {
@@ -150,12 +162,13 @@ func startScriptName(home string) string {
 }
 
 // renderStartScript writes the script for a home of type typ. repoRoot
-// is the raw shell text after `export REPO_ROOT=`; an empty quoted string
-// means none. Claude Code's default home (~/.claude, under userHome) runs
+// is the raw shell text after `export REPO_ROOT=`, and defaultArgs the raw text
+// after `CLAUDE_ARGS=` or `CODEX_ARGS=`; an empty quoted string means none.
+// Claude Code's default home (~/.claude, under userHome) runs
 // without CLAUDE_CONFIG_DIR, as setup registers its MCP server: set to
 // ~/.claude, Claude Code would read ~/.claude/.claude.json instead of
 // ~/.claude.json.
-func renderStartScript(typ, home, userHome, repoRoot string) []byte {
+func renderStartScript(typ, home, userHome, repoRoot, defaultArgs string) []byte {
 	tmpl := codexStartTemplate
 	if typ == TypeClaude {
 		tmpl = claudeStartTemplate
@@ -170,6 +183,7 @@ func renderStartScript(typ, home, userHome, repoRoot string) []byte {
 		"SCRIPT_NAME", startScriptName(home),
 		"HOME_QUOTED", singleQuote(home),
 		"REPO_ROOT_VALUE", repoRoot,
+		"DEFAULT_ARGS_VALUE", defaultArgs,
 	).Replace(tmpl)
 	return []byte(s)
 }
@@ -195,6 +209,19 @@ func currentRepoRoot(path string) (string, bool) {
 	return "", true
 }
 
+// currentDefaultArgs returns the raw default arguments of the script at path,
+// or "" when it has none.
+func currentDefaultArgs(path string) string {
+	old, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	if m := defaultArgsLine.FindSubmatch(old); m != nil {
+		return string(m[1])
+	}
+	return ""
+}
+
 // displayRepoRoot shows raw REPO_ROOT text as the user would write
 // it: unquoted when it is simply quoted, "" when it is unset.
 func displayRepoRoot(raw string) string {
@@ -209,7 +236,7 @@ func displayRepoRoot(raw string) string {
 
 // installStartScript writes the home's start script next to bin. root is
 // the raw REPO_ROOT text to set; nil keeps the one in an existing copy
-// (none for a new script). A replaced script is backed up into backupDir,
+// (none for a new script); its default arguments are always kept. A replaced script is backed up into backupDir,
 // not beside it, so no backups pile up on PATH. It returns the script's path
 // and whether it changed.
 func installStartScript(typ, home, userHome, bin string, root *string, backupDir string, now time.Time) (string, bool, error) {
@@ -220,6 +247,10 @@ func installStartScript(typ, home, userHome, bin string, root *string, backupDir
 	} else if raw, _ := currentRepoRoot(path); raw != "" {
 		repoRoot = raw
 	}
-	changed, err := replaceFileBackupIn(path, renderStartScript(typ, home, userHome, repoRoot), 0o755, backupDir, now)
+	defaultArgs := currentDefaultArgs(path)
+	if defaultArgs == "" {
+		defaultArgs = "''"
+	}
+	changed, err := replaceFileBackupIn(path, renderStartScript(typ, home, userHome, repoRoot, defaultArgs), 0o755, backupDir, now)
 	return path, changed, err
 }

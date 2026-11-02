@@ -47,7 +47,7 @@ test: ## Run the tests (all are local; none need Slack tokens or network)
 	$(GO) test -count=1 -race ./...
 
 .PHONY: install
-install: ## Set up agent chat on this Mac (prerequisites, build, link, interactive setup)
+install: ## Set up agent chat on this machine (prerequisites, build, link, interactive setup)
 	./install.sh
 
 .PHONY: uninstall

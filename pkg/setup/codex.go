@@ -155,7 +155,7 @@ func withCodexRule(text, rule, bin string) string {
 }
 
 // InstallCodex installs the skill, hooks, rule, notify cleanup (asked) and
-// MCP registration, plus the app-server launch agent, in a Codex home. The env file is written separately.
+// MCP registration, plus the app-server service, in a Codex home. The env file is written separately.
 func InstallCodex(home, userHome, bin string, r Runner, p Prompter, now time.Time) (Result, error) {
 	res := Result{Home: home}
 	cfgPath := filepath.Join(home, "config.toml")

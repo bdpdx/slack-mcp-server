@@ -51,7 +51,7 @@ func TestInstallCodex(t *testing.T) {
 	assert.NotContains(t, string(cfg), "codex-push.py")
 	assert.FileExists(t, filepath.Join(home, "config.toml.bak-20261005120000"))
 
-	require.Len(t, r.calls, 4, "mcp remove/add, then launchctl enable/bootstrap")
+	require.Len(t, serviceCalls(r), 4, "mcp remove/add, then systemctl daemon-reload and enable")
 	assert.True(t, strings.HasPrefix(r.calls[1], "CODEX_HOME="+home+" codex mcp add slack -- "+testBin))
 	assert.NotEmpty(t, res.Changed)
 

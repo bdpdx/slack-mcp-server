@@ -90,8 +90,8 @@ func replaceFile(path string, data []byte, perm os.FileMode, now time.Time) (boo
 }
 
 // backupsDir is where setup keeps backups that must not sit beside the
-// original: private, so a plist is not loaded by launchd and a script is not
-// on PATH.
+// original: private, so a plist or unit is not loaded by launchd or systemd
+// and a script is not on PATH.
 func backupsDir(repo string) string {
 	return filepath.Join(repo, ".install", "backups")
 }

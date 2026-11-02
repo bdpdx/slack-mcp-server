@@ -5,7 +5,7 @@ This project was forked from [korotovsky/slack-mcp-server](https://github.com/ko
 - **Slack agent chat.** Claude Code and Codex agents talk to each other, and to you, in private Slack channels. Slack messages are pushed into the running sessions, so agents never poll. Agents can also send you their questions, permission prompts and end-of-turn summaries in Slack.
 - **A Slack MCP server.** It gives each agent tools to read and post in Slack: history, threads, search, posting, files, user groups and more.
 
-macOS only. You build it from source; no packages, images or release binaries are published. `./install.sh` sets everything up.
+macOS, or Debian Linux with systemd. You build it from source; no packages, images or release binaries are published. `./install.sh` sets everything up.
 
 ## How agent chat works
 
@@ -78,7 +78,9 @@ cd slack-mcp-server
 
 `install.sh`:
 
-1. **Prerequisites.** It checks for Apple's Command Line Tools and starts their installer if they're missing. It also checks for the Go version `go.mod` asks for, and offers to install or upgrade Go with Homebrew.
+1. **Prerequisites.** It also checks for the Go version `go.mod` asks for.
+   - **macOS:** it checks for Apple's Command Line Tools and starts their installer if they're missing, and offers to install or upgrade Go with Homebrew.
+   - **Debian:** it checks for `git`, `make`, `curl` and `tar` and offers to install any that are missing with `apt-get`. Debian's `golang` package is too old, so it offers to install the latest official release in `~/.local/go`, verifying its checksum. `install.sh` and `uninstall.sh` find that Go on their own; add `~/.local/go/bin` to your `PATH` to run `make` yourself. `make test` also needs `gcc`, for the race detector.
 2. **Build.** It runs `make build`, which produces `build/slack-mcp-server`.
 3. **Install.** It asks where to install the binary. The default is the path from your last install, or `~/.local/bin/slack-mcp-server`. The answer must be a path. It copies `build/slack-mcp-server` there, and [`slackmcpctl`](#slackmcpctl) next to it, rather than linking into the checkout. It only replaces an earlier install of the same file, including a symlink left by older versions of the installer. Each copy is written to a temporary file and renamed into place, so processes still running the old binary keep running.
 4. **Setup.** It runs the interactive `slack-mcp-server setup`. Setup lists the homes saved from earlier runs and lets you add, remove or re-path homes before it starts. It doesn't look for the default `~/.claude` and `~/.codex`: adding one warns that using the default home isn't recommended (every session started without `CLAUDE_CONFIG_DIR` or `CODEX_HOME` would run as that agent) and asks you to confirm, defaulting to no. Then for each home:
@@ -90,7 +92,7 @@ cd slack-mcp-server
      - allows `slack-mcp-server chat` commands in `rules/default.rules`;
      - lets Slack MCP tools run without approval (`default_tools_approval_mode = "approve"`);
      - offers to remove a `codex-push.py` notify, which turn-end DMs replace.
-   - **Codex app-server.** Each Codex home also needs a running app-server. Setup creates, enables and starts a launchd agent, `~/Library/LaunchAgents/com.openai.<home dir without the dot>.app-server.plist`. The agent runs `~/.local/libexec/codex-app-server-supervisor <codex>`, where `<codex>` is the `codex` found on `PATH` when the plist is written. Setup also replaces the supervisor if it differs from the current one. If a plist already exists, setup checks it and offers to start it if it isn't running.
+   - **Codex app-server.** Each Codex home also needs a running app-server. Setup creates, enables and starts a service: on macOS a launchd agent, `~/Library/LaunchAgents/com.openai.<home dir without the dot>.app-server.plist`, and on Debian a systemd user service, `~/.config/systemd/user/com.openai.<home dir without the dot>.app-server.service`. The service runs `~/.local/libexec/codex-app-server-supervisor <codex>`, where `<codex>` is the `codex` found on `PATH` when the service file is written, and logs to `<home>/app-server-daemon/`. Setup also replaces the supervisor if it differs from the current one. If a service file already exists, setup checks it and offers to start it if it isn't running. On Debian, setup enables lingering for your user (`loginctl enable-linger`), because systemd otherwise stops user services when you log out; if it isn't allowed to, it tells you the `sudo` command to run.
    - **Start script.** Each home also gets a start script beside the binary, named after the home's folder (`start-codex`, `start-codex-work`, `start-claude`, `start-claude-b`, …):
 
      ```bash
@@ -98,7 +100,7 @@ cd slack-mcp-server
      start-claude-b [--repo-root <dir>] [claude args...]
      ```
 
-     The Codex script runs `codex --remote unix://` against the home's app-server; `-m daybreak` is short for `gpt-daybreak-blue-latest`. The Claude Code script sets `CLAUDE_CONFIG_DIR` to the home (and unsets it for the default `~/.claude`, which Claude Code reads without it) and runs `claude`. Both `cd` to the repo directory first: `--repo-root`, else `REPO_ROOT` set in the script, else the current directory. For a new script, setup asks whether to set a default `REPO_ROOT` (default yes) and for the directory, which must exist; on later runs it shows the current value and asks whether to change it (`none` clears it). `--repo-root` has no short form, so it never takes one of the agent's own flags: every other argument goes to the agent unchanged, and `--` passes everything after it. Re-running the installer keeps the `REPO_ROOT` in the script, including one you edited by hand, unless you change it there. A script from before `REPO_ROOT` was renamed from `PROJECT_ROOT` keeps its value.
+     The Codex script runs `codex --remote unix://` against the home's app-server; `-m daybreak` is short for `gpt-daybreak-blue-latest`. The Claude Code script sets `CLAUDE_CONFIG_DIR` to the home (and unsets it for the default `~/.claude`, which Claude Code reads without it) and runs `claude`. Both `cd` to the repo directory first: `--repo-root`, else `REPO_ROOT` set in the script, else the current directory. For a new script, setup asks whether to set a default `REPO_ROOT` (default yes) and for the directory, which must exist; on later runs it shows the current value and asks whether to change it (`none` clears it). `--repo-root` has no short form, so it never takes one of the agent's own flags: every other argument goes to the agent unchanged, and `--` passes everything after it. To pass arguments on every start, set `CLAUDE_ARGS` or `CODEX_ARGS` in the script, written as you would type them, for example `CLAUDE_ARGS='--foo bar --baz "two words"'`. They come before any arguments on the command line, and after `--remote`, `-C` and `-m` for Codex. Re-running the installer keeps these arguments, and the `REPO_ROOT` in the script, including one you edited by hand, unless you change it there. A script from before `REPO_ROOT` was renamed from `PROJECT_ROOT` keeps its value.
 
 A home that already has an env file offers **Update** (keep tokens, refresh everything else), **Reinstall** (new bot and tokens) or **Skip**. Re-running `./install.sh` is safe:
 
@@ -138,34 +140,34 @@ If a home's folder no longer exists, it skips the files and still cleans up what
 
 It also asks, defaulting to **yes**, whether to:
 
-- remove the app-server launch agent (Codex homes only; other processes might be using it);
+- remove the app-server service (Codex homes only; other processes might be using it);
 - delete the home's start script.
 
-Backups of the launch agent and start script go to `.install/backups`.
+Backups of the plist or unit file and start script go to `.install/backups`. On Debian, lingering stays on, since other services may rely on it; `loginctl disable-linger` turns it off.
 
 When no installed home is left, it offers to remove the installed binary and the `slackmcpctl` next to it. The summary reminds you to delete the Slack apps you no longer need at https://api.slack.com/apps.
 
 ## slackmcpctl
 
-`slackmcpctl` controls the Codex app-server launch agents and the `slack-mcp-server` processes of each home:
+`slackmcpctl` controls the Codex app-server services (launchd agents on macOS, systemd user services on Debian) and the `slack-mcp-server` processes of each home:
 
 ```bash
-slackmcpctl restart   [--killmcp] [all | NAME...]  # stop the agents, kill their leftover app-server processes, start them
-slackmcpctl pause     [--killmcp] [all | NAME...]  # stop the agents and keep them stopped, across logins too
-slackmcpctl resume    [all | NAME...]              # start paused agents
-slackmcpctl uninstall [--killmcp] [all | NAME...]  # stop the agents and delete their plists
+slackmcpctl restart   [--killmcp] [all | NAME...]  # stop the services, kill their leftover app-server processes, start them
+slackmcpctl pause     [--killmcp] [all | NAME...]  # stop the services and keep them stopped, across restarts too
+slackmcpctl resume    [all | NAME...]              # start paused services
+slackmcpctl uninstall [--killmcp] [all | NAME...]  # stop the services and delete their plists or unit files
 slackmcpctl killmcp   [all | NAME...]              # kill the homes' slack-mcp-server processes
 slackmcpctl status    [all | NAME...]              # show what's running for each home
 ```
 
-`NAME` is a home's folder name without the leading dot. For example, `codex-f1` stands for `~/.codex-f1`, whose agent is `com.openai.codex-f1.app-server`. Wildcards work if you quote them, so `'codex*'` matches every Codex home and `'claude*'` every Claude home. Claude homes have no launch agent, so they only match `slack-mcp-server` processes.
+`NAME` is a home's folder name without the leading dot. For example, `codex-f1` stands for `~/.codex-f1`, whose service is `com.openai.codex-f1.app-server`. Wildcards work if you quote them, so `'codex*'` matches every Codex home and `'claude*'` every Claude home. Claude homes have no service, so they only match `slack-mcp-server` processes.
 
 A process belongs to a home when it was started with `--env-file <home>/slack-mcp-server.env`. That includes the listener and each session's MCP server. After `killmcp`, reconnect a Claude Code session's MCP server with `/mcp`. `--killmcp` combines `killmcp` with `restart`, `pause` or `uninstall` for the same homes.
 
-`all` covers every launch agent, plus every home with app-server processes running even if it has no launch agent (for `resume`, launch agents only). With `killmcp` or `--killmcp`, it also covers every `slack-mcp-server` process started with an env file. For a home without a launch agent, `restart`, `pause` and `uninstall` only kill its app-server processes, and nothing starts them again. With no names, `slackmcpctl` lists the candidates in alphabetical order with their state and asks which to use. Answer with numbers separated by commas; ranges like `2-4` also work.
+`all` covers every service, plus every home with app-server processes running even if it has no service (for `resume`, services only). With `killmcp` or `--killmcp`, it also covers every `slack-mcp-server` process started with an env file. For a home without a service, `restart`, `pause` and `uninstall` only kill its app-server processes, and nothing starts them again. With no names, `slackmcpctl` lists the candidates in alphabetical order with their state and asks which to use. Answer with numbers separated by commas; ranges like `2-4` also work.
 
 `status` changes nothing and doesn't ask; with no names it shows every home. For each home it lists:
-- the launch agent's state (running, stopped, paused or not loaded) and its supervisor PID;
+- the service's state (running, stopped, paused or not loaded) and its supervisor PID;
 - each app-server process (daemon, app-server, code-mode host) with its release and uptime;
 - each `slack-mcp-server` process with what it is (listener, MCP server, a hook or `setup`), its uptime, and the process that started it.
 
@@ -173,13 +175,13 @@ A process belongs to a home when it was started with `--env-file <home>/slack-mc
 
 ```
 codex-f1
-  launch agent     com.openai.codex-f1.app-server: running (supervisor pid 23137)
+  service          com.openai.codex-f1.app-server: running (supervisor pid 23137)
   app-server       pid 23180  0.163.0, up 01:45
   daemon           pid 23215  0.163.0, up 01:44
   slack-mcp-server pid 23639  MCP server (stdio), up 00:47, parent 23180 (codex app-server)
 ```
 
-`restart` stops every selected agent before starting any. Stopping an agent unloads it and then kills any of its home's app-server processes still running: SIGTERM first, then SIGKILL for any still alive after 5 seconds.
+`restart` stops every selected service before starting any. Stopping a service then kills any of its home's app-server processes still running: SIGTERM first, then SIGKILL for any still alive after 5 seconds.
 
 ## Using it
 

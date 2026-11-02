@@ -86,7 +86,7 @@ trust new hooks in the next session.
   agent's bot DMs you its final response. Turns started by Slack messages, background work or
   subagents send nothing. This replaces a Codex `notify` push notification.
 
-Codex needs a running app-server to receive Slack messages, so for each Codex home the installer also sets up a launchd agent `~/Library/LaunchAgents/com.openai.<dir>.app-server.plist` (for `~/.codex-test`, `com.openai.codex-test.app-server`). A missing agent is created, enabled and started; an existing one is verified and, if it is not running, you are asked whether to start it.
+Codex needs a running app-server to receive Slack messages, so for each Codex home the installer also sets up a service: a launchd agent `~/Library/LaunchAgents/com.openai.<dir>.app-server.plist` on macOS, or a systemd user service `~/.config/systemd/user/com.openai.<dir>.app-server.service` on Debian (for `~/.codex-test`, `com.openai.codex-test.app-server`). A missing service is created, enabled and started; an existing one is verified and, if it is not running, you are asked whether to start it. On Debian the installer also enables lingering for your user (`loginctl enable-linger`), so the service runs without anyone logged in.
 
 
 ## Use

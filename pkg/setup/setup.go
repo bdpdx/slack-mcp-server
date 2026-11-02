@@ -24,7 +24,7 @@ type Options struct {
 	V                   Validator
 	R                   Runner
 	Now                 func() time.Time
-	// Clipboard copies text for the user (pbcopy); nil means don't offer.
+	// Clipboard copies text for the user; nil means don't offer.
 	Clipboard func([]byte) error
 }
 
@@ -728,7 +728,7 @@ func Main(args []string) int {
 	results, err := Run(context.Background(), Options{
 		Repo: *repo, Bin: linkPath, UserHome: user,
 		P: NewTerminal(os.Stdin, os.Stdout), V: SlackValidator{}, R: ExecRunner{}, Now: time.Now,
-		Clipboard: pbcopy,
+		Clipboard: clipboard(hostOS, os.Getenv, exec.LookPath),
 	})
 	printSummary(os.Stdout, linkPath, results, errors.Is(err, ErrAborted))
 	code := 0
@@ -748,15 +748,34 @@ func Main(args []string) int {
 	return code
 }
 
-// printSummary reports each home, then the remaining manual steps when at
-// least one home was set up and setup was not aborted.
-// pbcopy puts data on the macOS clipboard.
-func pbcopy(data []byte) error {
-	cmd := exec.Command("pbcopy")
-	cmd.Stdin = bytes.NewReader(data)
-	return cmd.Run()
+// clipboard returns a function that copies to the desktop clipboard, or nil
+// when there is no display to own one (a server over SSH) or no tool for it.
+func clipboard(goos string, getenv func(string) string, lookPath func(string) (string, error)) func([]byte) error {
+	var tools [][]string
+	if goos == "darwin" {
+		tools = append(tools, []string{"pbcopy"})
+	}
+	if getenv("WAYLAND_DISPLAY") != "" {
+		tools = append(tools, []string{"wl-copy"})
+	}
+	if getenv("DISPLAY") != "" {
+		tools = append(tools, []string{"xclip", "-selection", "clipboard"}, []string{"xsel", "--clipboard", "--input"})
+	}
+	for _, tool := range tools {
+		if _, err := lookPath(tool[0]); err != nil {
+			continue
+		}
+		return func(data []byte) error {
+			cmd := exec.Command(tool[0], tool[1:]...)
+			cmd.Stdin = bytes.NewReader(data)
+			return cmd.Run()
+		}
+	}
+	return nil
 }
 
+// printSummary reports each home, then the remaining manual steps when at
+// least one home was set up and setup was not aborted.
 func printSummary(w io.Writer, bin string, results []Result, aborted bool) {
 	fmt.Fprintln(w, "\nSummary")
 	if real, err := filepath.EvalSymlinks(bin); err == nil && real != bin {

@@ -33,7 +33,7 @@ func runStartIn(t *testing.T, cwd, repoRoot string, args ...string) (string, err
 	fake := "#!/bin/bash\necho \"cwd=$(pwd -P) home=$CODEX_HOME root=$REPO_ROOT\"\nfor a in \"$@\"; do echo \"arg=$a\"; done\n"
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "codex"), []byte(fake), 0o755))
 	script := filepath.Join(bin, "start-codex-test")
-	require.NoError(t, os.WriteFile(script, renderStartScript(TypeCodex, "/u/.codex-test", "/u", repoRoot), 0o755))
+	require.NoError(t, os.WriteFile(script, renderStartScript(TypeCodex, "/u/.codex-test", "/u", repoRoot, "''"), 0o755))
 	cmd := exec.Command("/bin/bash", append([]string{script}, args...)...)
 	cmd.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin")
 	cmd.Dir = cwd
@@ -137,7 +137,7 @@ func runClaudeStart(t *testing.T, cwd, repoRoot string, args ...string) (string,
 	fake := "#!/bin/bash\necho \"cwd=$(pwd -P) config=$CLAUDE_CONFIG_DIR root=$REPO_ROOT\"\nfor a in \"$@\"; do echo \"arg=$a\"; done\n"
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "claude"), []byte(fake), 0o755))
 	script := filepath.Join(bin, "start-claude-b")
-	require.NoError(t, os.WriteFile(script, renderStartScript(TypeClaude, "/u/.claude-b", "/u", repoRoot), 0o755))
+	require.NoError(t, os.WriteFile(script, renderStartScript(TypeClaude, "/u/.claude-b", "/u", repoRoot, "''"), 0o755))
 	cmd := exec.Command("/bin/bash", append([]string{script}, args...)...)
 	cmd.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin")
 	cmd.Dir = cwd
@@ -190,7 +190,7 @@ func TestInstallClaudeStartScriptKeepsRepoRoot(t *testing.T) {
 
 // The default home runs claude without CLAUDE_CONFIG_DIR, even one inherited.
 func TestClaudeStartScriptDefaultHomeUnsetsConfigDir(t *testing.T) {
-	script := renderStartScript(TypeClaude, "/u/.claude", "/u", "''")
+	script := renderStartScript(TypeClaude, "/u/.claude", "/u", "''", "''")
 	assert.Contains(t, string(script), "unset CLAUDE_CONFIG_DIR")
 	assert.NotContains(t, string(script), "export CLAUDE_CONFIG_DIR")
 
@@ -230,4 +230,79 @@ func TestInstallStartScriptCarriesOverProjectRoot(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	assert.Contains(t, string(data), "export REPO_ROOT='/old/repo'\n")
 	assert.NotContains(t, string(data), "PROJECT_ROOT")
+}
+
+// runDefaultArgs runs a home's script with defaultArgs set and returns the
+// arguments the fake agent received.
+func runDefaultArgs(t *testing.T, typ, defaultArgs string, args ...string) []string {
+	t.Helper()
+	name, home := "codex", "/u/.codex-test"
+	if typ == TypeClaude {
+		name, home = "claude", "/u/.claude-b"
+	}
+	bin := t.TempDir()
+	fake := "#!/bin/bash\nfor a in \"$@\"; do echo \"$a\"; done\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bin, name), []byte(fake), 0o755))
+	script := filepath.Join(bin, "start")
+	require.NoError(t, os.WriteFile(script, renderStartScript(typ, home, "/u", "''", defaultArgs), 0o755))
+	cmd := exec.Command("/bin/bash", append([]string{script}, args...)...)
+	cmd.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin", "CLAUDE_ARGS=--inherited", "CODEX_ARGS=--inherited")
+	cmd.Dir = bin
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+}
+
+func TestStartScriptDefaultArgs(t *testing.T) {
+	got := runDefaultArgs(t, TypeClaude, `'--foo bar --baz "two words"'`, "--last", "wins")
+	assert.Equal(t, []string{"--foo", "bar", "--baz", "two words", "--last", "wins"}, got,
+		"quotes group words, and command-line arguments come last")
+
+	got = runDefaultArgs(t, TypeCodex, `'--foo bar'`, "-m", "daybreak", "resume")
+	assert.Equal(t, []string{"--foo", "bar", "resume"}, got[6:], "after -m, before the rest")
+
+	got = runDefaultArgs(t, TypeCodex, `'--foo bar'`, "resume")
+	assert.Equal(t, []string{"--foo", "bar", "resume"}, got[4:])
+
+	assert.Equal(t, []string{"x"}, runDefaultArgs(t, TypeClaude, "''", "x"), "none set, nothing added, nothing inherited")
+}
+
+func TestInstallStartScriptKeepsDefaultArgs(t *testing.T) {
+	for _, tc := range []struct{ typ, home, name string }{
+		{TypeClaude, "/u/.claude-b", "CLAUDE_ARGS"},
+		{TypeCodex, "/u/.codex-test", "CODEX_ARGS"},
+	} {
+		for _, val := range []string{
+			`'--foo bar --baz "two words"'`,
+			`"--model $MODEL"`,
+			`'it'\''s --x'`,
+			"'--foo\n  --bar'",
+		} {
+			bin := filepath.Join(t.TempDir(), "bin", "slack-mcp-server")
+			path, _, err := installStartScript(tc.typ, tc.home, "/u", bin, nil, "", testNow)
+			require.NoError(t, err)
+			data, _ := os.ReadFile(path)
+			assert.Contains(t, string(data), tc.name+"=''\n", "new scripts have the variable, empty")
+			edited := strings.Replace(string(data), tc.name+"=''", tc.name+"="+val, 1)
+			require.NoError(t, os.WriteFile(path, []byte(edited), 0o755))
+
+			_, changed, err := installStartScript(tc.typ, tc.home, "/u", bin, nil, "", testNow)
+			require.NoError(t, err)
+			assert.False(t, changed, val)
+			data, _ = os.ReadFile(path)
+			assert.Equal(t, edited, string(data))
+		}
+	}
+}
+
+// A script from before the variable existed gets it, empty.
+func TestInstallStartScriptAddsDefaultArgs(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "bin", "slack-mcp-server")
+	path := startScriptPath(bin, "/u/.claude-b")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/bash\nexport REPO_ROOT='/r'\n"), 0o755))
+	_, _, err := installStartScript(TypeClaude, "/u/.claude-b", "/u", bin, nil, "", testNow)
+	require.NoError(t, err)
+	data, _ := os.ReadFile(path)
+	assert.Contains(t, string(data), "export REPO_ROOT='/r'\nCLAUDE_ARGS=''\n")
 }

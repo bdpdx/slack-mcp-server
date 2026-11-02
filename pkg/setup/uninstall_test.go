@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -104,12 +103,11 @@ func (e *unEnv) codexHome(t *testing.T, dir string) string {
 	return home
 }
 
-func (e *unEnv) launchAgent(t *testing.T, home string) (plist, target string) {
-	label := appServerLabel(home)
-	plist = filepath.Join(e.user, "Library", "LaunchAgents", label+".plist")
-	require.NoError(t, os.MkdirAll(filepath.Dir(plist), 0o755))
-	require.NoError(t, os.WriteFile(plist, []byte("<plist/>"), 0o644))
-	return plist, "gui/" + strconv.Itoa(os.Getuid()) + "/" + label
+func (e *unEnv) appServerUnit(t *testing.T, home string) (path, unit string) {
+	path = appServerUnitPath(e.user, home)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("[Service]\n"), 0o644))
+	return path, appServerUnitName(home)
 }
 
 func (e *unEnv) startScript(t *testing.T, home string) string {
@@ -220,7 +218,7 @@ func TestUninstallInvalidSettingsRefused(t *testing.T) {
 func TestUninstallCodexYes(t *testing.T) {
 	e := newUnEnv(t)
 	home := e.codexHome(t, ".codex-test")
-	plist, target := e.launchAgent(t, home)
+	unitPath, unit := e.appServerUnit(t, home)
 	script := e.startScript(t, home)
 	e.state(t, HomeState{Path: home, Type: TypeCodex})
 	e.answer("y", "y", "y", "y")
@@ -236,13 +234,14 @@ func TestUninstallCodexYes(t *testing.T) {
 	assert.NotContains(t, string(rules), `"chat"`)
 
 	assert.Contains(t, e.r.calls, "CODEX_HOME="+home+" codex mcp remove slack")
-	assert.Contains(t, e.r.calls, "launchctl bootout "+target)
-	assert.False(t, exists(plist))
+	assert.Contains(t, e.r.calls, "systemctl --user disable --now "+unit)
+	assert.Contains(t, e.r.calls, "systemctl --user daemon-reload")
+	assert.False(t, exists(unitPath))
 	assert.False(t, exists(script))
-	// backups go to the repo, not where launchd or PATH would find them
-	assert.Empty(t, baks(t, plist), "no backup in LaunchAgents")
+	// backups go to the repo, not where systemd or PATH would find them
+	assert.Empty(t, baks(t, unitPath), "no backup among the units")
 	assert.Empty(t, baks(t, script), "no backup next to the script")
-	for _, orig := range []string{plist, script} {
+	for _, orig := range []string{unitPath, script} {
 		m := baks(t, filepath.Join(e.repo, ".install", "backups", filepath.Base(orig)))
 		require.Len(t, m, 1)
 		info, err := os.Stat(m[0])
@@ -257,39 +256,39 @@ func TestUninstallCodexYes(t *testing.T) {
 func TestUninstallCodexNoKeepsAgentAndScript(t *testing.T) {
 	e := newUnEnv(t)
 	home := e.codexHome(t, ".codex-test")
-	plist, _ := e.launchAgent(t, home)
+	unitPath, _ := e.appServerUnit(t, home)
 	script := e.startScript(t, home)
 	e.state(t, HomeState{Path: home, Type: TypeCodex})
 	e.answer("y", "n", "n", "n")
 	e.run(t)
-	assert.True(t, exists(plist))
+	assert.True(t, exists(unitPath))
 	assert.True(t, exists(script))
 	for _, c := range e.r.calls {
-		assert.NotContains(t, c, "bootout")
+		assert.NotContains(t, c, "disable")
 	}
 }
 
-func TestUninstallCodexAgentNotLoadedNoPlistIsSilent(t *testing.T) {
+func TestUninstallCodexServiceInactiveNoUnitIsSilent(t *testing.T) {
 	e := newUnEnv(t)
 	home := e.codexHome(t, ".codex-test")
-	e.r.scripts = map[string]fakeResult{"launchctl print": {err: errors.New("not loaded")}}
+	e.r.scripts = map[string]fakeResult{"systemctl --user is-active": {out: "inactive", err: errors.New("exit 3")}}
 	e.state(t, HomeState{Path: home, Type: TypeCodex})
 	e.answer("y", "n") // home, link
 	res := e.run(t)
 	assert.Contains(t, e.p.Out.String(), "Uninstall slack-mcp-server from")
-	assert.NotContains(t, e.p.Out.String(), "launch agent")
-	assert.NotContains(t, strings.Join(res[0].Notes, "\n"), "launch agent")
+	assert.NotContains(t, e.p.Out.String(), "app-server service")
+	assert.NotContains(t, strings.Join(res[0].Notes, "\n"), "app-server service")
 }
 
-func TestUninstallBootoutNotLoadedIgnored(t *testing.T) {
+func TestUninstallDisableUnknownUnitIgnored(t *testing.T) {
 	e := newUnEnv(t)
 	home := e.codexHome(t, ".codex-test")
-	plist, _ := e.launchAgent(t, home)
-	e.r.scripts = map[string]fakeResult{"launchctl bootout": {out: "Boot-out failed: 3: No such process", err: errors.New("exit 3")}}
+	unitPath, _ := e.appServerUnit(t, home)
+	e.r.scripts = map[string]fakeResult{"systemctl --user disable": {out: "Failed to disable unit: Unit file x.service does not exist.", err: errors.New("exit 1")}}
 	e.state(t, HomeState{Path: home, Type: TypeCodex})
 	e.answer("y", "y", "n", "n")
 	res := e.run(t)
-	assert.False(t, exists(plist))
+	assert.False(t, exists(unitPath))
 	assert.NotContains(t, strings.Join(res[0].Notes, "\n"), "FAILED")
 }
 
@@ -309,15 +308,15 @@ func TestUninstallCodexConfigApproveLine(t *testing.T) {
 func TestUninstallMissingHomeFolder(t *testing.T) {
 	e := newUnEnv(t)
 	home := filepath.Join(e.user, ".codex-test") // never created
-	plist, target := e.launchAgent(t, home)
+	unitPath, unit := e.appServerUnit(t, home)
 	script := e.startScript(t, home)
 	e.state(t, HomeState{Path: home, Type: TypeCodex})
 	e.answer("y", "y", "y", "n")
 	res := e.run(t)
 
 	assert.Contains(t, e.p.Out.String(), "(folder missing)")
-	assert.Equal(t, []string{"launchctl bootout " + target}, e.r.calls, "no codex mcp remove")
-	assert.False(t, exists(plist))
+	assert.Equal(t, []string{"systemctl --user disable --now " + unit, "systemctl --user daemon-reload"}, e.r.calls, "no codex mcp remove")
+	assert.False(t, exists(unitPath))
 	assert.False(t, exists(script))
 	assert.False(t, exists(home), "home not recreated")
 	assert.Contains(t, strings.Join(res[0].Notes, "\n"), "folder missing")

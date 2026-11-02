@@ -23,9 +23,9 @@ type unHome struct {
 	missing bool // the folder is gone; only outside-home pieces remain
 }
 
-// notLoadedRe matches launchctl's complaints about an agent that is not
-// loaded, which uninstall treats as already done.
-var notLoadedRe = regexp.MustCompile(`(?i)not loaded|no such process|could not find|not found`)
+// notLoadedRe matches launchctl's and systemctl's complaints about a service
+// they don't know, which uninstall treats as already done.
+var notLoadedRe = regexp.MustCompile(`(?i)not loaded|no such process|could not find|not found|does not exist`)
 
 // looksInstalled reports whether a standard home holds our env file or hooks.
 func looksInstalled(path string) bool {
@@ -260,6 +260,48 @@ func (u *uninstaller) env(h Home) {
 	}
 }
 
+func (u *uninstaller) appServerUnit(h Home) error {
+	label := appServerLabel(h.Path)
+	unit := appServerUnitName(h.Path)
+	path := appServerUnitPath(u.o.UserHome, h.Path)
+	hasUnit := exists(path)
+	if !hasUnit {
+		if _, err := systemctl(u.o.R, "is-active", unit); err != nil {
+			return nil // not running and no unit file: nothing to do
+		}
+	}
+	yes, err := u.o.P.Confirm(fmt.Sprintf("Uninstall the app-server service %s? Other processes might be using it.", label), true)
+	if err != nil || !yes {
+		if err == nil {
+			u.note("app-server service %s kept", label)
+		}
+		return err
+	}
+	if out, err := systemctl(u.o.R, "disable", "--now", unit); err != nil && !notLoadedRe.MatchString(out+err.Error()) {
+		u.fail("app-server service", fmt.Errorf("systemctl --user disable --now %s failed: %v: %s", unit, err, strings.TrimSpace(out)))
+		return nil
+	}
+	u.removed("app-server service " + label)
+	if hasUnit {
+		if err := u.removeAway(path); err != nil {
+			u.fail("app-server unit", err)
+			return nil
+		}
+		if out, err := systemctl(u.o.R, "daemon-reload"); err != nil {
+			u.note("systemctl --user daemon-reload reported: %s", strings.TrimSpace(out+" "+err.Error()))
+		}
+	}
+	return nil
+}
+
+// appServer removes the home's app-server service.
+func (u *uninstaller) appServer(h Home) error {
+	if hostOS == "darwin" {
+		return u.launchAgent(h)
+	}
+	return u.appServerUnit(h)
+}
+
 func (u *uninstaller) launchAgent(h Home) error {
 	label := appServerLabel(h.Path)
 	plist := filepath.Join(u.o.UserHome, "Library", "LaunchAgents", label+".plist")
@@ -332,7 +374,7 @@ func (u *uninstaller) uninstallHome(h unHome) error {
 		u.env(h.Home)
 	}
 	if h.Type == TypeCodex {
-		if err := u.launchAgent(h.Home); err != nil {
+		if err := u.appServer(h.Home); err != nil {
 			return err
 		}
 	}
