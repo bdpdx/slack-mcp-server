@@ -343,6 +343,9 @@ func TestUnitLimitByExpression_Valid(t *testing.T) {
 	twoMonthSpan := int64(now.Sub(twoMonthsAgo).Seconds())
 
 	const tolerance = 86400
+	// Spans start at a local midnight, so a daylight saving change inside one
+	// makes it an hour longer or shorter than its days of 86400 seconds.
+	const dstShift = 3600
 
 	tests := []struct {
 		name    string
@@ -383,7 +386,7 @@ func TestUnitLimitByExpression_Valid(t *testing.T) {
 				t.Errorf("for %q expected latest(%d) > oldest(%d)", tt.input, l, o)
 			}
 			diff := l - o
-			if diff < tt.minSecs || diff >= tt.maxSecs {
+			if diff < tt.minSecs-dstShift || diff >= tt.maxSecs+dstShift {
 				t.Errorf(
 					"for %q expected span in [%d, %d), got %d",
 					tt.input, tt.minSecs, tt.maxSecs, diff,
