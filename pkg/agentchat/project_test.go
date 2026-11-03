@@ -3,6 +3,8 @@ package agentchat
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/slack-go/slack"
@@ -97,4 +99,19 @@ func TestListenerDropsArchivedChannels(t *testing.T) {
 	l.HandleMessage(context.Background(), Message{Channel: "C2", TS: "2001.1", User: "UBR", SubType: "group_archive"})
 	require.Len(t, l.Status(), 1)
 	assert.Equal(t, []string{"C1"}, l.Status()[0].Channels)
+}
+
+func TestStartupReminder(t *testing.T) {
+	root := t.TempDir()
+	assert.Empty(t, startupReminder(root, "p1", false), "no README")
+
+	readme := filepath.Join(root, "README.md")
+	require.NoError(t, os.WriteFile(readme, []byte("# State\n\n## Other\n"), 0o644))
+	assert.Empty(t, startupReminder(root, "p1", false), "README without a startup list")
+
+	require.NoError(t, os.WriteFile(readme, []byte("# State\n\n## Agent startup\n\n1. Fetch.\n"), 0o644))
+	got := startupReminder(root, "p1", false)
+	assert.Contains(t, got, readme)
+	assert.Contains(t, got, "chat cohort register --project p1")
+	assert.Empty(t, startupReminder(root, "p1", true), "already registered")
 }
