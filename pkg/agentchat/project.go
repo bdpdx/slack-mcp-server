@@ -5,6 +5,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/slack-go/slack"
@@ -164,7 +166,56 @@ func (c *cli) projectJoin(ctx context.Context, args []string) error {
 	}
 	// The backlog is the project channel's: the direct and side channels
 	// start with nothing.
-	return c.subscribe(ctx, c.projectWatch(ctx, me, id, name), *backlog, id)
+	if err := c.subscribe(ctx, c.projectWatch(ctx, me, id, name), *backlog, id); err != nil {
+		return err
+	}
+	c.remindStartup(ctx, name)
+	return nil
+}
+
+// remindStartup tells a joining agent, on stderr, to run the project-state
+// startup list when this session is not yet registered in the project's
+// cohort. The channel join alone is only one step of that list, and agents
+// whose home does not mention it skipped the rest (2026-11-03). Best effort:
+// without a project-state checkout above the working directory it says nothing.
+func (c *cli) remindStartup(ctx context.Context, project string) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	root, err := projectStateRoot(wd)
+	if err != nil {
+		return
+	}
+	registered := false
+	if sub, err := detectSession(os.Getenv); err == nil {
+		resp, err := SendControl(ctx, c.home.ControlSocket, ControlRequest{Op: "cohort-status", Cohort: &CohortReg{Project: project}})
+		if err == nil {
+			for _, r := range resp.Cohort {
+				if r.Project == project && r.SessionID == sub.SessionID {
+					registered = true
+				}
+			}
+		}
+	}
+	if note := startupReminder(root, project, registered); note != "" {
+		fmt.Fprintf(c.stderr, "slack-agent-chat: %s\n", note)
+	}
+}
+
+// startupReminder is the reminder for a session joining project from the
+// project-state checkout root, or "" when root has no startup list or the
+// session is already registered.
+func startupReminder(root, project string, registered bool) string {
+	if registered {
+		return ""
+	}
+	readme := filepath.Join(root, "README.md")
+	b, err := os.ReadFile(readme)
+	if err != nil || !strings.Contains(string(b), "\n## Agent startup") {
+		return ""
+	}
+	return fmt.Sprintf("joining the channel is only one step: run the whole \"Agent startup\" list in %s, including `chat cohort register --project %s`, before posting your online line", readme, project)
 }
 
 // projectWatch returns the channels a session watches for project (whose
