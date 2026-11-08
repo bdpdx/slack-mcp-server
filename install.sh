@@ -237,6 +237,12 @@ while true; do
 		say "$files_dir exists and is not a folder; choose another path"
 		continue
 	fi
+	# Create it now, private to this user as the MCP server keeps it, so a
+	# path that can't be used is caught here rather than when a session starts.
+	if ! { mkdir -p "$files_dir" && chmod 0700 "$files_dir"; } 2>/dev/null; then
+		say "could not create $files_dir or make it private; choose another path"
+		continue
+	fi
 	break
 done
 
