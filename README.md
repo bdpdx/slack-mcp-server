@@ -83,11 +83,12 @@ cd slack-mcp-server
    - **Debian:** it checks for `git`, `make`, `curl` and `tar` and offers to install any that are missing with `apt-get`. Debian's `golang` package is too old, so it offers to install the latest official release in `~/.local/go`, verifying its checksum. `install.sh` and `uninstall.sh` find that Go on their own; add `~/.local/go/bin` to your `PATH` to run `make` yourself. `make test` also needs `gcc`, for the race detector.
 2. **Build.** It runs `make build`, which produces `build/slack-mcp-server`.
 3. **Install.** It asks where to install the binary. The default is the path from your last install, or `~/.local/bin/slack-mcp-server`. The answer must be a path. It copies `build/slack-mcp-server` there, and [`slackmcpctl`](#slackmcpctl) next to it, rather than linking into the checkout. It only replaces an earlier install of the same file, including a symlink left by older versions of the installer. Each copy is written to a temporary file and renamed into place, so processes still running the old binary keep running.
-4. **Setup.** It runs the interactive `slack-mcp-server setup`. Setup lists the homes saved from earlier runs and lets you add, remove or re-path homes before it starts. It doesn't look for the default `~/.claude` and `~/.codex`: adding one warns that using the default home isn't recommended (every session started without `CLAUDE_CONFIG_DIR` or `CODEX_HOME` would run as that agent) and asks you to confirm, defaulting to no. Then for each home:
+4. **Files folder.** It asks which folder agents use for Slack downloads and uploads: `attachment_get_data save=true` saves into it, and `files_upload path=` reads only from it. The default is the folder from your last install, or `~/Downloads/slack-mcp`. On a server without a desktop, a folder such as `~/slack-files` may suit better. It refuses your home directory or any folder containing it, because uploads may come from anywhere inside the folder. The MCP server creates the folder if it's missing and makes it private to you (mode 0700), including a folder that already exists. Setup writes the answer as `SLACK_MCP_FILES_DIR` to the env file of each home it installs or updates.
+5. **Setup.** It runs the interactive `slack-mcp-server setup`. Setup lists the homes saved from earlier runs and lets you add, remove or re-path homes before it starts. It doesn't look for the default `~/.claude` and `~/.codex`: adding one warns that using the default home isn't recommended (every session started without `CLAUDE_CONFIG_DIR` or `CODEX_HOME` would run as that agent) and asks you to confirm, defaulting to no. Then for each home:
    - **Bot name.** It asks for a bot name (see [Naming rules](#naming-rules)).
    - **Manifest.** It writes a Slack app manifest to `.install/manifests/<bot>.json` and offers to copy it to the clipboard. It tells you how to create a new app from the manifest, or update an existing app, and how to install it to the workspace.
    - **Tokens.** It asks for the app-level (`xapp-`), bot (`xoxb-`) and user (`xoxp-`) tokens, says where to find each, and checks them with Slack.
-   - **Env file.** It writes `<home>/slack-mcp-server.env` (mode 0600) with the tokens and permissive tool defaults. It doesn't ask about tools; edit the file to change them.
+   - **Env file.** It writes `<home>/slack-mcp-server.env` (mode 0600) with the tokens, the files folder and permissive tool defaults. It doesn't ask about tools; edit the file to change them. To give one home a different files folder, edit its `SLACK_MCP_FILES_DIR`; the next `./install.sh` sets it back to the folder you answer there, unless you skip that home.
    - **Agent integration.** It installs the skill and hooks and registers the `slack` MCP server with the host. For Codex, it also:
      - allows `slack-mcp-server chat` commands in `rules/default.rules`;
      - lets Slack MCP tools run without approval (`default_tools_approval_mode = "approve"`);
@@ -108,7 +109,7 @@ A home that already has an env file offers **Update** (keep tokens, refresh ever
 - A config file that isn't valid JSON is left alone.
 - Hooks and rules from an earlier install are replaced, not duplicated.
 
-Setup saves the binary path and homes in `.install-state.json`, which is gitignored. A summary at the end lists every change. Restart running Claude Code and Codex sessions after a first install. Codex asks you to trust the new hooks in its next session.
+Setup saves the binary path, files folder and homes in `.install-state.json`, which is gitignored. A summary at the end lists every change. Restart running Claude Code and Codex sessions after a first install. Codex asks you to trust the new hooks in its next session.
 
 ### Upgrading
 
@@ -211,7 +212,7 @@ Tools that only read are always on. Tools that change something are each gated b
 | `reactions_add`, `reactions_remove`, `conversations_open`, `conversations_create`, `conversations_mark` | off |
 | `conversations_delete_message`, `conversations_invite_shared` | off |
 
-File transfers go only through `~/Downloads/slack-mcp` (`SLACK_MCP_FILES_DIR`). Downloads and uploads are limited to 64 MiB, and inline content to 1 MiB.
+File transfers go only through the files folder that `install.sh` asks for (`SLACK_MCP_FILES_DIR`, default `~/Downloads/slack-mcp`). Downloads and uploads are limited to 64 MiB, and inline content to 1 MiB.
 
 The server also provides two resources, `slack://<workspace>/channels` and `slack://<workspace>/users`, which are CSV directories of channels and users.
 

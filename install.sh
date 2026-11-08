@@ -200,5 +200,45 @@ else
 	say "Installed $ctl"
 fi
 
-# 5. Interactive setup.
-exec "$bin" setup --repo "$repo" --bin "$bin"
+# 5. The files folder: the one folder Slack downloads are saved into and
+# uploads are read from. Setup writes it to each home's env file as
+# SLACK_MCP_FILES_DIR.
+default_files=""
+if [ -f "$state" ]; then
+	default_files="$(sed -n 's/.*"files_dir": *"\([^"]*\)".*/\1/p' "$state" | head -n1)"
+fi
+if [ -z "$default_files" ]; then
+	default_files="$HOME/Downloads/slack-mcp"
+fi
+while true; do
+	printf '\nWhich folder should agents use for Slack downloads and uploads?\nPress Enter for %s: ' "$default_files"
+	read -r files_dir
+	case "$files_dir" in
+		"") files_dir="$default_files" ;;
+		"~") files_dir="$HOME" ;;
+		"~"/*) files_dir="$HOME/${files_dir#\~/}" ;;
+	esac
+	case "$files_dir" in
+		/*) ;;
+		*) files_dir="$start_dir/$files_dir" ;; # relative to where install.sh was run
+	esac
+	while [ "$files_dir" != / ] && [ "${files_dir%/}" != "$files_dir" ]; do
+		files_dir="${files_dir%/}"
+	done
+	# Uploads may come from anywhere inside it, so it must not hold the home directory.
+	under="${files_dir%/}/"
+	case "$HOME/" in
+		"$under"*)
+			say "$files_dir contains your home directory; choose a folder of its own, such as ~/slack-files"
+			continue
+			;;
+	esac
+	if [ -e "$files_dir" ] && [ ! -d "$files_dir" ]; then
+		say "$files_dir exists and is not a folder; choose another path"
+		continue
+	fi
+	break
+done
+
+# 6. Interactive setup.
+exec "$bin" setup --repo "$repo" --bin "$bin" --files-dir "$files_dir"

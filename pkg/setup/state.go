@@ -9,8 +9,9 @@ import (
 // State remembers answers between runs to offer them as defaults. It never
 // holds tokens.
 type State struct {
-	Bin   string      `json:"bin"`
-	Homes []HomeState `json:"homes"`
+	Bin      string      `json:"bin"`
+	FilesDir string      `json:"files_dir,omitempty"` // SLACK_MCP_FILES_DIR, from install.sh
+	Homes    []HomeState `json:"homes"`
 }
 
 // HomeState is one configured agent home.

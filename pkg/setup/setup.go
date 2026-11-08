@@ -15,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/bdpdx/slack-mcp-server/pkg/filesdir"
 )
 
 // Options configures Run.
@@ -26,6 +28,9 @@ type Options struct {
 	Now                 func() time.Time
 	// Clipboard copies text for the user; nil means don't offer.
 	Clipboard func([]byte) error
+	// FilesDir is the absolute files folder (SLACK_MCP_FILES_DIR) to write
+	// into each home's env file; "" leaves the homes' settings alone.
+	FilesDir string
 }
 
 const (
@@ -51,6 +56,9 @@ func Run(ctx context.Context, o Options) ([]Result, error) {
 		return nil, err
 	}
 	st.Bin = o.Bin
+	if o.FilesDir != "" {
+		st.FilesDir = o.FilesDir
+	}
 	homes, err := chooseHomes(o, st)
 	if err != nil {
 		return nil, err
@@ -284,6 +292,10 @@ func processHome(ctx context.Context, o Options, st *State, h Home) (Result, boo
 		}
 		bot, notes = name, n
 	}
+	filesChanged, err := setFilesDir(o, h)
+	if err != nil {
+		return Result{Home: h.Path}, false, err
+	}
 	root, err := askRepoRoot(o, h)
 	if err != nil {
 		return Result{Home: h.Path}, false, err
@@ -305,6 +317,10 @@ func processHome(ctx context.Context, o Options, st *State, h Home) (Result, boo
 		if name == "hooks.json" && !bytes.Equal(was, after[name]) {
 			res.Hooks = true // Codex asks to trust hooks whose file changed at all
 		}
+	}
+	if filesChanged {
+		res.Changed = append(res.Changed, EnvPath(h.Path)+" (SLACK_MCP_FILES_DIR)")
+		res.Stale = true // its sessions' MCP server still uses the old folder
 	}
 	res.Notes = append(res.Notes, notes...)
 	if err != nil {
@@ -441,6 +457,57 @@ func configureEnv(ctx context.Context, o Options, h Home, saved string) (string,
 		return "", nil, err
 	}
 	return name, []string{fmt.Sprintf(iconMsgFmt, name, name)}, nil
+}
+
+// setFilesDir sets the home's SLACK_MCP_FILES_DIR to o.FilesDir, keeping
+// every other setting. It reports whether the folder the home's MCP server
+// uses changed: writing the default value into a file that had none does not
+// change it.
+func setFilesDir(o Options, h Home) (bool, error) {
+	if o.FilesDir == "" {
+		return false, nil
+	}
+	envPath := EnvPath(h.Path)
+	existing, err := ReadEnv(envPath)
+	if err != nil {
+		return false, err
+	}
+	if existing[filesdir.EnvVar] == o.FilesDir {
+		return false, nil
+	}
+	before, err := filesdir.Path(func(string) string { return existing[filesdir.EnvVar] })
+	if err != nil {
+		return false, err
+	}
+	existing[filesdir.EnvVar] = o.FilesDir
+	data, err := RenderEnv(existing)
+	if err != nil {
+		return false, err
+	}
+	if _, err := replaceFile(envPath, data, 0o600, o.Now()); err != nil {
+		return false, err
+	}
+	return before != o.FilesDir, nil
+}
+
+// filesDirFlag makes the --files-dir value absolute. The folder is the only
+// one uploads may come from, so it must not be the home directory or one
+// that contains it.
+func filesDirFlag(dir, userHome string) (string, error) {
+	if strings.TrimSpace(dir) == "" {
+		return "", nil
+	}
+	abs, err := ExpandPath(dir, userHome)
+	if err != nil {
+		return "", err
+	}
+	if rel, err := filepath.Rel(abs, userHome); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("--files-dir %s would let uploads come from anywhere in %s; choose a folder of its own", abs, userHome)
+	}
+	if info, err := os.Stat(abs); err == nil && !info.IsDir() {
+		return "", fmt.Errorf("--files-dir %s exists and is not a folder", abs)
+	}
+	return abs, nil
 }
 
 // reportTools says which tool settings were written: permissive defaults
@@ -703,6 +770,7 @@ func Main(args []string) int {
 	repo := fs.String("repo", ".", "repository directory (for the state file and manifests)")
 	bin := fs.String("bin", "", "absolute path the binary is installed at")
 	printBin := fs.Bool("print-existing-bin", false, "print the binary path already used by installed hooks, then exit")
+	filesDir := fs.String("files-dir", "", "folder for Slack downloads and uploads, written to each home's env file as SLACK_MCP_FILES_DIR (default: leave each home's setting)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -725,8 +793,13 @@ func Main(args []string) int {
 		fmt.Fprintln(os.Stderr, "setup:", err)
 		return 1
 	}
+	files, err := filesDirFlag(*filesDir, user)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "setup:", err)
+		return 2
+	}
 	results, err := Run(context.Background(), Options{
-		Repo: *repo, Bin: linkPath, UserHome: user,
+		Repo: *repo, Bin: linkPath, UserHome: user, FilesDir: files,
 		P: NewTerminal(os.Stdin, os.Stdout), V: SlackValidator{}, R: ExecRunner{}, Now: time.Now,
 		Clipboard: clipboard(hostOS, os.Getenv, exec.LookPath),
 	})
