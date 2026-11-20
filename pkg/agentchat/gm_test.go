@@ -261,3 +261,34 @@ func TestCohortListenerSeesRemoteClaimBeforePull(t *testing.T) {
 		assert.NotContains(t, g.text, "[cohort]", "the watch on the old GM was retired by the remote claim")
 	}
 }
+
+// A repository that requires signed commits (commit.gpgsign, for example
+// through an includeIf section) gets a signed gm.json commit; commit-tree
+// alone would ignore the setting.
+func TestGMClaimSignsWhenConfigured(t *testing.T) {
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Skip("ssh-keygen not available")
+	}
+	remote, clones := gmRepo(t, 1)
+	key := filepath.Join(t.TempDir(), "signing")
+	out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "t@t", "-f", key).CombinedOutput()
+	require.NoError(t, err, string(out))
+	gitT(t, clones[0], "config", "gpg.format", "ssh")
+	gitT(t, clones[0], "config", "user.signingkey", key)
+	gitT(t, clones[0], "config", "commit.gpgsign", "true")
+
+	res, err := newClaimer(clones[0], "codex-b").Claim(context.Background(), 0, "claude", "t")
+	require.NoError(t, err)
+	require.Equal(t, ClaimWon, res.Outcome)
+	raw := gitT(t, remote, "cat-file", "-p", "main")
+	assert.Contains(t, raw, "gpgsig ", "gm.json commit must carry a signature")
+}
+
+func TestGMClaimUnsignedByDefault(t *testing.T) {
+	remote, clones := gmRepo(t, 1)
+	gitT(t, clones[0], "config", "commit.gpgsign", "false")
+	res, err := newClaimer(clones[0], "codex-b").Claim(context.Background(), 0, "claude", "t")
+	require.NoError(t, err)
+	require.Equal(t, ClaimWon, res.Outcome)
+	assert.NotContains(t, gitT(t, remote, "cat-file", "-p", "main"), "gpgsig ")
+}
