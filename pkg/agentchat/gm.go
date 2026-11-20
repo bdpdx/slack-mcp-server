@@ -157,7 +157,20 @@ func (a *GMAuthority) commitState(ctx context.Context, parent string, st GMState
 	if err != nil {
 		return "", err
 	}
-	return a.git(ctx, env, nil, "commit-tree", tree, "-p", parent, "-m", msg)
+	args := []string{"commit-tree", tree, "-p", parent, "-m", msg}
+	if a.signCommits(ctx) {
+		// commit-tree is plumbing: it never reads commit.gpgsign itself, so a
+		// repository that requires signed commits would refuse the push.
+		args = append(args, "-S")
+	}
+	return a.git(ctx, env, nil, args...)
+}
+
+// signCommits reports whether the checkout's effective configuration (which
+// includes includeIf sections) asks for signed commits.
+func (a *GMAuthority) signCommits(ctx context.Context) bool {
+	v, err := a.git(ctx, nil, nil, "config", "--type=bool", "--get", "commit.gpgsign")
+	return err == nil && v == "true"
 }
 
 // push publishes commit as main without force.
